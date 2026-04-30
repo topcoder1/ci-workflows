@@ -33,9 +33,12 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Auto-merge patch (and optionally minor) bumps
+        # Skip github-actions ecosystem — those run in CI with GITHUB_TOKEN and
+        # warrant manual review (supply chain risk).
         if: |
-          steps.meta.outputs.update-type == 'version-update:semver-patch'
-          || (inputs.allow_minor && steps.meta.outputs.update-type == 'version-update:semver-minor')
+          steps.meta.outputs.package-ecosystem != 'github_actions'
+          && (steps.meta.outputs.update-type == 'version-update:semver-patch'
+              || (inputs.allow_minor && steps.meta.outputs.update-type == 'version-update:semver-minor'))
         run: gh pr merge --auto --${{ inputs.merge_method }} "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
