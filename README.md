@@ -36,6 +36,24 @@ See [`callers/pr-review.yml`](https://github.com/topcoder1/ci-workflows/blob/mai
 
 The script reads `ANTHROPIC_API_KEY` from env, falling back to 1Password (`op://Private/ANTHROPIC_PR_REVIEW_KEY/credential`).
 
+It installs both `pr-review.yml` and `dependabot-auto-merge.yml` callers, sets workflow perms to write, enables auto-merge on the repo, and creates a branch ruleset.
+
+## Bootstrap a `dependabot.yml` across the fleet
+
+The auto-merge workflow only fires on Dependabot PRs — and Dependabot only opens PRs when a `.github/dependabot.yml` exists in the target repo. Use this script to add a baseline config (ecosystems auto-detected) to repos that don't have one yet:
+
+```bash
+# Dry-run (default): print what would be added per repo
+~/.claude/templates/ci-workflows/scripts/bootstrap-dependabot-config.sh \
+  topcoder1/foo whois-api-llc/bar
+
+# Apply: open a PR per repo with auto-merge armed
+~/.claude/templates/ci-workflows/scripts/bootstrap-dependabot-config.sh --apply \
+  --from-list repos.txt
+```
+
+Detection (any matching marker file → ecosystem enabled): `package.json` → npm; `pyproject.toml` / `requirements*.txt` / `setup.py` / `Pipfile` → pip; `go.mod` → gomod; `Cargo.toml` → cargo; `Gemfile` → bundler; `composer.json` → composer; `Dockerfile*` → docker; any `.github/workflows/*.yml` → github-actions. Cadence is weekly; minor + patch updates are grouped per ecosystem; PR cap is 5 per ecosystem.
+
 ## Rotate the API key fleet-wide
 
 ```bash
