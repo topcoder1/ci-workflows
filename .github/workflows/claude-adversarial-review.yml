@@ -1,0 +1,80 @@
+name: Claude Adversarial Review (reusable)
+
+# Second-pass Claude review focused specifically on regression scenarios.
+# Same model as claude-review.yml but a tighter prompt — three axes only:
+#   1. TEST COVERAGE: tests that would break given the diff; missing coverage
+#   2. STATE MUTATIONS: new mutations not asserted by tests
+#   3. CONTRACT DRIFT: comment/JSDoc inconsistency with diff behavior
+#
+# Caller workflows wire this in conditionally (typically risk:sensitive only).
+# See auto-merge design plan §B1+B3 and impl plan §7.
+
+on:
+  workflow_call:
+    inputs:
+      checkout_depth:
+        description: 'git fetch-depth. 0 = full history (needed for diff against base).'
+        required: false
+        type: number
+        default: 0
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  adversarial-review:
+    name: Claude Adversarial Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: ${{ inputs.checkout_depth }}
+
+      - name: Adversarial pass
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            This is the SECOND review pass. The first pass already covered general
+            bug-hunting. Your job is narrower: find REGRESSIONS that the first
+            pass might have missed.
+
+            Specifically check three axes ONLY:
+
+            1. TEST COVERAGE: Find a test that would break given this diff. If
+               none exists, name what's missing — be specific:
+               "no test exercises the new error path in `policyCheck` line 78".
+               If the diff adds a new function, find the call sites and check
+               whether each is exercised by an existing test.
+
+            2. STATE MUTATIONS: Identify any place this diff mutates state
+               (sets a field, pushes to an array, writes to a Map, increments
+               a counter). For each, find the test that asserts the post-state.
+               If you can't find one, flag it.
+
+            3. CONTRACT DRIFT: For each function whose body changed, read the
+               JSDoc / comment block above it. If the diff's behavior now
+               differs from what the comment promises, flag it. Example:
+               comment says "returns null on miss" but diff now throws.
+
+            Output format — exactly one of:
+              "no regressions found"
+              "regression: <file:line> — <one sentence>"
+              "regression: <file:line> — <one sentence>; regression: ..."
+
+            Post the result as a single PR comment via:
+              gh pr comment <PR_NUMBER> --body "..."
+
+            Do NOT post inline comments. Do NOT do general bug-hunting. The
+            first pass already did that — your value is the regression axes.
+          claude_args: |
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"

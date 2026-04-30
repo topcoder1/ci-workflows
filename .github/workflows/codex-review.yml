@@ -1,0 +1,113 @@
+name: Codex Review (reusable)
+
+# Runs OpenAI Codex CLI as a third-party reviewer. Independent failure
+# modes from Claude (different vendor). Used on risk:sensitive PRs only
+# (see caller's classifier gating).
+#
+# CLI: https://github.com/openai/codex (codex-cli npm package)
+# Auth: Codex defaults to ChatGPT subscription auth. This workflow forces
+# API-key mode via `codex login --with-api-key` before each run.
+#
+# Smoke-tested locally 2026-04-30 against codex-cli 0.128.0:
+#   - codex review with prompt-only invocation works (~1:23 wall-clock)
+#   - --base / --commit / --uncommitted are mutually exclusive with [PROMPT]
+#   - Output streams reasoning then prints final verdict on a `codex\n<verdict>` block
+
+on:
+  workflow_call:
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+
+jobs:
+  codex-review:
+    name: Codex Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout (full history for diff against base)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex@latest
+
+      - name: Authenticate Codex with API key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Codex defaults to ChatGPT subscription auth; force API-key mode
+          # by writing the key to ~/.codex/auth.json via the login command.
+          # Without this, the action fails with `refresh_token_reused` 401s.
+          printenv OPENAI_API_KEY | codex login --with-api-key
+          codex login status
+
+      - name: Run Codex adversarial review
+        id: review
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # Make sure the base ref is fetched so Codex can diff against it.
+          git fetch origin "$BASE_REF" --depth=50
+
+          # Pattern B (prompt-only): Codex picks its own diff target from the
+          # prompt + git state. Faster (~1:20) and produces cleaner output
+          # than the default-prompt mode (~2:00). The prompt instructs Codex
+          # to compare against origin/<base_ref>.
+          PROMPT="Review the changes on this branch against origin/${BASE_REF} for regressions in the PR titled '${PR_TITLE}'.
+
+          Focus on three axes ONLY:
+
+          1. TEST COVERAGE: find a test that would break given this diff. If
+             none exists, name what is missing - be specific (e.g., 'no test
+             exercises the new error path in policyCheck line 78').
+
+          2. STATE MUTATIONS: identify any new state mutation (field set,
+             array push, counter increment, Map write). For each, find the
+             test that asserts the post-state. If you cannot, flag it.
+
+          3. CONTRACT DRIFT: for each function whose body changed, read the
+             JSDoc / comment block above it. If the diff is now inconsistent
+             with the comment, flag it.
+
+          Output format - exactly one of:
+            no regressions found
+            regression: <file:line> - <one sentence>
+            regression: <file:line> - <one>; regression: <file:line> - <two>
+
+          Be brief. Do not perform general bug-hunting; the first pass already did."
+
+          codex review "$PROMPT" 2>&1 | tee /tmp/codex.out
+
+          # Extract verdict: Codex streams reasoning, then prints the literal
+          # token `codex` on its own line followed by the verdict. Grab the
+          # LAST such block.
+          verdict=$(awk '/^codex$/{flag=1; v=""; next} flag{v = (v=="" ? $0 : v ORS $0)} END{print v}' /tmp/codex.out)
+          # Truncate to 4KB for safety
+          if [ -z "$verdict" ]; then
+            verdict="(Codex produced no parseable verdict — see workflow logs)"
+          fi
+          echo "$verdict" | head -c 4096 > /tmp/codex.verdict
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "### Codex review"
+            echo
+            cat /tmp/codex.verdict
+          } > /tmp/comment.md
+          gh pr comment "$PR" --body-file /tmp/comment.md
