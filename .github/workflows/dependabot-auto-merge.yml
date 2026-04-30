@@ -1,0 +1,42 @@
+name: Dependabot Auto-merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      merge_method:
+        description: "Merge method: merge | squash | rebase"
+        required: false
+        type: string
+        default: "squash"
+      allow_minor:
+        description: "Auto-merge minor bumps in addition to patch (default true)."
+        required: false
+        type: boolean
+        default: true
+    # GITHUB_TOKEN is automatically passed to reusable workflows; no need to declare.
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # Job-level permissions: capped by what the CALLER's repo grants via
+    # Settings → Actions → General → Workflow permissions.
+    # If the caller repo defaults to read-only, these will be silently denied.
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Auto-merge patch (and optionally minor) bumps
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch'
+          || (inputs.allow_minor && steps.meta.outputs.update-type == 'version-update:semver-minor')
+        run: gh pr merge --auto --${{ inputs.merge_method }} "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
