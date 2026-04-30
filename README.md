@@ -44,6 +44,7 @@ The script reads `ANTHROPIC_API_KEY` from env, falling back to 1Password (`op://
 
 ## Caveats
 
-- **Target repo must allow workflow writes:** Settings → Actions → General → Workflow permissions → "Read and write permissions"
-- **`gh pr merge --auto` only waits if there are required status checks.** Without a ruleset, it merges immediately. Add a ruleset on each target repo before relying on auto-merge.
+- **Target repo workflow permissions:** must be "Read and write" (Settings → Actions → General). `install-pr-review.sh` auto-flips this; if you wire callers manually, flip it yourself.
+- **`gh pr merge --auto` only waits if there are required status checks.** Without a ruleset, it merges immediately. `install-pr-review.sh` creates a ruleset by default (`--no-ruleset` to skip).
+- **Install PR's `Claude Review` check may fail** with an OIDC "workflow validation" error on PRs that modify the workflow file itself. In practice it often passes; if it fails, merge with admin bypass. Subsequent PRs work normally.
 - **This repo is public** — required for cross-account reusable-workflow calls (e.g. `topcoder1/ci-workflows` → `whois-api-llc/*`). The workflows contain no secrets.
