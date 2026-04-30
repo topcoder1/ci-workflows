@@ -1,0 +1,31 @@
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    # Customize per project — common defaults below.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+# Reusable workflow's job-level permissions are CAPPED by the caller's
+# workflow-level permissions. These must match (or exceed) what the
+# reusable's claude-code-action step needs.
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: topcoder1/ci-workflows/.github/workflows/claude-review.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      # Optional: project-specific focus appended to the base prompt.
+      review_focus: ''
