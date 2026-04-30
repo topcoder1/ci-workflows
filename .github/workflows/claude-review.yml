@@ -51,8 +51,17 @@ jobs:
             - Missing test coverage for new branches
             - Backwards-compat breaks
 
-            Skip nits, style, and "consider"-grade suggestions. Only post comments
-            you're 80%+ sure are real bugs. If the PR looks clean, say so in one line.
+            Skip nits, style, and "consider"-grade suggestions. Use inline comments
+            (mcp__github_inline_comment__create_inline_comment) only for issues
+            you're 80%+ sure are real bugs.
+
+            ALWAYS finish by posting a top-level summary comment via:
+              gh pr comment <PR_NUMBER> --body "..."
+            One short line. Examples:
+              - "No issues found. Diff is small and contained."
+              - "Flagged 2 issues inline — see comments."
+              - "Skipped: changes are docs-only / out of review scope."
+            This summary confirms the review ran even when nothing was flagged.
 
             ${{ inputs.review_focus }}
           claude_args: |
