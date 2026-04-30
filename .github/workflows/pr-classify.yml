@@ -1,0 +1,94 @@
+name: PR Risk Classifier (reusable)
+
+# Reads .github/risk-paths.yml from the caller repo's checkout, classifies
+# the PR's changed files, and exposes the highest-priority class as both a
+# PR label and a job output for downstream workflows to gate on.
+#
+# Priority (high → low):
+#   blocked > sensitive > standard > safe_test > safe_deps > safe_config > trivial
+#
+# Caller wires this in via `uses:` and consumes `outputs.risk_class`.
+# See impl plan §4 for the design rationale.
+
+on:
+  workflow_call:
+    outputs:
+      risk_class:
+        description: "Highest risk class for this PR (blocked|sensitive|standard|safe_test|safe_deps|safe_config|trivial)"
+        value: ${{ jobs.classify.outputs.class }}
+
+jobs:
+  classify:
+    name: Classify PR Risk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      class: ${{ steps.compute.outputs.class }}
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v5
+
+      - name: Verify risk-paths.yml exists
+        run: |
+          if [ ! -f .github/risk-paths.yml ]; then
+            echo "::error::.github/risk-paths.yml is missing — every repo using pr-classify.yml MUST have one. See: https://github.com/topcoder1/ci-workflows/blob/main/README.md#pr-classifier"
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Fetch classifier script from this reusable's repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The caller checked out THEIR repo. We need our classify.mjs script,
+          # which lives in topcoder1/ci-workflows. Pull it via the GitHub API
+          # so we don't pollute the caller's working tree.
+          mkdir -p .github/scripts
+          gh api repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs \
+            --jq '.content' | base64 -d > .github/scripts/classify.mjs
+
+      - name: Install classifier deps
+        run: npm install --no-save yaml@2 minimatch@10
+
+      - name: Compute highest-priority class
+        id: compute
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          changed=$(gh pr diff "$PR" --name-only)
+          class=$(echo "$changed" | node .github/scripts/classify.mjs)
+          echo "class=$class" >> "$GITHUB_OUTPUT"
+          echo "Computed risk class: $class"
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+
+      - name: Set risk label on PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          CLASS: ${{ steps.compute.outputs.class }}
+        run: |
+          # Remove any existing risk:* labels, add the current one.
+          existing=$(gh pr view "$PR" --json labels --jq '.labels[].name' | grep '^risk:' || true)
+          for L in $existing; do
+            if [ "$L" != "risk:$CLASS" ]; then
+              gh pr edit "$PR" --remove-label "$L" 2>/dev/null || true
+            fi
+          done
+          # Create the label if it doesn't exist (idempotent — gh ignores conflict).
+          gh label create "risk:$CLASS" --color "ededed" --description "Risk class: $CLASS" 2>/dev/null || true
+          gh pr edit "$PR" --add-label "risk:$CLASS"
+
+      - name: Block merge for `blocked` class
+        if: steps.compute.outputs.class == 'blocked'
+        run: |
+          echo "::error::This PR touches blocked paths (Dockerfile, compose, workflows, secrets, classifier itself). Auto-merge is refused; manual merge by a maintainer is required."
+          exit 1
