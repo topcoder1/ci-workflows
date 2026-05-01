@@ -39,6 +39,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Allow bot-initiated PRs (dependabot, renovate). Without this the
+          # action rejects all bot actors, turning this required check into a
+          # permanent block on every dep-bump PR.
+          allowed_bots: "dependabot,renovate"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
