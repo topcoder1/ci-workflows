@@ -128,7 +128,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: ${{ hashFiles('**/package-lock.json') != '' && 'npm' || '' }}
+          # `actions/setup-node` looks for the lock file at the repo root unless
+          # `cache-dependency-path` is provided. `**/package-lock.json` matches
+          # subdir lock files (e.g. `frontend/package-lock.json`) and would
+          # cause setup-node to fail with "Dependencies lock file is not found"
+          # when the root has no lock. Restrict to root files only.
+          cache: ${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock') != '' && 'npm' || '' }}
 
       # If the target repo has a prettier config that references plugins
       # (e.g. prettier-plugin-svelte), prettier needs the project's
