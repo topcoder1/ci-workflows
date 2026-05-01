@@ -65,11 +65,12 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    # `inputs` is null for self-test (pull_request trigger) and an object for
-    # workflow_call invocations — that's the only reliable signal that
-    # distinguishes the two contexts (github.event_name in a reusable returns
-    # the caller's event, not 'workflow_call').
-    if: ${{ inputs == null || inputs.run_actionlint }}
+    # Skip-logic for the run_actionlint input. github.event_name returns the
+    # CALLER's event in a reusable workflow (not 'workflow_call'), and the
+    # `inputs` object is `{}` (not null) on non-workflow_call triggers — so
+    # the only reliable check is "input is null OR input is truthy". Null on
+    # self-test (no workflow_call), false only when caller explicitly opts out.
+    if: ${{ inputs.run_actionlint == null || inputs.run_actionlint }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,18 +84,20 @@ jobs:
         # `-shellcheck=` (empty) disables the shellcheck integration. We default
         # to off because info-level shellcheck warnings (SC2086 etc.) are
         # noise on most repos and would block the install PR until every
-        # existing `run:` block is normalized.
+        # existing `run:` block is normalized. inputs.run_shellcheck defaults
+        # to false, but on self-test the inputs object is `{}` (not null
+        # via the schema), so we check for `== true` to opt in explicitly.
         run: |
-          if [ "${{ inputs.run_shellcheck != true && 'true' || 'false' }}" = "true" ]; then
-            ${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=
-          else
+          if [ "${{ inputs.run_shellcheck == true && 'true' || 'false' }}" = "true" ]; then
             ${{ steps.get_actionlint.outputs.executable }} -color
+          else
+            ${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=
           fi
         shell: bash
 
   prettier:
     name: prettier (markdown)
-    if: ${{ inputs == null || inputs.run_prettier }}
+    if: ${{ inputs.run_prettier == null || inputs.run_prettier }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +112,7 @@ jobs:
       # node_modules to resolve them. Run `npm ci` (preferred, exact lockfile)
       # or fall back to `npm install` if no lockfile.
       - name: Install target repo's deps (for prettier plugins)
-        if: ${{ (github.event_name != 'workflow_call' || inputs.install_node_deps) && hashFiles('**/package.json') != '' }}
+        if: ${{ (inputs.install_node_deps == null || inputs.install_node_deps) && hashFiles('**/package.json') != '' }}
         run: |
           if [ -f package-lock.json ]; then
             npm ci --ignore-scripts --no-audit --no-fund
