@@ -65,12 +65,15 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    # Skip-logic for the run_actionlint input. github.event_name returns the
-    # CALLER's event in a reusable workflow (not 'workflow_call'), and the
-    # `inputs` object is `{}` (not null) on non-workflow_call triggers — so
-    # the only reliable check is "input is null OR input is truthy". Null on
-    # self-test (no workflow_call), false only when caller explicitly opts out.
-    if: ${{ inputs.run_actionlint == null || inputs.run_actionlint }}
+    # Skip-logic gotcha: GHA's `==` does loose-numeric coercion, so
+    # `false == null` evaluates TRUE (both coerce to 0). That defeats
+    # the obvious "null OR truthy" check. We instead stringify via format()
+    # and compare against the literal 'false' — null stringifies to '',
+    # so the only path to skipping is an explicit `run_actionlint: false`
+    # from the caller. github.event_name is also unhelpful here: in a
+    # reusable, it returns the caller's event (e.g. 'pull_request'), not
+    # 'workflow_call'.
+    if: ${{ format('{0}', inputs.run_actionlint) != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,14 +84,14 @@ jobs:
         shell: bash
 
       - name: Run actionlint
-        # `-shellcheck=` (empty) disables the shellcheck integration. We default
-        # to off because info-level shellcheck warnings (SC2086 etc.) are
-        # noise on most repos and would block the install PR until every
-        # existing `run:` block is normalized. inputs.run_shellcheck defaults
-        # to false, but on self-test the inputs object is `{}` (not null
-        # via the schema), so we check for `== true` to opt in explicitly.
+        # `-shellcheck=` (empty) disables the shellcheck integration. We
+        # default to off because info-level shellcheck warnings (SC2086
+        # etc.) are noise on most repos and would block the install PR
+        # until every existing `run:` block is normalized. Caller opts in
+        # with `run_shellcheck: true`. Use string comparison via format()
+        # to dodge GHA's loose-numeric-coercion equality gotcha.
         run: |
-          if [ "${{ inputs.run_shellcheck == true && 'true' || 'false' }}" = "true" ]; then
+          if [ "${{ format('{0}', inputs.run_shellcheck) }}" = "true" ]; then
             ${{ steps.get_actionlint.outputs.executable }} -color
           else
             ${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=
@@ -97,7 +100,7 @@ jobs:
 
   prettier:
     name: prettier (markdown)
-    if: ${{ inputs.run_prettier == null || inputs.run_prettier }}
+    if: ${{ format('{0}', inputs.run_prettier) != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,7 +115,7 @@ jobs:
       # node_modules to resolve them. Run `npm ci` (preferred, exact lockfile)
       # or fall back to `npm install` if no lockfile.
       - name: Install target repo's deps (for prettier plugins)
-        if: ${{ (inputs.install_node_deps == null || inputs.install_node_deps) && hashFiles('**/package.json') != '' }}
+        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('**/package.json') != '' }}
         run: |
           if [ -f package-lock.json ]; then
             npm ci --ignore-scripts --no-audit --no-fund
