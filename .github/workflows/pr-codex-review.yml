@@ -1,0 +1,30 @@
+name: PR Codex Review
+
+# OpenAI Codex CLI as a third-party reviewer for vendor diversity.
+# Runs ONLY on risk:sensitive PRs (per .github/risk-paths.yml). Pairs with
+# Claude Review (which runs on every PR via pr-review.yml) to give
+# independent-model coverage on high-impact code paths.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: codex-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    if: github.event.pull_request.draft == false
+    uses: topcoder1/ci-workflows/.github/workflows/pr-classify.yml@main
+
+  review:
+    needs: classify
+    if: needs.classify.outputs.risk_class == 'sensitive'
+    uses: topcoder1/ci-workflows/.github/workflows/codex-review.yml@main
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
