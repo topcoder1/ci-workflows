@@ -1,23 +1,46 @@
 name: Lint
 
-# QA gate for ci-workflows itself.
+# Two roles for this workflow:
 #
-# This repo hosts reusable workflows that other projects pull in via `uses:`.
-# A typo here (bad expression syntax, deprecated runner, undefined `steps.X`
-# output ref, etc.) silently breaks every downstream consumer. So we run
-# actionlint on every PR + every push to main.
+# 1. Self-test: triggers on pull_request + push to main of *this repo* so that
+#    typos in the reusable workflows here get caught before they break every
+#    downstream consumer.
 #
-# Markdown gets a prettier --check pass for the README so docs drift doesn't
-# accumulate.
+# 2. Reusable: other repos can call it via
+#       jobs:
+#         lint:
+#           uses: topcoder1/ci-workflows/.github/workflows/lint.yml@main
+#    See callers/lint.yml in the templates dir for a copy-paste-ready caller.
 #
-# No husky / lint-staged here — this repo has no package.json and pulling in
-# a JS toolchain to format three files isn't worth the dependency footprint.
-# CI-only enforcement is the right call for a YAML+Markdown repo.
+# What it checks:
+#   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs +
+#     embedded shellcheck for `run:` blocks)
+#   - prettier --check on the markdown glob (default **/*.md)
+#
+# Why no husky/lint-staged: this is meant to plug into repos with mixed
+# tooling (or none). CI-only enforcement keeps the dependency surface flat.
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_call:
+    inputs:
+      markdown_glob:
+        description: "Glob passed to prettier --check. Default '**/*.md'."
+        required: false
+        type: string
+        default: "**/*.md"
+      run_actionlint:
+        description: "Run actionlint job. Default true."
+        required: false
+        type: boolean
+        default: true
+      run_prettier:
+        description: "Run prettier --check on markdown. Default true."
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -25,6 +48,7 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
+    if: ${{ github.event_name != 'workflow_call' || inputs.run_actionlint }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +64,7 @@ jobs:
 
   prettier:
     name: prettier (markdown)
+    if: ${{ github.event_name != 'workflow_call' || inputs.run_prettier }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,5 +73,5 @@ jobs:
         with:
           node-version: "20"
 
-      - name: prettier --check **/*.md
-        run: npx --yes prettier@3 --check "**/*.md"
+      - name: prettier --check ${{ inputs.markdown_glob || '**/*.md' }}
+        run: npx --yes prettier@3 --check "${{ inputs.markdown_glob || '**/*.md' }}"
