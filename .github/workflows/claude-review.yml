@@ -35,7 +35,31 @@ jobs:
         with:
           fetch-depth: ${{ inputs.checkout_depth }}
 
+      # Skip claude-code-action for bot-authored PRs (dependabot, renovate).
+      # The action's @v1 currently crashes with "directory mismatch ...
+      # tsconfig.json, fd 4" on dependabot's restricted GITHUB_TOKEN scope —
+      # verified across 3 consecutive dependabot PRs (topcoder1/ci-workflows
+      # #7/#8/#9). Even when the action does run, dependency bumps don't
+      # benefit from Claude review (the diff is upstream version metadata,
+      # not project logic). The risk classifier still labels these PRs.
+      #
+      # We post a "Skipped" summary comment so the required check is satisfied
+      # green — branch rulesets that require `review / Claude Review` would
+      # otherwise treat a skipped job as failing.
+      - name: Skip review for bot-authored PRs (dependabot/renovate)
+        id: bot_check
+        if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          ACTOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR" --body "Skipped: bot-authored PR (\`$ACTOR\`). Dependency bumps are reviewed by the risk classifier and human merge gate."
+          echo "skipped=true" >> "$GITHUB_OUTPUT"
+
       - name: Claude Code Review
+        if: ${{ steps.bot_check.outputs.skipped != 'true' }}
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
