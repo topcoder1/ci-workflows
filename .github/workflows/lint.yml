@@ -13,12 +13,19 @@ name: Lint
 #    See callers/lint.yml in the templates dir for a copy-paste-ready caller.
 #
 # What it checks:
-#   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs +
-#     embedded shellcheck for `run:` blocks)
+#   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs)
 #   - prettier --check on the markdown glob (default **/*.md)
 #
-# Why no husky/lint-staged: this is meant to plug into repos with mixed
-# tooling (or none). CI-only enforcement keeps the dependency surface flat.
+# Defaults chosen for "drop into an existing repo without breaking it":
+#   - actionlint runs WITHOUT shellcheck. Shellcheck integration in actionlint
+#     defaults to severity=info, which surfaces stylistic suggestions
+#     (SC2086 "double quote variables", SC2034 "unused variable", etc.) on
+#     every existing `run:` block in the target repo. New repos rarely need
+#     to fix all of those before they can ship a single PR. Set
+#     `run_shellcheck: true` to opt in once the repo is normalized.
+#   - prettier auto-installs the target repo's deps if a package.json exists,
+#     so prettier plugins (prettier-plugin-svelte etc.) resolve correctly.
+#     Skip with `install_node_deps: false` for plain markdown-only repos.
 
 on:
   pull_request:
@@ -41,6 +48,16 @@ on:
         required: false
         type: boolean
         default: true
+      run_shellcheck:
+        description: "Enable actionlint's shellcheck integration. Default false to avoid info-level style noise on first install."
+        required: false
+        type: boolean
+        default: false
+      install_node_deps:
+        description: "Run `npm ci` before prettier so plugins (prettier-plugin-svelte etc.) resolve. Default true. Skipped automatically when no package.json present."
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -59,7 +76,16 @@ jobs:
         shell: bash
 
       - name: Run actionlint
-        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        # `-shellcheck=` (empty) disables the shellcheck integration. We default
+        # to off because info-level shellcheck warnings (SC2086 etc.) are
+        # noise on most repos and would block the install PR until every
+        # existing `run:` block is normalized.
+        run: |
+          if [ "${{ inputs.run_shellcheck != true && 'true' || 'false' }}" = "true" ]; then
+            ${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=
+          else
+            ${{ steps.get_actionlint.outputs.executable }} -color
+          fi
         shell: bash
 
   prettier:
@@ -72,6 +98,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: ${{ hashFiles('**/package-lock.json') != '' && 'npm' || '' }}
+
+      # If the target repo has a prettier config that references plugins
+      # (e.g. prettier-plugin-svelte), prettier needs the project's
+      # node_modules to resolve them. Run `npm ci` (preferred, exact lockfile)
+      # or fall back to `npm install` if no lockfile.
+      - name: Install target repo's deps (for prettier plugins)
+        if: ${{ (github.event_name != 'workflow_call' || inputs.install_node_deps) && hashFiles('**/package.json') != '' }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund
+          else
+            npm install --ignore-scripts --no-audit --no-fund
+          fi
+        shell: bash
 
       - name: prettier --check ${{ inputs.markdown_glob || '**/*.md' }}
-        run: npx --yes prettier@3 --check "${{ inputs.markdown_glob || '**/*.md' }}"
+        # Use the project's prettier (with its plugins) when node_modules is
+        # populated; otherwise fall back to a one-off prettier@3 install.
+        run: |
+          GLOB="${{ inputs.markdown_glob || '**/*.md' }}"
+          if [ -x node_modules/.bin/prettier ]; then
+            node_modules/.bin/prettier --check "$GLOB"
+          else
+            npx --yes prettier@3 --check "$GLOB"
+          fi
+        shell: bash
