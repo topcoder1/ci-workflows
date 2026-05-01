@@ -15,6 +15,7 @@ name: Lint
 # What it checks:
 #   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs)
 #   - prettier --check on the markdown glob (default **/*.md)
+#   - shellcheck on standalone shell scripts (opt-in, default OFF)
 #
 # Defaults chosen for "drop into an existing repo without breaking it":
 #   - actionlint runs WITHOUT shellcheck. Shellcheck integration in actionlint
@@ -26,6 +27,10 @@ name: Lint
 #   - prettier auto-installs the target repo's deps if a package.json exists,
 #     so prettier plugins (prettier-plugin-svelte etc.) resolve correctly.
 #     Skip with `install_node_deps: false` for plain markdown-only repos.
+#   - shellcheck on .sh files is OFF by default for the same reason as
+#     actionlint's shellcheck: most repos have pre-existing style/info
+#     drift. When opted in, defaults to severity=error so only real bugs
+#     fail the check; tighten with `shellcheck_severity: warning` etc.
 
 on:
   pull_request:
@@ -58,6 +63,21 @@ on:
         required: false
         type: boolean
         default: true
+      run_shellcheck_scripts:
+        description: "Run shellcheck on standalone .sh / .bash files and shebang-shell scripts in the repo. Default false (opt-in)."
+        required: false
+        type: boolean
+        default: false
+      shellcheck_severity:
+        description: "Minimum severity to fail on: error | warning | info | style. Default 'error' so only real bugs fail; bump to 'warning' once style/info drift is normalized."
+        required: false
+        type: string
+        default: "error"
+      shellcheck_paths:
+        description: "Space-separated list of paths to scan, relative to repo root. Default '.' (recurse from root). Override to narrow, e.g. 'scripts bin'."
+        required: false
+        type: string
+        default: "."
 
 permissions:
   contents: read
@@ -134,4 +154,65 @@ jobs:
           else
             npx --yes prettier@3 --check "$GLOB"
           fi
+        shell: bash
+
+  shellcheck:
+    name: shellcheck (scripts)
+    # Opt-in only — most repos have style/info shellcheck drift on existing
+    # scripts that would flood the first install PR. Caller flips
+    # `run_shellcheck_scripts: true` when ready to enforce.
+    if: ${{ format('{0}', inputs.run_shellcheck_scripts) == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        # Ubuntu runners ship with shellcheck preinstalled, so no install
+        # step needed. We collect:
+        #   1. Files matching *.sh / *.bash by name
+        #   2. Extension-less files whose first line is a shell shebang
+        #      (covers bin/* style scripts that are bash but unmarked).
+        # Both lists are filtered to caller-provided paths, then deduped
+        # before passing to shellcheck. Severity defaults to 'error' so
+        # only actual bugs fail; style/info noise stays advisory.
+        run: |
+          set -euo pipefail
+          SEVERITY="${{ inputs.shellcheck_severity || 'error' }}"
+          # shellcheck disable=SC2086
+          read -r -a PATHS <<< "${{ inputs.shellcheck_paths || '.' }}"
+
+          # 1. Collect *.sh / *.bash files.
+          mapfile -t BY_EXT < <(
+            find "${PATHS[@]}" -type f \( -name "*.sh" -o -name "*.bash" \) \
+              -not -path "*/.git/*" \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.husky/_/*" \
+              2>/dev/null | sort -u
+          )
+
+          # 2. Collect extension-less files with a shell shebang.
+          mapfile -t BY_SHEBANG < <(
+            find "${PATHS[@]}" -type f ! -name "*.*" \
+              -not -path "*/.git/*" \
+              -not -path "*/node_modules/*" \
+              2>/dev/null | while IFS= read -r f; do
+                head -c 256 "$f" 2>/dev/null \
+                  | head -1 \
+                  | grep -qE '^#!.*/(env +)?(ba)?sh\b' \
+                  && echo "$f"
+              done | sort -u
+          )
+
+          ALL=("${BY_EXT[@]}" "${BY_SHEBANG[@]}")
+          if [ "${#ALL[@]}" -eq 0 ]; then
+            echo "No shell scripts found under: ${PATHS[*]}"
+            exit 0
+          fi
+
+          # Dedup (in case a *.sh file also matched the shebang scan).
+          mapfile -t UNIQUE < <(printf '%s\n' "${ALL[@]}" | sort -u)
+
+          echo "Checking ${#UNIQUE[@]} script(s) at severity=${SEVERITY}:"
+          printf '  %s\n' "${UNIQUE[@]}"
+          shellcheck -S "$SEVERITY" "${UNIQUE[@]}"
         shell: bash
