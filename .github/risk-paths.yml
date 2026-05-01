@@ -31,18 +31,14 @@ blocked:
   - 'k8s/**'
 
 sensitive:
-  # CUSTOMIZE: paths where bugs cause customer-visible regressions, data
-  # loss, security exposure, or production outage. Examples below — adjust
-  # for the repo's actual layout.
-  #
-  # - 'src/**/api/**'           # public API surface
-  # - 'src/**/db/**'            # schema, models, migrations
-  # - 'migrations/**'
-  # - 'alembic/**'
-  # - 'src/**/auth/**'          # authn / authz
-  # - 'src/**/billing/**'       # payment / pricing
-  # - 'src/**/scanning/**'      # production runners
-  # - 'scripts/rotate_*.py'     # credential rotation
+  # The classifier itself — a bug here breaks gating across the entire fleet.
+  - '.github/scripts/classify.mjs'
+  # Reusable workflows that downstream repos depend on. (workflows are in the
+  # `blocked:` class above so this is mostly belt-and-suspenders, but if
+  # someone moves a file out of .github/workflows/ this catches it.)
+  - '.github/scripts/**'
+  # Installer scripts — same fleet-wide blast radius as classify.mjs
+  - 'scripts/**'
 
 # safe_test: failing tests can't ship; passing tests can't break runtime.
 safe_test:
