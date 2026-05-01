@@ -1,0 +1,52 @@
+name: Lint
+
+# QA gate for ci-workflows itself.
+#
+# This repo hosts reusable workflows that other projects pull in via `uses:`.
+# A typo here (bad expression syntax, deprecated runner, undefined `steps.X`
+# output ref, etc.) silently breaks every downstream consumer. So we run
+# actionlint on every PR + every push to main.
+#
+# Markdown gets a prettier --check pass for the README so docs drift doesn't
+# accumulate.
+#
+# No husky / lint-staged here — this repo has no package.json and pulling in
+# a JS toolchain to format three files isn't worth the dependency footprint.
+# CI-only enforcement is the right call for a YAML+Markdown repo.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download actionlint
+        id: get_actionlint
+        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        shell: bash
+
+      - name: Run actionlint
+        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        shell: bash
+
+  prettier:
+    name: prettier (markdown)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: prettier --check **/*.md
+        run: npx --yes prettier@3 --check "**/*.md"
