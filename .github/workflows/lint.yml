@@ -1,0 +1,77 @@
+name: Lint
+
+# Two roles for this workflow:
+#
+# 1. Self-test: triggers on pull_request + push to main of *this repo* so that
+#    typos in the reusable workflows here get caught before they break every
+#    downstream consumer.
+#
+# 2. Reusable: other repos can call it via
+#       jobs:
+#         lint:
+#           uses: topcoder1/ci-workflows/.github/workflows/lint.yml@main
+#    See callers/lint.yml in the templates dir for a copy-paste-ready caller.
+#
+# What it checks:
+#   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs +
+#     embedded shellcheck for `run:` blocks)
+#   - prettier --check on the markdown glob (default **/*.md)
+#
+# Why no husky/lint-staged: this is meant to plug into repos with mixed
+# tooling (or none). CI-only enforcement keeps the dependency surface flat.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      markdown_glob:
+        description: "Glob passed to prettier --check. Default '**/*.md'."
+        required: false
+        type: string
+        default: "**/*.md"
+      run_actionlint:
+        description: "Run actionlint job. Default true."
+        required: false
+        type: boolean
+        default: true
+      run_prettier:
+        description: "Run prettier --check on markdown. Default true."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    if: ${{ github.event_name != 'workflow_call' || inputs.run_actionlint }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download actionlint
+        id: get_actionlint
+        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        shell: bash
+
+      - name: Run actionlint
+        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        shell: bash
+
+  prettier:
+    name: prettier (markdown)
+    if: ${{ github.event_name != 'workflow_call' || inputs.run_prettier }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: prettier --check ${{ inputs.markdown_glob || '**/*.md' }}
+        run: npx --yes prettier@3 --check "${{ inputs.markdown_glob || '**/*.md' }}"

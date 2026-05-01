@@ -9,6 +9,7 @@ Reusable GitHub Actions workflows for solo-dev fleet management.
 Runs Anthropic's [`claude-code-action@v1`](https://github.com/anthropics/claude-code-action) on PRs to post inline review comments. Caller passes `ANTHROPIC_API_KEY` as a secret.
 
 **Inputs:**
+
 - `review_focus` (string, optional) — appended to the base review prompt for project-specific guidance
 - `checkout_depth` (number, default `0`) — git fetch-depth (0 = full history)
 
@@ -19,6 +20,7 @@ Runs Anthropic's [`claude-code-action@v1`](https://github.com/anthropics/claude-
 Auto-merges Dependabot PRs for patch (and optionally minor) version bumps once required checks pass.
 
 **Inputs:**
+
 - `merge_method` (string, default `squash`) — `merge` | `squash` | `rebase`
 - `allow_minor` (bool, default `true`) — also merge minor bumps
 
