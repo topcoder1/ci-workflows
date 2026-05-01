@@ -65,7 +65,11 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    if: ${{ github.event_name != 'workflow_call' || inputs.run_actionlint }}
+    # `inputs` is null for self-test (pull_request trigger) and an object for
+    # workflow_call invocations — that's the only reliable signal that
+    # distinguishes the two contexts (github.event_name in a reusable returns
+    # the caller's event, not 'workflow_call').
+    if: ${{ inputs == null || inputs.run_actionlint }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,7 +94,7 @@ jobs:
 
   prettier:
     name: prettier (markdown)
-    if: ${{ github.event_name != 'workflow_call' || inputs.run_prettier }}
+    if: ${{ inputs == null || inputs.run_prettier }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
