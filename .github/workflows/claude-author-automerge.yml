@@ -1,0 +1,188 @@
+name: Claude-author Auto-merge (reusable)
+
+# Auto-enables `gh pr merge --auto --squash` on PRs authored by Claude
+# (detected via branch prefix `claude/*`, `Co-Authored-By: Claude` trailer in
+# any PR commit, or the `auto-merge` label), provided the PR doesn't touch
+# any risk-tier path category from the user's global CLAUDE.md policy:
+#
+#   - auth / login / session / oauth / sso
+#   - secrets / env files / keychain / credentials
+#   - DB migrations / SQL files
+#   - billing / payment / pricing / invoice
+#   - production infra (Dockerfile, .github/workflows, infra/, terraform/,
+#     pulumi/, deploy scripts)
+#
+# Customer-copy diffs (legal / marketing wording) are NOT mechanically
+# detected — Claude Review handles that semantically and blocks via the
+# required check.
+#
+# This workflow does NOT bypass branch protection. It only enables GitHub's
+# "auto-merge" toggle, which still waits for required checks (Claude Review)
+# to pass and required reviews to land before merging.
+
+on:
+  workflow_call:
+    inputs:
+      merge_method:
+        description: "Merge method: merge | squash | rebase"
+        required: false
+        type: string
+        default: "squash"
+      override_label:
+        description: "Label that forces auto-merge regardless of detection (default 'auto-merge')."
+        required: false
+        type: string
+        default: "auto-merge"
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Detect Claude authorship
+        id: detect
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OVERRIDE_LABEL: ${{ inputs.override_label }}
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          claude=0
+          reason=""
+
+          # 1. Branch prefix
+          case "$BRANCH" in
+            claude/*) claude=1; reason="branch=$BRANCH";;
+          esac
+
+          # 2. Co-Authored-By trailer in any PR commit
+          if [ "$claude" -eq 0 ]; then
+            if git log --format=%B "$BASE_SHA..$HEAD_SHA" | grep -qiE '^Co-Authored-By:\s*Claude'; then
+              claude=1
+              reason="trailer"
+            fi
+          fi
+
+          # 3. Override label
+          if [ "$claude" -eq 0 ]; then
+            if echo "$LABELS_JSON" | jq -e --arg L "$OVERRIDE_LABEL" '.[] | select(.name == $L)' >/dev/null 2>&1; then
+              claude=1
+              reason="label=$OVERRIDE_LABEL"
+            fi
+          fi
+
+          echo "claude_authored=$claude" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "Detection: claude_authored=$claude reason=$reason"
+
+      - name: Check risk-tier paths
+        id: risk
+        if: steps.detect.outputs.claude_authored == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          changed=$(gh pr diff "$PR" --name-only)
+          # Risk-tier glob patterns (kept in sync with global CLAUDE.md policy).
+          # If you add a category, also update install-automerge-policy.sh and
+          # the CLAUDE.md policy block.
+          patterns='^(.*/)?(auth|login|session|oauth|sso)(/|$)
+          ^(.*/)?secrets(/|$)
+          ^(.*/)?\.env($|\..*)
+          ^(.*/)?keychain.*
+          ^(.*/)?credentials.*
+          ^(.*/)?migrations(/|$)
+          .*\.sql$
+          ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?)(/|$)
+          (^|/)Dockerfile(\..*)?$
+          ^\.github/workflows/.*
+          ^infra/.*
+          ^terraform/.*
+          ^pulumi/.*
+          (^|/)deploy.*\.(sh|ya?ml)$'
+
+          matched=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            while IFS= read -r p; do
+              p="${p#"${p%%[![:space:]]*}"}"
+              [ -z "$p" ] && continue
+              if echo "$f" | grep -Eq "$p"; then
+                matched="$matched$f (matched: $p)\n"
+                break
+              fi
+            done <<< "$patterns"
+          done <<< "$changed"
+
+          if [ -n "$matched" ]; then
+            {
+              echo "risky=1"
+              echo "matched<<EOF"
+              printf "%b" "$matched"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Risk-tier match — auto-merge blocked:"
+            printf "%b" "$matched"
+          else
+            echo "risky=0" >> "$GITHUB_OUTPUT"
+            echo "No risk-tier paths matched."
+          fi
+
+      - name: Enable auto-merge
+        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          METHOD: ${{ inputs.merge_method }}
+          REASON: ${{ steps.detect.outputs.reason }}
+        run: |
+          set -euo pipefail
+          echo "Enabling auto-merge ($METHOD) — detection: $REASON"
+          gh pr merge --auto --"$METHOD" "$PR_URL"
+
+      - name: Comment + skip when risky
+        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          MATCHED: ${{ steps.risk.outputs.matched }}
+        run: |
+          set -euo pipefail
+          marker="<!-- claude-author-automerge:risk-tier -->"
+          existing=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+          {
+            echo "$marker"
+            echo "**Auto-merge blocked — risk-tier paths touched.**"
+            echo ""
+            echo "This Claude-authored PR modifies files matching the risk-tier patterns"
+            echo "defined in the global CLAUDE.md policy (auth / secrets / migrations /"
+            echo "billing / production infra). Manual click-merge required."
+            echo ""
+            echo "Matched files:"
+            echo '```'
+            printf "%b" "$MATCHED"
+            echo '```'
+            echo ""
+            echo "Override only after review: add the \`auto-merge\` label. The risk-tier check"
+            echo "still runs — override does not bypass it. If a path is misclassified, fix it"
+            echo "in \`topcoder1/ci-workflows/.github/workflows/claude-author-automerge.yml\`."
+          } > /tmp/automerge-comment.md
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "/repos/${{ github.repository }}/issues/comments/$existing" \
+              -f body="$(cat /tmp/automerge-comment.md)" >/dev/null
+          else
+            gh pr comment "$PR" --body-file /tmp/automerge-comment.md
+          fi
