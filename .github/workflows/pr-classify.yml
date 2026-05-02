@@ -88,8 +88,39 @@ jobs:
           gh label create "risk:$CLASS" --color "ededed" --description "Risk class: $CLASS" 2>/dev/null || true
           gh pr edit "$PR" --add-label "risk:$CLASS"
 
-      - name: Block merge for `blocked` class
+      - name: Annotate `blocked` class (manual-merge required)
         if: steps.compute.outputs.class == 'blocked'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
-          echo "::error::This PR touches blocked paths (Dockerfile, compose, workflows, secrets, classifier itself). Auto-merge is refused; manual merge by a maintainer is required."
-          exit 1
+          # IMPORTANT: this step does NOT exit non-zero. The reusable's job
+          # is to *classify*, not to gate. Auto-merge gating happens in
+          # claude-author-automerge.yml which reads the `risk:blocked` label
+          # / risk-tier path regex and refuses to enable auto-merge. Failing
+          # the classify check here would (a) only add visual red without
+          # blocking merge (since required-status-checks rulesets in caller
+          # repos typically don't list this check), and (b) confuse "code
+          # is broken" with "policy says manual merge". Keep them separate.
+          echo "::warning::PR touches blocked paths (Dockerfile, compose, workflows, secrets, classifier itself). Manual merge by a maintainer is expected; auto-merge will be refused by claude-author-automerge.yml."
+
+          # Sticky comment so the reason is visible inline on the PR (the
+          # ::warning:: only shows in the Actions log).
+          marker="<!-- pr-classify:blocked -->"
+          existing=$(gh api "/repos/$REPO/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1 || true)
+          body=$(printf '%s\n' \
+            "$marker" \
+            "**Risk class: \`blocked\` — manual merge required.**" \
+            "" \
+            "This PR touches one of the blocked path categories from \`.github/risk-paths.yml\` (Dockerfiles, docker-compose, \`.github/workflows/**\`, \`**/.env*\`, \`**/secrets*\`, \`infra/\`, \`terraform/\`, \`k8s/\`, or the classifier config itself)." \
+            "" \
+            "Auto-merge is refused by \`claude-author-automerge.yml\`. A maintainer should review the diff and click \"Squash and merge\" themselves." \
+            "" \
+            "(This is a policy notice, not a code-quality failure. The classify job itself does not fail — required CI checks remain authoritative for \"is the code green.\")")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "/repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null
+          else
+            gh pr comment "$PR" --body "$body"
+          fi
