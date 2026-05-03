@@ -78,6 +78,11 @@ on:
         required: false
         type: string
         default: "."
+      prettier_changed_only:
+        description: "On pull_request events, run prettier --check only on files in the diff (intersected with markdown_glob). On push events, always scan the full glob to catch drift. Default true. Set false to scan the full glob on every event."
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -124,6 +129,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need history to compute the PR diff against the base ref. Shallow
+          # clone (depth=1, the default) lacks the merge-base. fetch-depth=0
+          # is heavy but reliable; for very large repos, switch to a
+          # `git fetch origin <base-ref> --depth=N` strategy in a follow-up.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -149,16 +160,93 @@ jobs:
           fi
         shell: bash
 
-      - name: prettier --check ${{ inputs.markdown_glob || '**/*.md' }}
-        # Use the project's prettier (with its plugins) when node_modules is
-        # populated; otherwise fall back to a one-off prettier@3 install.
+      - name: Compute file list for prettier
+        id: files
+        # Two modes:
+        #   1. pull_request + prettier_changed_only=true (default):
+        #      diff against base ref → intersect with markdown_glob → check
+        #      only those files. Keeps PR feedback fast and prevents one
+        #      stale file on main from poisoning every subsequent PR.
+        #   2. push (always) OR pull_request with prettier_changed_only=false:
+        #      check the full markdown_glob. Push-to-main runs catch drift
+        #      that PR-mode missed (e.g. a file modified on main directly).
+        # Output `files` is a space-separated list, or empty if no matches.
         run: |
           GLOB="${{ inputs.markdown_glob || '**/*.md' }}"
-          if [ -x node_modules/.bin/prettier ]; then
-            node_modules/.bin/prettier --check "$GLOB"
+          CHANGED_ONLY="${{ inputs.prettier_changed_only || 'true' }}"
+          EVENT="${{ github.event_name }}"
+
+          if [ "$EVENT" = "pull_request" ] && [ "$CHANGED_ONLY" != "false" ]; then
+            BASE="${{ github.event.pull_request.base.ref }}"
+            git fetch --quiet --no-tags origin "$BASE"
+            # diff: base merge-base -> HEAD. Filter Added/Modified/Renamed
+            # (drop Deleted; prettier --check on a deleted file would error).
+            CHANGED=$(git diff --name-only --diff-filter=AMR "origin/$BASE...HEAD")
+            # Intersect changed files with the glob using bash extglob+globstar.
+            # We also accept the glob without a leading "**/" so that
+            # "**/*.md" matches both "foo.md" and "dir/foo.md".
+            shopt -s extglob globstar nullglob
+            FILTERED=""
+            ALT_GLOB="$GLOB"
+            if [ "${GLOB#**/}" != "$GLOB" ]; then
+              ALT_GLOB="${GLOB#**/}"
+            fi
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              # shellcheck disable=SC2053
+              if [[ "$f" == $GLOB || "$f" == $ALT_GLOB ]]; then
+                FILTERED+="$f"$'\n'
+              fi
+            done <<< "$CHANGED"
+            FILTERED="${FILTERED%$'\n'}"
+            if [ -z "$FILTERED" ]; then
+              echo "No changed files match glob '$GLOB' — skipping prettier."
+              echo "files=" >> "$GITHUB_OUTPUT"
+            else
+              echo "Will prettier-check $(echo "$FILTERED" | wc -l) changed file(s):"
+              echo "$FILTERED"
+              # Pass as space-separated; filenames with spaces will break here.
+              # If that ever becomes a real issue, switch to a tempfile + xargs.
+              {
+                echo 'files<<EOF'
+                echo "$FILTERED"
+                echo 'EOF'
+              } >> "$GITHUB_OUTPUT"
+            fi
           else
-            npx --yes prettier@3 --check "$GLOB"
+            echo "Full-glob mode (event=$EVENT, changed_only=$CHANGED_ONLY)."
+            echo "files=$GLOB" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+        shell: bash
+
+      - name: prettier --check
+        if: steps.files.outputs.files != ''
+        # Use the project's prettier (with its plugins) when node_modules is
+        # populated; otherwise fall back to a one-off prettier@3 install.
+        # Files come from the previous step — either a single glob string
+        # (full-mode) or a newline-separated explicit list (changed-only).
+        # Null-delimited xargs is used so filenames with spaces don't split.
+        run: |
+          set -eo pipefail
+          if [ -x node_modules/.bin/prettier ]; then
+            PRETTIER=(node_modules/.bin/prettier)
+          else
+            PRETTIER=(npx --yes prettier@3)
+          fi
+          if [ "$FILES" = "$GLOB" ]; then
+            # Full-glob mode — pass the glob string verbatim; prettier
+            # expands it itself.
+            "${PRETTIER[@]}" --check "$GLOB"
+          else
+            # Changed-files mode — newline-delimited explicit list. Convert
+            # to NUL-delimited for xargs so filenames with spaces don't split.
+            printf '%s\n' "$FILES" | tr '\n' '\0' | xargs -0 "${PRETTIER[@]}" --check
+          fi
+        env:
+          FILES: ${{ steps.files.outputs.files }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
         shell: bash
 
   shellcheck:
