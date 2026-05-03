@@ -27,6 +27,11 @@ name: Lint
 #   - prettier auto-installs the target repo's deps if a package.json exists,
 #     so prettier plugins (prettier-plugin-svelte etc.) resolve correctly.
 #     Skip with `install_node_deps: false` for plain markdown-only repos.
+#   - prettier in PR mode checks ONLY files added/modified/renamed by the PR
+#     (intersected with `markdown_glob`). On push events it scans the full
+#     glob. Set `prettier_changed_only: false` to scan the full glob on PRs
+#     too. Rationale: a single badly-formatted file landing on main otherwise
+#     poisons every subsequent docs PR's lint check across the fleet.
 #   - shellcheck on .sh files is OFF by default for the same reason as
 #     actionlint's shellcheck: most repos have pre-existing style/info
 #     drift. When opted in, defaults to severity=error so only real bugs
@@ -50,6 +55,11 @@ on:
         default: true
       run_prettier:
         description: "Run prettier --check on markdown. Default true."
+        required: false
+        type: boolean
+        default: true
+      prettier_changed_only:
+        description: "On PR events, check only files added/modified/renamed in the PR diff (intersected with markdown_glob). Push events always scan the full glob. Default true. Requires `pull-requests: read` on the caller's GITHUB_TOKEN; gracefully falls back to full-glob mode if the API call fails."
         required: false
         type: boolean
         default: true
@@ -81,6 +91,12 @@ on:
 
 permissions:
   contents: read
+  # Needed for `gh api .../pulls/N/files` in prettier's changed-only mode.
+  # Reusable workflows can't request more than the caller grants, so callers
+  # also need `pull-requests: read` for changed-only to work. If absent,
+  # the prettier step degrades gracefully to full-glob mode and emits a
+  # ::warning::, so existing callers keep working until they update.
+  pull-requests: read
 
 jobs:
   actionlint:
@@ -149,16 +165,140 @@ jobs:
           fi
         shell: bash
 
-      - name: prettier --check ${{ inputs.markdown_glob || '**/*.md' }}
+      # Decide what files prettier should check. Three modes:
+      #   - mode=glob   → existing behavior, run prettier --check "$GLOB"
+      #                   (push events, or PRs with prettier_changed_only=false,
+      #                   or PRs where listing changed files failed)
+      #   - mode=files  → run prettier --check on an explicit file list
+      #                   (PRs, default — only files added/modified/renamed
+      #                   in the diff that also match the glob)
+      #   - mode=none   → no targets; emit a no-op log line and pass
+      #                   (a PR that changed zero markdown files)
+      #
+      # Glob ∩ changed-files intersection is computed by:
+      #   1. Asking GitHub for the PR's file list (excludes deletions).
+      #   2. Expanding the markdown_glob against the working tree via bash
+      #      globstar (handles `**`, brace expansion, etc).
+      #   3. `comm -12` of the two sorted sets.
+      #
+      # Why bash-glob expansion vs hand-rolled regex: prettier's glob
+      # dialect (micromatch) and bash's `shopt -s globstar` agree on the
+      # cases we care about (`**/*.md`, `docs/**/*.md`, `**/*.{md,markdown}`)
+      # and bash is already in the runner. A regex translator would either
+      # be wrong on edge cases or large enough to need its own tests.
+      - name: Resolve prettier targets
+        id: targets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          CHANGED_ONLY: ${{ inputs.prettier_changed_only }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Push event, or caller opted out → fall back to full-glob mode.
+          # `format()`-style stringify pattern: null → '', explicit false → 'false'.
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$(printf '%s' "$CHANGED_ONLY")" = "false" ]; then
+            echo "Mode: glob (event=$EVENT_NAME, changed_only=${CHANGED_ONLY:-<unset>})"
+            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # PR event with changed-only enabled. Pull the file list from the API.
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "::warning::No PR number available on pull_request event — falling back to full-glob mode."
+            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PR_FILES_LOG="$(mktemp)"
+          if ! gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                --jq '.[] | select(.status != "removed") | .filename' \
+                > "$PR_FILES_LOG" 2>/tmp/gh_err; then
+            echo "::warning::Could not list PR files (often means the caller's GITHUB_TOKEN lacks 'pull-requests: read'). Falling back to full-glob mode."
+            sed 's/^/  /' /tmp/gh_err || true
+            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t CHANGED < "$PR_FILES_LOG"
+
+          if [ "${#CHANGED[@]}" -eq 0 ]; then
+            echo "PR has no added/modified/renamed files."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Expand the markdown glob in the working tree.
+          shopt -s globstar nullglob
+          # `compgen -G` only emits matches and never errors on no-match.
+          mapfile -t MATCH_GLOB < <(compgen -G "$GLOB" || true)
+          if [ "${#MATCH_GLOB[@]}" -eq 0 ]; then
+            echo "No files in working tree match glob '$GLOB'."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t TARGETS < <(
+            comm -12 \
+              <(printf '%s\n' "${CHANGED[@]}" | sort -u) \
+              <(printf '%s\n' "${MATCH_GLOB[@]}" | sort -u)
+          )
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "No PR-changed files match glob '$GLOB' — nothing to check."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Mode: files (${#TARGETS[@]} target(s) after glob ∩ changed-files):"
+          printf '  %s\n' "${TARGETS[@]}"
+          {
+            echo "mode=files"
+            echo "files<<__EOF__"
+            printf '%s\n' "${TARGETS[@]}"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: prettier --check
+        env:
+          MODE: ${{ steps.targets.outputs.mode }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+          FILES: ${{ steps.targets.outputs.files }}
         # Use the project's prettier (with its plugins) when node_modules is
         # populated; otherwise fall back to a one-off prettier@3 install.
         run: |
-          GLOB="${{ inputs.markdown_glob || '**/*.md' }}"
+          set -euo pipefail
           if [ -x node_modules/.bin/prettier ]; then
-            node_modules/.bin/prettier --check "$GLOB"
+            PRETTIER=(node_modules/.bin/prettier)
           else
-            npx --yes prettier@3 --check "$GLOB"
+            PRETTIER=(npx --yes prettier@3)
           fi
+          case "$MODE" in
+            none)
+              echo "Skipping prettier — no targets in PR diff."
+              ;;
+            glob)
+              echo "Checking glob: $GLOB"
+              "${PRETTIER[@]}" --check "$GLOB"
+              ;;
+            files)
+              # Reconstruct the file list from the heredoc output. The
+              # trailing newline of `printf '%s\n'` leaves an empty last
+              # element after `<<<` splitting; drop empties.
+              mapfile -t FILE_LIST <<< "$FILES"
+              cleaned=()
+              for f in "${FILE_LIST[@]}"; do [ -n "$f" ] && cleaned+=("$f"); done
+              echo "Checking ${#cleaned[@]} PR-changed file(s):"
+              printf '  %s\n' "${cleaned[@]}"
+              "${PRETTIER[@]}" --check "${cleaned[@]}"
+              ;;
+            *)
+              echo "::error::Unknown prettier target mode: '$MODE'"
+              exit 1
+              ;;
+          esac
         shell: bash
 
   shellcheck:
