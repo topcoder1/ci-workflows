@@ -200,11 +200,20 @@ jobs:
           # callers commonly post as a check-run; some post as a commit status.
           # Match either. We require an explicit SUCCESS — neutral / pending /
           # failure all leave the risk gate in place.
+          #
+          # Pipe through `jq --arg` instead of `gh api --jq` with shell-
+          # interpolated quotes. If CHECK_NAME ever contains a double-quote
+          # (custom callers, future variants), inline interpolation would
+          # produce a broken jq filter that silently returns nothing —
+          # bypass=0, no warning. `--arg` binds the variable safely
+          # regardless of contents. Caught by Claude Review on PR #25.
           codex_state=$(gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" \
-            --jq ".check_runs[] | select(.name == \"$CHECK_NAME\") | .conclusion" | head -1)
+            | jq -r --arg name "$CHECK_NAME" \
+              '.check_runs[] | select(.name == $name) | .conclusion' | head -1)
           if [ -z "$codex_state" ]; then
             codex_state=$(gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/status" \
-              --jq ".statuses[] | select(.context == \"$CHECK_NAME\") | .state" | head -1)
+              | jq -r --arg name "$CHECK_NAME" \
+                '.statuses[] | select(.context == $name) | .state' | head -1)
           fi
           echo "Codex check '$CHECK_NAME' state: '${codex_state:-<absent>}'"
           if [ "$codex_state" = "success" ] || [ "$codex_state" = "SUCCESS" ]; then
