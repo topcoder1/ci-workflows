@@ -49,11 +49,15 @@ jobs:
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           EXTRA_GLOBS: ${{ inputs.extra_safe_globs }}
         run: |
           set -euo pipefail
-          changed=$(gh pr diff "$PR" --name-only)
+          # `gh pr diff` without a local checkout requires --repo; the
+          # workflow doesn't check out the caller, so pass it explicitly.
+          # The bare form fails with "fatal: not a git repository".
+          changed=$(gh pr diff --repo "$REPO" "$PR" --name-only)
 
           # Built-in safe globs: docs and test files. Patterns are
           # POSIX-extended regex (used with `grep -E`).
