@@ -33,6 +33,16 @@ on:
         required: false
         type: string
         default: "auto-merge"
+      risk_bypass_label:
+        description: "Label that bypasses the risk-tier path check on Claude-authored PRs (Option A). Apply from the PR list with one click instead of click-merging through the PR detail page."
+        required: false
+        type: string
+        default: "auto-merge-approved"
+      codex_check_name:
+        description: "Status-check name for Codex Review. When this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Set empty to disable Codex-trusted bypass."
+        required: false
+        type: string
+        default: "review / Codex Review"
 
 jobs:
   automerge:
@@ -140,24 +150,115 @@ jobs:
             echo "No risk-tier paths matched."
           fi
 
+      # Option A: explicit human approval via label.
+      # When a Claude PR matches the risk-tier classifier, you can apply the
+      # `auto-merge-approved` label from the PR list page (one click, no PR
+      # detail navigation) to bypass the risk gate. Confirms "yes I read it,
+      # auto-merge it" without requiring the actual click-merge round-trip.
+      - name: Check risk bypass label (Option A)
+        id: bypass_label
+        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1'
+        env:
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BYPASS_LABEL" ]; then
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+            echo "Bypass label disabled (input empty)."
+            exit 0
+          fi
+          if echo "$LABELS_JSON" | jq -e --arg L "$BYPASS_LABEL" '.[] | select(.name == $L)' >/dev/null 2>&1; then
+            echo "bypass=1" >> "$GITHUB_OUTPUT"
+            echo "Bypass label '$BYPASS_LABEL' present — risk-tier gate overridden."
+          else
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Option B: Codex review trust.
+      # When the configured Codex status check is SUCCESS, treat the PR as
+      # second-model-reviewed and bypass the risk-tier gate. The check name
+      # is configurable so callers can wire whatever Codex caller they
+      # use (default "review / Codex Review", which matches the
+      # pr-codex-review.yml caller in this same repo).
+      - name: Check Codex Review status (Option B)
+        id: bypass_codex
+        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1' && steps.bypass_label.outputs.bypass != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECK_NAME: ${{ inputs.codex_check_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CHECK_NAME" ]; then
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+            echo "Codex bypass disabled (codex_check_name input empty)."
+            exit 0
+          fi
+          # Look at the head SHA's check-runs and the PR's status checks. Codex
+          # callers commonly post as a check-run; some post as a commit status.
+          # Match either. We require an explicit SUCCESS — neutral / pending /
+          # failure all leave the risk gate in place.
+          #
+          # Pipe through `jq --arg` instead of `gh api --jq` with shell-
+          # interpolated quotes. If CHECK_NAME ever contains a double-quote
+          # (custom callers, future variants), inline interpolation would
+          # produce a broken jq filter that silently returns nothing —
+          # bypass=0, no warning. `--arg` binds the variable safely
+          # regardless of contents. Caught by Claude Review on PR #25.
+          codex_state=$(gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" \
+            | jq -r --arg name "$CHECK_NAME" \
+              '.check_runs[] | select(.name == $name) | .conclusion' | head -1)
+          if [ -z "$codex_state" ]; then
+            codex_state=$(gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/status" \
+              | jq -r --arg name "$CHECK_NAME" \
+                '.statuses[] | select(.context == $name) | .state' | head -1)
+          fi
+          echo "Codex check '$CHECK_NAME' state: '${codex_state:-<absent>}'"
+          if [ "$codex_state" = "success" ] || [ "$codex_state" = "SUCCESS" ]; then
+            echo "bypass=1" >> "$GITHUB_OUTPUT"
+            echo "Codex Review passed — risk-tier gate overridden."
+          else
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Enable auto-merge
-        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky != '1'
+        if: |
+          steps.detect.outputs.claude_authored == '1' && (
+            steps.risk.outputs.risky != '1' ||
+            steps.bypass_label.outputs.bypass == '1' ||
+            steps.bypass_codex.outputs.bypass == '1'
+          )
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           METHOD: ${{ inputs.merge_method }}
           REASON: ${{ steps.detect.outputs.reason }}
+          RISKY: ${{ steps.risk.outputs.risky }}
+          BYPASS_LABEL: ${{ steps.bypass_label.outputs.bypass }}
+          BYPASS_CODEX: ${{ steps.bypass_codex.outputs.bypass }}
         run: |
           set -euo pipefail
-          echo "Enabling auto-merge ($METHOD) — detection: $REASON"
+          if [ "$BYPASS_LABEL" = "1" ]; then
+            echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via approval label"
+          elif [ "$BYPASS_CODEX" = "1" ]; then
+            echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via Codex pass"
+          else
+            echo "Enabling auto-merge ($METHOD) — detection: $REASON"
+          fi
           gh pr merge --auto --"$METHOD" "$PR_URL"
 
       - name: Comment + skip when risky
-        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1'
+        if: |
+          steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1' &&
+          steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           MATCHED: ${{ steps.risk.outputs.matched }}
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
+          CODEX_CHECK: ${{ inputs.codex_check_name }}
         run: |
           set -euo pipefail
           marker="<!-- claude-author-automerge:risk-tier -->"
@@ -169,16 +270,28 @@ jobs:
             echo ""
             echo "This Claude-authored PR modifies files matching the risk-tier patterns"
             echo "defined in the global CLAUDE.md policy (auth / secrets / migrations /"
-            echo "billing / production infra). Manual click-merge required."
+            echo "billing / production infra). Manual click-merge required, OR use one of"
+            echo "the bypass paths below."
             echo ""
             echo "Matched files:"
             echo '```'
             printf "%b" "$MATCHED"
             echo '```'
             echo ""
-            echo "Override only after review: add the \`auto-merge\` label. The risk-tier check"
-            echo "still runs — override does not bypass it. If a path is misclassified, fix it"
-            echo "in \`topcoder1/ci-workflows/.github/workflows/claude-author-automerge.yml\`."
+            echo "**Bypass options (no PR detail navigation needed):**"
+            echo ""
+            if [ -n "$BYPASS_LABEL" ]; then
+              echo "- Apply the \`$BYPASS_LABEL\` label to this PR. The workflow will re-run on"
+              echo "  the label event and enable auto-merge. One click from the PR list page."
+            fi
+            if [ -n "$CODEX_CHECK" ]; then
+              echo "- Wait for the \`$CODEX_CHECK\` status check to pass. If Codex Review is"
+              echo "  installed on this repo and it returns SUCCESS, the workflow auto-bypasses"
+              echo "  the risk gate on its next run (e.g. on push of a fixup commit)."
+            fi
+            echo ""
+            echo "If a path is misclassified, fix the regex in"
+            echo "\`topcoder1/ci-workflows/.github/workflows/claude-author-automerge.yml\`."
           } > /tmp/automerge-comment.md
           if [ -n "$existing" ]; then
             gh api -X PATCH "/repos/${{ github.repository }}/issues/comments/$existing" \
