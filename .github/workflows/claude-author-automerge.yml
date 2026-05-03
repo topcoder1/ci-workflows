@@ -51,13 +51,21 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      # Required by the Option B Codex bypass step: it queries
-      # /repos/{repo}/commits/{sha}/check-runs to read the Codex Review
-      # status. Without `checks: read`, the API returns 403 "Resource
-      # not accessible by integration" and the bypass step crashes.
-      # Caught on whois-api-llc/wxa-mcp-server#80 (the first PR to
-      # actually exercise Option B end-to-end after #25 merged).
-      checks: read
+      # NOTE: Option B (Codex-trusted bypass) queries the check-runs API,
+      # which requires `checks: read`. We do NOT request it here at the
+      # reusable's job level because that would cap-mismatch with the 44+
+      # existing fleet callers that grant only contents+pull-requests at
+      # the workflow level — startup_failure on every existing caller's
+      # next Claude PR (caught on whois-api-llc/wxa-mcp-server#80, run
+      # 25292746179, before broad rollout).
+      #
+      # Callers that want Option B working should add `checks: read` to
+      # THEIR workflow-level permissions block. The Codex bypass step
+      # below already handles missing permission gracefully (returns
+      # bypass=0 with no crash via `gh api ... || echo '{}'` + jq `try`),
+      # so callers without `checks: read` simply never bypass via Codex —
+      # the label bypass (Option A) and the original "no risky paths"
+      # path still work.
     steps:
       - name: Checkout PR head
         uses: actions/checkout@v5
