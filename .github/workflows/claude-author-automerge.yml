@@ -51,6 +51,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # Required by the Option B Codex bypass step: it queries
+      # /repos/{repo}/commits/{sha}/check-runs to read the Codex Review
+      # status. Without `checks: read`, the API returns 403 "Resource
+      # not accessible by integration" and the bypass step crashes.
+      # Caught on whois-api-llc/wxa-mcp-server#80 (the first PR to
+      # actually exercise Option B end-to-end after #25 merged).
+      checks: read
     steps:
       - name: Checkout PR head
         uses: actions/checkout@v5
@@ -207,13 +214,29 @@ jobs:
           # produce a broken jq filter that silently returns nothing —
           # bypass=0, no warning. `--arg` binds the variable safely
           # regardless of contents. Caught by Claude Review on PR #25.
-          codex_state=$(gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" \
+          #
+          # Wrap each gh-api call in `|| echo '{}'` and run jq with a guard
+          # so the step never crashes the workflow. Failure modes that
+          # return invalid JSON: 403 from missing `checks: read` (caught
+          # on wxa-mcp-server#80 install run), 404 on commits that haven't
+          # propagated yet, network blips. In all cases we want bypass=0,
+          # never a workflow crash. Caller's main path ("post the blocked
+          # comment") still runs.
+          codex_state=$(
+            (gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" 2>/dev/null \
+              || echo '{"check_runs":[]}') \
             | jq -r --arg name "$CHECK_NAME" \
-              '.check_runs[] | select(.name == $name) | .conclusion' | head -1)
+              'try (.check_runs[] | select(.name == $name) | .conclusion) // empty' \
+            | head -1
+          )
           if [ -z "$codex_state" ]; then
-            codex_state=$(gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/status" \
+            codex_state=$(
+              (gh api "/repos/${{ github.repository }}/commits/$HEAD_SHA/status" 2>/dev/null \
+                || echo '{"statuses":[]}') \
               | jq -r --arg name "$CHECK_NAME" \
-                '.statuses[] | select(.context == $name) | .state' | head -1)
+                'try (.statuses[] | select(.context == $name) | .state) // empty' \
+              | head -1
+            )
           fi
           echo "Codex check '$CHECK_NAME' state: '${codex_state:-<absent>}'"
           if [ "$codex_state" = "success" ] || [ "$codex_state" = "SUCCESS" ]; then
