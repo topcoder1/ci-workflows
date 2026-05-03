@@ -88,7 +88,19 @@ jobs:
 
           Be brief. Do not perform general bug-hunting; the first pass already did."
 
-          codex review "$PROMPT" 2>&1 | tee /tmp/codex.out
+          # --dangerously-bypass-approvals-and-sandbox: skip Codex's internal
+          # bubblewrap (Linux) / Seatbelt (macOS) sandbox. Required in CI:
+          # GitHub Actions runners are nested containers where bwrap cannot
+          # set up a loopback network namespace, producing
+          #   "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+          # on every shell command Codex tries to execute (git diff, find,
+          # cat). The sandbox failure silently degrades the review — Codex
+          # often still posts "no regressions found" even though it never
+          # read the diff (false confidence on the highest-risk PRs).
+          # The flag is documented as the canonical CI escape hatch:
+          # "Intended solely for running in environments that are externally
+          # sandboxed" — which GHA runners are (ephemeral VMs).
+          codex --dangerously-bypass-approvals-and-sandbox review "$PROMPT" 2>&1 | tee /tmp/codex.out
 
           # Extract verdict: Codex streams reasoning, then prints the literal
           # token `codex` on its own line followed by the verdict. Grab the
