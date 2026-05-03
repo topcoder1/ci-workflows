@@ -1,0 +1,122 @@
+name: Safe-paths Auto-merge (reusable)
+
+# Auto-enables `gh pr merge --auto` on any PR whose diff touches ONLY
+# explicitly-safe paths — docs and test files by default. The gate is
+# all-or-nothing: if even one changed file is outside the safe list,
+# this workflow no-ops and downstream workflows (Claude-author auto-
+# merge, manual click) decide.
+#
+# The "safe" categorization assumes:
+#   - docs/**: zero runtime impact, can never break code paths
+#   - tests/**: failing tests can't ship; passing tests can't break runtime
+#
+# Caller repos opt in by installing a thin caller workflow that calls
+# this reusable. Auto-merge enablement uses GitHub's native
+# `gh pr merge --auto`, so branch-protection required-status-checks
+# still apply — this workflow does not bypass them.
+#
+# Differs from claude-author-automerge.yml: that one gates on PR author
+# (Claude or human via override label). This one gates on diff content
+# alone — any author whose PR touches only safe paths gets auto-merge,
+# because the path classification itself is the safety argument.
+
+on:
+  workflow_call:
+    inputs:
+      merge_method:
+        description: "Merge method: merge | squash | rebase"
+        required: false
+        type: string
+        default: "squash"
+      extra_safe_globs:
+        description: |
+          Optional additional egrep patterns (newline-separated, one per
+          line) considered safe in this caller repo. Merged with the
+          built-in list; all-or-nothing rule still applies.
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  safe_paths_automerge:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check if every changed file is in a safe path
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EXTRA_GLOBS: ${{ inputs.extra_safe_globs }}
+        run: |
+          set -euo pipefail
+          changed=$(gh pr diff "$PR" --name-only)
+
+          # Built-in safe globs: docs and test files. Patterns are
+          # POSIX-extended regex (used with `grep -E`).
+          builtin_globs='^docs/.*
+          ^tests/.*
+          (^|/)test_[^/]+\.py$
+          (^|/)[^/]+_test\.(py|go|js|ts)$
+          (^|/)[^/]+\.(test|spec)\.(jsx?|tsx?)$
+          (^|/)__tests__/'
+
+          all_globs="$builtin_globs"
+          if [ -n "${EXTRA_GLOBS:-}" ]; then
+            all_globs="$all_globs
+          $EXTRA_GLOBS"
+          fi
+
+          # An empty diff (label-only PR event, etc.) is NOT safe — we
+          # don't have evidence of safety, so defer to other workflows.
+          if [ -z "$(echo "$changed" | tr -d '[:space:]')" ]; then
+            echo "all_safe=0" >> "$GITHUB_OUTPUT"
+            echo "reason=empty-diff" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          unsafe_files=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            matched=0
+            while IFS= read -r p; do
+              p="${p#"${p%%[![:space:]]*}"}"
+              [ -z "$p" ] && continue
+              if echo "$f" | grep -Eq "$p"; then
+                matched=1
+                break
+              fi
+            done <<< "$all_globs"
+            if [ "$matched" -eq 0 ]; then
+              unsafe_files="$unsafe_files$f\n"
+            fi
+          done <<< "$changed"
+
+          if [ -n "$unsafe_files" ]; then
+            echo "all_safe=0" >> "$GITHUB_OUTPUT"
+            {
+              echo "unsafe<<EOF"
+              printf "%b" "$unsafe_files"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Not all safe — deferring to other automerge workflows."
+            echo "Unsafe files:"
+            printf "%b" "$unsafe_files"
+          else
+            echo "all_safe=1" >> "$GITHUB_OUTPUT"
+            echo "All $(echo "$changed" | wc -l | tr -d ' ') changed files are in safe paths."
+          fi
+
+      - name: Enable auto-merge
+        if: steps.classify.outputs.all_safe == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          METHOD: ${{ inputs.merge_method }}
+        run: |
+          set -euo pipefail
+          echo "Safe-paths-only diff — enabling auto-merge ($METHOD)."
+          gh pr merge --auto --"$METHOD" "$PR_URL"
