@@ -38,10 +38,60 @@ jobs:
         with:
           node-version: '22'
 
+      # Cost gate: skip the (paid) Codex run on PRs unlikely to surface
+      # regressions — small diffs and docs/test-only diffs. `always_review:`
+      # in the caller's risk-paths.yml lists bug-attractor files that bypass
+      # the gate (they ALWAYS get reviewed regardless of size). See
+      # .github/scripts/codex-gate.mjs for the decision rules.
+      - name: Fetch cost-gate script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .github/scripts
+          gh api repos/topcoder1/ci-workflows/contents/.github/scripts/codex-gate.mjs \
+            --jq '.content' | base64 -d > .github/scripts/codex-gate.mjs
+
+      - name: Install gate deps
+        run: npm install --no-save yaml@2 minimatch@10
+
+      - name: Compute PR diff stats
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          files=$(gh pr diff "$PR" --name-only)
+          # Count + and - lines from the unified diff, excluding the file
+          # markers (+++/---). This is the actual change volume the
+          # reviewer would read.
+          lines=$(gh pr diff "$PR" | awk '
+            /^(\+\+\+|---)/ { next }
+            /^[+-]/ { n++ }
+            END { print n+0 }
+          ')
+          {
+            echo "files<<__FILES_EOF__"
+            echo "$files"
+            echo "__FILES_EOF__"
+            echo "lines=$lines"
+          } >> "$GITHUB_OUTPUT"
+          echo "Diff: $lines lines across $(echo "$files" | wc -l | tr -d ' ') file(s)"
+
+      - name: Codex cost gate
+        id: gate
+        env:
+          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+          DIFF_LINES: ${{ steps.diff.outputs.lines }}
+          SIZE_THRESHOLD: '30'
+        run: node .github/scripts/codex-gate.mjs
+
       - name: Install Codex CLI
+        if: steps.gate.outputs.should_run == 'true'
         run: npm install -g @openai/codex@latest
 
       - name: Authenticate Codex with API key
+        if: steps.gate.outputs.should_run == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -52,6 +102,7 @@ jobs:
           codex login status
 
       - name: Run Codex adversarial review
+        if: steps.gate.outputs.should_run == 'true'
         id: review
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -120,6 +171,7 @@ jobs:
           echo "$verdict" | head -c 4096 > /tmp/codex.verdict
 
       - name: Post review comment
+        if: steps.gate.outputs.should_run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
