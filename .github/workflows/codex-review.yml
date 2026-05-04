@@ -100,7 +100,14 @@ jobs:
           # The flag is documented as the canonical CI escape hatch:
           # "Intended solely for running in environments that are externally
           # sandboxed" — which GHA runners are (ephemeral VMs).
-          codex --dangerously-bypass-approvals-and-sandbox review "$PROMPT" 2>&1 | tee /tmp/codex.out
+          # -c model_reasoning_effort=low: diff review is shallow analysis
+          # work — medium/high reasoning roughly doubles cost per call without
+          # measurable change in regression-finding rate on the 3-axis prompt
+          # above. Keep the door open to bumping back up if FN rate climbs.
+          codex \
+            --dangerously-bypass-approvals-and-sandbox \
+            -c model_reasoning_effort=low \
+            review "$PROMPT" 2>&1 | tee /tmp/codex.out
 
           # Extract verdict: Codex streams reasoning, then prints the literal
           # token `codex` on its own line followed by the verdict. Grab the
