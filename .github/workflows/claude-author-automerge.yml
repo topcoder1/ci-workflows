@@ -45,31 +45,18 @@ on:
         default: "review / Codex Review"
     secrets:
       automerge_pat:
-        description: |
+        description: >-
           Optional fine-grained PAT (or GitHub App token) used to enable
           auto-merge. When set, the resulting merge commit is attributed
-          to the PAT user and triggers downstream `push: branches: [main]`
-          workflows (e.g. deploy). When unset, the workflow falls back to
-          `${{ github.token }}` — auto-merge still works, but the merge is
-          attributed to `app/github-actions` and **GitHub silently
-          suppresses downstream workflow runs** (the GITHUB_TOKEN
+          to the PAT user and triggers downstream push-on-main workflows
+          (e.g. deploy). When unset, the workflow falls back to the
+          built-in GITHUB_TOKEN — auto-merge still works, but the merge
+          is attributed to app/github-actions and GitHub silently
+          suppresses downstream workflow runs (the GITHUB_TOKEN
           loop-prevention rule). Verified on topcoder1/wxa_webcat#201
-          (2026-05-04): merge succeeded, deploy never fired, prod sat on
-          stale image until manual `workflow_dispatch`.
-
-          Required scopes for a fine-grained PAT:
-            - Repository → Contents: read & write
-            - Repository → Pull requests: read & write
-          Store as a per-repo (or org-wide) secret named whatever, then
-          pass via `secrets:` in the caller. Example caller:
-
-            jobs:
-              automerge:
-                uses: topcoder1/ci-workflows/.github/workflows/claude-author-automerge.yml@main
-                secrets:
-                  automerge_pat: ${{ secrets.AUTOMERGE_PAT }}
-
-          Or `secrets: inherit` to pass through without per-secret wiring.
+          (2026-05-04). Required scopes for a fine-grained PAT - repo
+          contents r/w, pull-requests r/w. Wire via `secrets: inherit`
+          in the caller, or pass explicitly. See the README for setup.
         required: false
 
 jobs:
