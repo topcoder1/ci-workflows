@@ -91,12 +91,15 @@ on:
 
 permissions:
   contents: read
-  # Needed for `gh api .../pulls/N/files` in prettier's changed-only mode.
-  # Reusable workflows can't request more than the caller grants, so callers
-  # also need `pull-requests: read` for changed-only to work. If absent,
-  # the prettier step degrades gracefully to full-glob mode and emits a
-  # ::warning::, so existing callers keep working until they update.
-  pull-requests: read
+  # `pull-requests: read` is requested ONLY by the prettier job (job-level
+  # block below) so callers that don't grant it still start the workflow.
+  # Workflow-level perms here act as a hard ceiling — if a caller grants
+  # only `contents: read`, declaring `pull-requests: read` here causes
+  # GitHub to refuse to start the run with `startup_failure`, even when
+  # the prettier job itself was supposed to gracefully fall back. That
+  # ceiling-vs-job-request distinction was the bug that broke every
+  # fleet caller after #29 landed (2026-05-03 23:54 UTC). Keep this list
+  # minimal; ask for extra scopes only inside the job that needs them.
 
 jobs:
   actionlint:
@@ -138,6 +141,17 @@ jobs:
     name: prettier (markdown)
     if: ${{ format('{0}', inputs.run_prettier) != 'false' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Used by `gh api .../pulls/N/files` in changed-only mode. If the
+      # caller's GITHUB_TOKEN doesn't grant pull-requests, this job-level
+      # request is silently capped — the gh api call 403s and the
+      # "Resolve prettier targets" step gracefully falls back to full-glob
+      # mode (emits ::warning:: and sets mode=glob). The workflow still
+      # starts because this scope is requested at job level, not workflow
+      # level — workflow-level perms are a hard ceiling that cause
+      # startup_failure if exceeded by the caller's grant.
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
 
