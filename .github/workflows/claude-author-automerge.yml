@@ -2,15 +2,20 @@ name: Claude-author Auto-merge (reusable)
 
 # Auto-enables `gh pr merge --auto --squash` on PRs authored by Claude
 # (detected via branch prefix `claude/*`, `Co-Authored-By: Claude` trailer in
-# any PR commit, or the `auto-merge` label), provided the PR doesn't touch
-# any risk-tier path category from the user's global CLAUDE.md policy:
+# any PR commit, or the `auto-merge` label), provided the PR is neither:
 #
-#   - auth / login / session / oauth / sso
-#   - secrets / env files / keychain / credentials
-#   - DB migrations / SQL files
-#   - billing / payment / pricing / invoice
-#   - production infra (Dockerfile, .github/workflows, infra/, terraform/,
-#     pulumi/, deploy scripts)
+#  1. Labeled `risk:blocked` by pr-classify.yml (canonical signal — the
+#     caller's risk-paths.yml `blocked:` list determines this; covers any
+#     repo-specific block path without us having to keep a parallel regex).
+#
+#  2. Touching any risk-tier path category from the global CLAUDE.md policy:
+#     - auth / login / session / oauth / sso
+#     - secrets / env files / keychain / credentials
+#     - DB migrations / SQL files
+#     - billing / payment / pricing / invoice
+#     - production infra: Dockerfile, docker-compose, .github/workflows,
+#       .github/risk-paths.yml, .github/CODEOWNERS, infra/, terraform/,
+#       pulumi/, k8s/, fly.toml, deploy/, deploy*.{sh,yaml}
 #
 # Customer-copy diffs (legal / marketing wording) are NOT mechanically
 # detected — Claude Review handles that semantically and blocks via the
@@ -111,9 +116,71 @@ jobs:
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
           echo "Detection: claude_authored=$claude reason=$reason"
 
+      # Honor the pr-classify.yml verdict before doing per-path regex
+      # matching of our own. If the classifier labeled this PR
+      # `risk:blocked`, the policy is unambiguous: manual click-merge
+      # required, no bypass. This is the canonical signal — covers any
+      # future blocked path a caller's risk-paths.yml adds without us
+      # having to keep a parallel regex in sync. (Belt-and-suspenders
+      # with the regex below for the race window described next.)
+      #
+      # Race window: pr-classify and this workflow both fire on
+      # `pull_request` opened. If we run faster than the classifier, we
+      # read `blocked=0` and fall through to the regex check below. The
+      # caller wires `labeled` into trigger types, so once the
+      # classifier applies the label this workflow re-runs and the
+      # revoke step below disables any auto-merge enabled on the first
+      # pass. The regex still catches the two paths we observed
+      # slipping through (.github/risk-paths.yml + CODEOWNERS) on the
+      # first run for that race window.
+      - name: Check classifier verdict
+        id: classifier_verdict
+        if: steps.detect.outputs.claude_authored == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Query the API instead of the event payload — labels in the
+          # event snapshot are frozen at event time, but the classifier
+          # may have applied `risk:blocked` after the event fired.
+          labels=$(gh api "/repos/${{ github.repository }}/issues/$PR/labels" \
+            --jq '.[].name' 2>/dev/null || echo "")
+          if echo "$labels" | grep -qx 'risk:blocked'; then
+            echo "blocked=1" >> "$GITHUB_OUTPUT"
+            echo "::warning::PR labeled risk:blocked by pr-classify — auto-merge refused (no bypass applies)"
+          else
+            echo "blocked=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Revoke auto-merge if a previous run of this workflow enabled it
+      # before the classifier finished labeling. Idempotent — `gh pr
+      # merge --disable-auto` returns non-zero when auto-merge wasn't
+      # on; we tolerate that with `|| true` and verify state via the
+      # follow-up gh pr view.
+      - name: Revoke auto-merge if classifier blocked
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
+          echo "Auto-merge state after revoke: $state"
+          if [ "$state" = "ON" ]; then
+            echo "::error::auto-merge still ON after --disable-auto — investigate"
+            exit 1
+          fi
+
       - name: Check risk-tier paths
         id: risk
-        if: steps.detect.outputs.claude_authored == '1'
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -132,10 +199,16 @@ jobs:
           .*\.sql$
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?)(/|$)
           (^|/)Dockerfile(\..*)?$
+          ^docker-compose.*\.ya?ml$
           ^\.github/workflows/.*
+          ^\.github/risk-paths\.yml$
+          ^\.github/CODEOWNERS$
           ^infra/.*
           ^terraform/.*
           ^pulumi/.*
+          ^k8s/.*
+          ^fly\.toml$
+          ^deploy/.*
           (^|/)deploy.*\.(sh|ya?ml)$'
 
           matched=""
@@ -256,7 +329,8 @@ jobs:
 
       - name: Enable auto-merge
         if: |
-          steps.detect.outputs.claude_authored == '1' && (
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' && (
             steps.risk.outputs.risky != '1' ||
             steps.bypass_label.outputs.bypass == '1' ||
             steps.bypass_codex.outputs.bypass == '1'
@@ -280,9 +354,45 @@ jobs:
           fi
           gh pr merge --auto --"$METHOD" "$PR_URL"
 
+      # Sticky comment when classifier marked the PR risk:blocked. Distinct
+      # from the regex-based comment below — classifier-blocked has no
+      # bypass mechanism (it's a hard policy block), so the message
+      # shouldn't dangle bypass options the user can't actually use.
+      - name: Comment when classifier-blocked
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          marker="<!-- claude-author-automerge:classifier-blocked -->"
+          existing=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+          {
+            echo "$marker"
+            echo "**Auto-merge refused — \`risk:blocked\` label set by pr-classify.**"
+            echo ""
+            echo "This PR touches a path category in \`.github/risk-paths.yml\`'s \`blocked:\`"
+            echo "list (workflows, classifier config, CODEOWNERS, secrets, infra). Per the"
+            echo "global CLAUDE.md policy, blocked-class PRs require admin click-merge — no"
+            echo "label or status-check bypass applies."
+            echo ""
+            echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
+          } > /tmp/automerge-blocked.md
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "/repos/${{ github.repository }}/issues/comments/$existing" \
+              -f body="$(cat /tmp/automerge-blocked.md)" >/dev/null
+          else
+            gh pr comment "$PR" --body-file /tmp/automerge-blocked.md
+          fi
+
       - name: Comment + skip when risky
         if: |
-          steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1' &&
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.risk.outputs.risky == '1' &&
           steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1'
         env:
           GH_TOKEN: ${{ github.token }}
