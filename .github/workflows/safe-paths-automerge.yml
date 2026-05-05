@@ -36,6 +36,21 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      automerge_pat:
+        description: >-
+          Optional fine-grained PAT (or GitHub App token) used to enable
+          auto-merge. When set, the resulting merge commit is attributed
+          to the PAT user and triggers downstream push-on-main workflows
+          (e.g. deploy). When unset, the workflow falls back to the
+          built-in GITHUB_TOKEN — auto-merge still works, but the merge
+          is attributed to app/github-actions and GitHub silently
+          suppresses downstream workflow runs (the GITHUB_TOKEN
+          loop-prevention rule). Mirrors the pattern in
+          claude-author-automerge.yml. Required scopes for a fine-grained
+          PAT: repo contents r/w, pull-requests r/w. Wire via
+          `secrets: inherit` in the caller, or pass explicitly.
+        required: false
 
 jobs:
   safe_paths_automerge:
@@ -117,10 +132,21 @@ jobs:
       - name: Enable auto-merge
         if: steps.classify.outputs.all_safe == '1'
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Prefer the caller-supplied PAT so the merge commit triggers
+          # downstream `push:` workflows (deploy, CI). Fall back to the
+          # workflow-issued GITHUB_TOKEN when no PAT is wired — auto-merge
+          # still works but downstream workflows are silenced. See the
+          # `automerge_pat` secret docstring above for the full rationale.
+          GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           METHOD: ${{ inputs.merge_method }}
+          USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
         run: |
           set -euo pipefail
           echo "Safe-paths-only diff — enabling auto-merge ($METHOD)."
+          if [ "$USING_PAT" = "1" ]; then
+            echo "Auth: caller-supplied automerge_pat — downstream workflows WILL trigger on merge."
+          else
+            echo "::warning::Auth: GITHUB_TOKEN fallback — downstream push workflows (e.g. deploy) will be SILENCED on merge. Wire secrets.automerge_pat in the caller to fix."
+          fi
           gh pr merge --auto --"$METHOD" "$PR_URL"
