@@ -58,6 +58,32 @@ jobs:
           gh pr comment "$PR" --body "Skipped: bot-authored PR (\`$ACTOR\`). Dependency bumps are reviewed by the risk classifier and human merge gate."
           echo "skipped=true" >> "$GITHUB_OUTPUT"
 
+      # Pre-install the Claude Code native binary explicitly. Workaround for
+      # anthropics/claude-code-action#1290 (opened 2026-05-06): upstream
+      # `claude install` started exiting 0 even when /home/runner/.local/bin
+      # didn't exist, leaving no binary at the path the action then tries to
+      # spawn. Symptom: "Claude Code native binary not found at
+      # /home/runner/.local/bin/claude" / "Internal error: directory mismatch
+      # for directory .../tsconfig.json, fd 4". Verified breaking the entire
+      # fleet's PR Review check 2026-05-06 06:59 UTC across multiple repos.
+      #
+      # The fix here: pre-create the directory, run the installer ourselves,
+      # and HARD-VERIFY the binary exists before handing off to the action.
+      # This makes the failure load-bearing instead of silent. Remove this
+      # step once anthropics/claude-code-action#1290 ships a fix.
+      - name: Pre-install Claude Code binary (workaround anthropics/claude-code-action#1290)
+        if: ${{ steps.bot_check.outputs.skipped != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://claude.ai/install.sh | bash
+          if [ ! -x "$HOME/.local/bin/claude" ]; then
+            echo "::error::Claude Code binary not at $HOME/.local/bin/claude after install — workaround failed; check upstream issue #1290"
+            exit 1
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+
       - name: Claude Code Review
         if: ${{ steps.bot_check.outputs.skipped != 'true' }}
         # Pinned to v1.0.112 (2026-05-04) — v1.0.113/.114 (2026-05-06) ship a
