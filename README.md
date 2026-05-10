@@ -15,6 +15,21 @@ Runs Anthropic's [`claude-code-action@v1`](https://github.com/anthropics/claude-
 
 **Required secret:** `ANTHROPIC_API_KEY`
 
+### `prettier-autofix.yml`
+
+Runs `prettier --write` on PR-changed markdown and pushes the fix back to the branch as a single commit. Pairs with `lint.yml`'s `prettier --check`: when a markdown PR lands with formatting drift, autofix lands a `style: prettier auto-fix` commit so the lint check goes green on the next CI run instead of blocking the PR.
+
+**Inputs:**
+
+- `markdown_glob` (string, default `**/*.md`) — keep in sync with `lint.yml`'s same input
+- `install_node_deps` (bool, default `true`) — run `npm ci` first so prettier plugins (e.g. `prettier-plugin-svelte`) resolve
+- `changed_only` (bool, default `true`) — write only PR-touched files; mirrors `lint.yml`'s `prettier_changed_only`
+- `commit_message` (string, default `style: prettier auto-fix`)
+
+**Required secret:** `AUTOFIX_PAT` — fine-grained PAT (or classic with `repo` scope). Why a PAT: pushes by the default `GITHUB_TOKEN` do not retrigger downstream `pull_request` workflows, so the lint check would stay red against the previous SHA. A PAT push triggers `lint.yml` on the new commit and the check turns green.
+
+**Skipped automatically on:** fork PRs (cross-repo push impossible), closed PRs, PRs touching zero markdown.
+
 ### `dependabot-auto-merge.yml`
 
 Auto-merges Dependabot PRs for patch (and optionally minor) version bumps once required checks pass.

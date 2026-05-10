@@ -1,0 +1,225 @@
+name: Prettier Autofix
+
+# Reusable workflow that auto-applies `prettier --write` on PR-changed
+# markdown and pushes the fix back to the PR branch as a single commit.
+#
+# Why a separate workflow vs folding write-mode into lint.yml:
+#   - lint.yml is intentionally check-only (read-only token, runs on every
+#     repo without elevated perms). Mixing write-mode would force every
+#     consumer to grant `contents: write` even if they don't want autofix.
+#   - This workflow is opt-in per repo via a sibling caller workflow.
+#
+# Why we require a PAT secret instead of GITHUB_TOKEN:
+#   - Pushes authored by GITHUB_TOKEN do NOT trigger downstream
+#     `pull_request` workflows (GitHub's anti-recursion guard). The whole
+#     point of autofix is that the followup commit re-runs `lint.yml` and
+#     it goes green. Without a PAT (or a GitHub App token), the prettier
+#     check stays red against the previous SHA even though the new commit
+#     is correctly formatted.
+#   - Caller passes a fine-grained PAT (or classic with `repo` scope) as
+#     the AUTOFIX_PAT secret. See `runbooks/prettier-autofix.md`.
+#
+# Skip behavior:
+#   - Forks: skipped (cross-repo push not allowed).
+#   - Closed PRs: skipped.
+#   - PRs that touched zero markdown files: skipped (no-op).
+#   - PRs already cleanly formatted: skipped (no commit pushed).
+
+on:
+  workflow_call:
+    inputs:
+      markdown_glob:
+        description: "Glob passed to prettier --write. Default '**/*.md'. Mirrors lint.yml's markdown_glob — keep both inputs in sync."
+        required: false
+        type: string
+        default: "**/*.md"
+      install_node_deps:
+        description: "Run `npm ci` before prettier so plugins (prettier-plugin-svelte etc.) resolve. Default true. Skipped automatically when no package.json present."
+        required: false
+        type: boolean
+        default: true
+      changed_only:
+        description: "Run prettier --write only on files added/modified/renamed in the PR diff (intersected with markdown_glob). Default true. Mirrors lint.yml's prettier_changed_only."
+        required: false
+        type: boolean
+        default: true
+      commit_message:
+        description: "Subject line for the autofix commit. Default 'style: prettier auto-fix'."
+        required: false
+        type: string
+        default: "style: prettier auto-fix"
+    secrets:
+      AUTOFIX_PAT:
+        description: "Fine-grained PAT (or classic PAT with `repo` scope) used to push the autofix commit. Required — pushes by the default GITHUB_TOKEN do not retrigger the lint workflow on the new SHA."
+        required: true
+
+jobs:
+  autofix:
+    name: prettier auto-fix
+    runs-on: ubuntu-latest
+    # Skip on fork PRs (cross-repo push impossible) and on closed PRs.
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      # Needed to push the autofix commit. The PAT supplies the actual
+      # auth; declaring contents:write here just unblocks the runner.
+      contents: write
+      # Needed to call `gh api .../pulls/N/files` for the changed-files set.
+      pull-requests: read
+    steps:
+      - name: Checkout PR head with PAT
+        uses: actions/checkout@v4
+        with:
+          # Check out the PR's head ref (not the merge commit) so our push
+          # writes back to the same branch the PR is tracking.
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          # PAT is critical: pushes via GITHUB_TOKEN don't retrigger
+          # pull_request events. See header comment.
+          token: ${{ secrets.AUTOFIX_PAT }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          # Cache only when a root lockfile exists (mirrors lint.yml — see
+          # rationale there about avoiding subdir lockfile false positives).
+          cache: ${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock') != '' && 'npm' || '' }}
+
+      - name: Install target repo's deps (for prettier plugins)
+        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('**/package.json') != '' }}
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund
+          else
+            npm install --ignore-scripts --no-audit --no-fund
+          fi
+
+      # Same target-resolution logic as lint.yml's "Resolve prettier targets"
+      # — kept duplicated rather than factored into a composite action so
+      # both workflows can evolve independently and the bash is grep-able
+      # in one place per workflow. If this drifts from lint.yml, callers
+      # may see autofix touching a different file set than the lint check
+      # — keep them in sync when changing either.
+      - name: Resolve prettier targets
+        id: targets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGED_ONLY: ${{ inputs.changed_only }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$(printf '%s' "$CHANGED_ONLY")" = "false" ]; then
+            echo "Mode: glob (changed_only=false)"
+            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PR_FILES_LOG="$(mktemp)"
+          if ! gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                --jq '.[] | select(.status != "removed") | .filename' \
+                > "$PR_FILES_LOG" 2>/tmp/gh_err; then
+            echo "::warning::Could not list PR files (caller's GITHUB_TOKEN may lack 'pull-requests: read'). Falling back to full-glob mode."
+            sed 's/^/  /' /tmp/gh_err || true
+            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t CHANGED < "$PR_FILES_LOG"
+
+          if [ "${#CHANGED[@]}" -eq 0 ]; then
+            echo "PR has no added/modified/renamed files."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          shopt -s globstar nullglob
+          mapfile -t MATCH_GLOB < <(compgen -G "$GLOB" || true)
+          if [ "${#MATCH_GLOB[@]}" -eq 0 ]; then
+            echo "No files in working tree match glob '$GLOB'."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t TARGETS < <(
+            comm -12 \
+              <(printf '%s\n' "${CHANGED[@]}" | sort -u) \
+              <(printf '%s\n' "${MATCH_GLOB[@]}" | sort -u)
+          )
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "No PR-changed files match glob '$GLOB' — nothing to fix."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Mode: files (${#TARGETS[@]} target(s) after glob ∩ changed-files):"
+          printf '  %s\n' "${TARGETS[@]}"
+          {
+            echo "mode=files"
+            echo "files<<__EOF__"
+            printf '%s\n' "${TARGETS[@]}"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: prettier --write
+        env:
+          MODE: ${{ steps.targets.outputs.mode }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+          FILES: ${{ steps.targets.outputs.files }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -x node_modules/.bin/prettier ]; then
+            PRETTIER=(node_modules/.bin/prettier)
+          else
+            PRETTIER=(npx --yes prettier@3)
+          fi
+          case "$MODE" in
+            none)
+              echo "Skipping prettier — no targets in PR diff."
+              ;;
+            glob)
+              echo "Writing glob: $GLOB"
+              "${PRETTIER[@]}" --write "$GLOB"
+              ;;
+            files)
+              mapfile -t FILE_LIST <<< "$FILES"
+              cleaned=()
+              for f in "${FILE_LIST[@]}"; do [ -n "$f" ] && cleaned+=("$f"); done
+              echo "Writing ${#cleaned[@]} PR-changed file(s):"
+              printf '  %s\n' "${cleaned[@]}"
+              "${PRETTIER[@]}" --write "${cleaned[@]}"
+              ;;
+            *)
+              echo "::error::Unknown prettier target mode: '$MODE'"
+              exit 1
+              ;;
+          esac
+
+      - name: Commit + push if changed
+        env:
+          # Quote the whole expression — colon-space inside the default literal
+          # would otherwise be parsed as a nested YAML mapping.
+          COMMIT_MESSAGE: "${{ inputs.commit_message || 'style: prettier auto-fix' }}"
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "::notice::No formatting changes — autofix is a no-op."
+            exit 0
+          fi
+          echo "::notice::Prettier wrote changes — committing and pushing."
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "$COMMIT_MESSAGE" \
+                     -m "Auto-applied by topcoder1/ci-workflows prettier-autofix.yml. Co-Authored-By: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          git push origin "HEAD:${HEAD_REF}"
