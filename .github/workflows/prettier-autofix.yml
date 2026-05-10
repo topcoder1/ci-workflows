@@ -98,8 +98,11 @@ jobs:
           # rationale there about avoiding subdir lockfile false positives).
           cache: ${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock') != '' && 'npm' || '' }}
 
+      # Only fire when a ROOT package.json exists — same reasoning as in
+      # lint.yml. `**/package.json` matched subdir packages and triggered
+      # npm install at the repo root where it ENOENT'd intermittently.
       - name: Install target repo's deps (for prettier plugins)
-        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('**/package.json') != '' }}
+        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('package.json') != '' }}
         shell: bash
         run: |
           if [ -f package-lock.json ]; then
