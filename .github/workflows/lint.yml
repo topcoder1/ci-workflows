@@ -169,8 +169,15 @@ jobs:
       # (e.g. prettier-plugin-svelte), prettier needs the project's
       # node_modules to resolve them. Run `npm ci` (preferred, exact lockfile)
       # or fall back to `npm install` if no lockfile.
+      # Only fire when a ROOT package.json exists. `**/package.json` matches
+      # subdir packages (e.g. `frontend/package.json`) and triggers npm
+      # install at the repo root where there's no package.json — which
+      # ENOENTs intermittently depending on npm version + cache state.
+      # Repos with prettier plugins have a root package.json by definition;
+      # subdir-only repos fall through to `npx --yes prettier@3` in the
+      # run step and behave identically.
       - name: Install target repo's deps (for prettier plugins)
-        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('**/package.json') != '' }}
+        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('package.json') != '' }}
         run: |
           if [ -f package-lock.json ]; then
             npm ci --ignore-scripts --no-audit --no-fund
