@@ -16,8 +16,10 @@ name: Prettier Autofix
 #     it goes green. Without a PAT (or a GitHub App token), the prettier
 #     check stays red against the previous SHA even though the new commit
 #     is correctly formatted.
-#   - Caller passes a fine-grained PAT (or classic with `repo` scope) as
-#     the AUTOFIX_PAT secret. See `runbooks/prettier-autofix.md`.
+#   - Reuses the same `automerge_pat` secret that `claude-author-automerge.yml`
+#     consumes — owner-scoped fine-grained PAT with `Contents: r/w +
+#     Pull-requests: r/w`. Wire via `secrets: inherit` in the caller.
+#     See `runbooks/prettier-autofix.md`.
 #
 # Skip behavior:
 #   - Forks: skipped (cross-repo push not allowed).
@@ -49,8 +51,16 @@ on:
         type: string
         default: "style: prettier auto-fix"
     secrets:
-      AUTOFIX_PAT:
-        description: "Fine-grained PAT (or classic PAT with `repo` scope) used to push the autofix commit. Required — pushes by the default GITHUB_TOKEN do not retrigger the lint workflow on the new SHA."
+      automerge_pat:
+        description: >-
+          Fine-grained PAT (or classic with `repo` scope) used to push
+          the autofix commit. Required — pushes by the default
+          GITHUB_TOKEN do not retrigger the lint workflow on the new
+          SHA. Same secret name and required scopes as
+          `claude-author-automerge.yml`'s `automerge_pat`, so a repo
+          that already has auto-merge wired needs no additional
+          provisioning. Required scopes: `Contents: read and write`,
+          `Pull-requests: read`.
         required: true
 
 jobs:
@@ -78,7 +88,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           # PAT is critical: pushes via GITHUB_TOKEN don't retrigger
           # pull_request events. See header comment.
-          token: ${{ secrets.AUTOFIX_PAT }}
+          token: ${{ secrets.automerge_pat }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
