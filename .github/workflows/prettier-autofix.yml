@@ -31,10 +31,17 @@ on:
   workflow_call:
     inputs:
       markdown_glob:
-        description: "Glob passed to prettier --write. Default '**/*.md'. Mirrors lint.yml's markdown_glob — keep both inputs in sync."
+        description: >-
+          Glob passed to prettier --write. Default
+          '**/*.{md,yml,yaml,json}' covers markdown, YAML config, and
+          JSON (the cheap-to-format file types where prettier's opinion
+          is uncontroversial). Mirrors lint.yml's markdown_glob — keep
+          both inputs in sync. Input name is historical; the glob
+          isn't restricted to markdown anymore. To exclude specific
+          files, add them to the repo's `.prettierignore`.
         required: false
         type: string
-        default: "**/*.md"
+        default: "**/*.{md,yml,yaml,json}"
       install_node_deps:
         description: "Run `npm ci` before prettier so plugins (prettier-plugin-svelte etc.) resolve. Default true. Skipped automatically when no package.json present."
         required: false
@@ -122,7 +129,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHANGED_ONLY: ${{ inputs.changed_only }}
-          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.{md,yml,yaml,json}' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         shell: bash
         run: |
@@ -152,8 +159,34 @@ jobs:
             exit 0
           fi
 
+          # `compgen -G` does pathname expansion (incl. globstar `**`) but
+          # NOT brace expansion. Default glob is `**/*.{md,yml,yaml,json}`,
+          # so split braces into individual globs first. Mirrors lint.yml.
           shopt -s globstar nullglob
-          mapfile -t MATCH_GLOB < <(compgen -G "$GLOB" || true)
+          expand_braces() {
+            local pat="$1"
+            if [[ "$pat" == *\{*\}* ]]; then
+              local prefix="${pat%%\{*}"
+              local suffix="${pat##*\}}"
+              local middle="${pat#*\{}"; middle="${middle%%\}*}"
+              local IFS=,
+              for x in $middle; do echo "${prefix}${x}${suffix}"; done
+            else
+              echo "$pat"
+            fi
+          }
+          mapfile -t SUB_GLOBS < <(expand_braces "$GLOB")
+          declare -A _SEEN=()
+          MATCH_GLOB=()
+          for sub in "${SUB_GLOBS[@]}"; do
+            mapfile -t _hits < <(compgen -G "$sub" || true)
+            for h in "${_hits[@]}"; do
+              if [[ -z "${_SEEN[$h]:-}" ]]; then
+                _SEEN[$h]=1
+                MATCH_GLOB+=("$h")
+              fi
+            done
+          done
           if [ "${#MATCH_GLOB[@]}" -eq 0 ]; then
             echo "No files in working tree match glob '$GLOB'."
             echo "mode=none" >> "$GITHUB_OUTPUT"
@@ -183,7 +216,7 @@ jobs:
       - name: prettier --write
         env:
           MODE: ${{ steps.targets.outputs.mode }}
-          GLOB: ${{ inputs.markdown_glob || '**/*.md' }}
+          GLOB: ${{ inputs.markdown_glob || '**/*.{md,yml,yaml,json}' }}
           FILES: ${{ steps.targets.outputs.files }}
         shell: bash
         run: |
