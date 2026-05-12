@@ -217,9 +217,17 @@ jobs:
               MEASURED=$(go tool cover -func=cov.out | awk '/^total:/ {gsub("%","",$3); print $3}')
               ;;
             js)
-              # Caller must configure their test script to emit
-              # coverage/coverage-summary.json (vitest --coverage, jest --coverage
-              # --coverageReporters=json-summary, etc).
+              # JS test runners take different reporter-config flags (vitest:
+              # `--coverage.reporter=json-summary`; jest:
+              # `--coverageReporters=json-summary`; etc). Rather than try to
+              # guess from the lockfile, this workflow ONLY passes `--coverage`
+              # and requires the caller to have json-summary configured in
+              # their test runner's config file:
+              #   - vitest: `coverage: { reporter: ['json-summary'] }` in vite.config.ts
+              #   - jest:   `coverageReporters: ['json-summary']` in jest.config.js
+              #   - bun:    bun test --coverage emits coverage-summary.json by default
+              # If neither is present, the workflow fails with a clear error
+              # pointing at the caller's test config.
               if [[ -f bun.lockb || -f bun.lock ]]; then
                 curl -fsSL https://bun.sh/install | bash
                 export PATH="$HOME/.bun/bin:$PATH"
@@ -228,16 +236,19 @@ jobs:
               elif [[ -f pnpm-lock.yaml ]]; then
                 npm install -g pnpm
                 pnpm install --frozen-lockfile
-                pnpm test --coverage || true
+                pnpm test -- --coverage || true
               elif [[ -f yarn.lock ]]; then
                 yarn install --frozen-lockfile
                 yarn test --coverage || true
               else
                 npm ci
-                npm test -- --coverage --coverage-reporter=json-summary || true
+                npm test -- --coverage || true
               fi
               if [[ ! -f coverage/coverage-summary.json ]]; then
-                echo "::error::no coverage/coverage-summary.json — configure your test runner with --coverage + json-summary reporter"
+                echo "::error::no coverage/coverage-summary.json produced. Configure your test runner to emit json-summary:"
+                echo "::error::  vitest: add 'coverage: { reporter: [\"json-summary\"] }' to vite.config.ts"
+                echo "::error::  jest:   add 'coverageReporters: [\"json-summary\"]' to jest.config.js"
+                echo "::error::  also ensure a coverage provider is installed (vitest: @vitest/coverage-v8)"
                 exit 1
               fi
               MEASURED=$(jq '.total.lines.pct' coverage/coverage-summary.json)
