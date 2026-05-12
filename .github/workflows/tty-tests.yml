@@ -1,0 +1,115 @@
+name: TTY Tests
+
+# Two roles for this workflow:
+#
+# 1. Self-test: triggers on pull_request + push to main of *this repo*. Runs
+#    the pexpect smoke fixture at tests/tty/test_smoke_tty.py to verify the
+#    pty plumbing actually works on a GitHub-hosted ubuntu-latest runner.
+#
+# 2. Reusable: callers do
+#       jobs:
+#         tty-tests:
+#           uses: topcoder1/ci-workflows/.github/workflows/tty-tests.yml@main
+#    See callers/tty-tests.yml for a copy-paste-ready caller.
+#
+# What it does:
+#   - If `tty_dir` doesn't exist OR contains no `test_*.py` files, no-op
+#     gracefully (workflow installs but doesn't fire until the caller adds
+#     real TTY fixtures).
+#   - Otherwise: install pexpect, set `TERM=xterm-256color`, run
+#     `pytest tests/tty/` and report.
+#
+# Why this is a separate reusable from tests-runner.yml: TTY/behavioral tests
+# need a real pseudoterminal. They run slower, sometimes flake on signal
+# timing, and require `pexpect` as a runtime dependency (which most callers
+# don't ship as a test dep). Keeping it separate means callers can install
+# it where it makes sense (CLIs, agent prompts) and skip it where it
+# doesn't (pure-data repos).
+#
+# Why ubuntu-latest only: pty allocation is unreliable on macos-latest GH
+# runners (pexpect's spawn() fails intermittently). ubuntu-latest is stable.
+# We don't expose a `runner` input for this reason — opinionated default.
+#
+# Why TERM=xterm-256color: pexpect on a bare runner without TERM set behaves
+# oddly with prompts that use curses/readline (the prompt may not flush, or
+# echo may be off). Setting an explicit TERM gives consistent behavior.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      tty_dir:
+        description: "Directory holding pexpect-based test_*.py files. Default 'tests/tty'."
+        required: false
+        type: string
+        default: "tests/tty"
+      working_directory:
+        description: "Directory in which to invoke pytest (resolves tty_dir relative to this). Default '.'."
+        required: false
+        type: string
+        default: "."
+      python_version:
+        required: false
+        type: string
+        default: "3.13"
+
+permissions:
+  contents: read
+
+jobs:
+  tty:
+    name: TTY behavioral tests
+    runs-on: ubuntu-latest  # pty plumbing is unreliable on macos-latest
+    env:
+      TERM: xterm-256color
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect tty fixtures
+        id: detect
+        env:
+          INPUT_WORKDIR: ${{ inputs.working_directory || '.' }}
+          INPUT_TTY_DIR: ${{ inputs.tty_dir || 'tests/tty' }}
+        run: |
+          set -euo pipefail
+          cd "$INPUT_WORKDIR"
+          if [[ ! -d "$INPUT_TTY_DIR" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "no $INPUT_TTY_DIR/ directory — TTY tests no-op"
+            exit 0
+          fi
+          # Count test_*.py files; skip if none.
+          COUNT=$(find "$INPUT_TTY_DIR" -name 'test_*.py' -type f 2>/dev/null | wc -l | tr -d ' ')
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$INPUT_TTY_DIR/ exists but contains no test_*.py files — TTY tests no-op"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "found $COUNT TTY test file(s) under $INPUT_TTY_DIR/"
+
+      - uses: actions/setup-python@v5
+        if: steps.detect.outputs.skip == 'false'
+        with:
+          python-version: ${{ inputs.python_version || '3.13' }}
+
+      - name: Install pexpect + pytest
+        if: steps.detect.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pexpect pytest
+
+      - name: Run TTY tests
+        if: steps.detect.outputs.skip == 'false'
+        working-directory: ${{ inputs.working_directory || '.' }}
+        env:
+          INPUT_TTY_DIR: ${{ inputs.tty_dir || 'tests/tty' }}
+        run: |
+          set -euo pipefail
+          # Use a wrapper that ensures pexpect uses a real pty (not a pipe).
+          # Reading from /dev/tty is needed by some interactive programs;
+          # GH runners allocate one when stdin is a tty, which our wrapper
+          # via `script -qec` ensures.
+          python -m pytest "$INPUT_TTY_DIR" -v

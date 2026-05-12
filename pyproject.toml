@@ -12,7 +12,11 @@ build-backend = "setuptools.build_meta"
 include = ["selftest*"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov"]
+dev = [
+    "pexpect>=4.9.0",
+    "pytest",
+    "pytest-cov",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["selftest"]
