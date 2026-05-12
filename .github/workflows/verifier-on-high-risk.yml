@@ -66,26 +66,25 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # NUL-delimited to handle paths with newlines/control chars.
-          # Reject any path containing bytes outside the safe set
-          # [a-zA-Z0-9._/-] — these are not legal in our repos and any
-          # such path is treated as a hostile attempt to spoof matches.
+          # NUL-delimited so paths containing newlines/control chars stay
+          # as one record and CANNOT spoof additional matches by being
+          # split on a converted newline.
           git diff -z --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-paths.z
-          # Convert NUL to newline for the classifier, after byte-validation.
-          tr '\0' '\n' < changed-paths.z > changed-paths.txt
-          if grep -Pq '[^\x20-\x7e]' changed-paths.txt 2>/dev/null; then
-            # Fall back to BSD grep if -P unavailable, but safest is to
-            # check against the whitelist directly.
-            :
-          fi
-          # Whitelist check: every path must match safe-byte regex.
-          while IFS= read -r p; do
+          # Validate each NUL-delimited record BEFORE writing the
+          # newline-delimited output the classifier consumes. Whitelist:
+          # [A-Za-z0-9._/-] (no whitespace, no quotes, no shell metachars).
+          # Spaces are deliberately excluded — high-risk fleet paths do not
+          # contain them, and excluding them avoids the unquoted-path-
+          # substitution risk in the verifier prompt's `git diff -- <file>`.
+          : > changed-paths.txt
+          while IFS= read -r -d '' p; do
             [[ -z "$p" ]] && continue
-            if [[ ! "$p" =~ ^[A-Za-z0-9._/\ -]+$ ]]; then
-              echo "Rejecting unsafe path bytes: $(printf %q "$p")" >&2
+            if [[ ! "$p" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "Rejecting unsafe path bytes: $(printf '%q' "$p")" >&2
               exit 1
             fi
-          done < changed-paths.txt
+            printf '%s\n' "$p" >> changed-paths.txt
+          done < changed-paths.z
           echo "changed_count=$(wc -l < changed-paths.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
           echo "Changed paths:"; cat changed-paths.txt
 
@@ -194,9 +193,16 @@ jobs:
                 - The exact command you ran
                 - The output (truncated to 500 chars per command)
                 - Pass/fail conclusion
+            - The LAST line of the transcript MUST be exactly one of:
+                OVERALL_VERDICT: PASS
+                OVERALL_VERDICT: FAIL
+              The workflow parses this sentinel; a missing or non-PASS
+              sentinel produces a failed check-run regardless of how
+              long the transcript is.
 
           Empty transcript = FAILURE per spec section B1. If you cannot verify
-          a claim, say so explicitly in the transcript — don't omit it.
+          a claim, say so explicitly in the transcript — don't omit it,
+          and emit OVERALL_VERDICT: FAIL.
           PROMPT_BODY
             echo "${DELIM}"
           } >> "$GITHUB_OUTPUT"
@@ -210,23 +216,46 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.prompt.outputs.text }}
 
-      - name: Verify transcript is non-empty
+      - name: "Verify transcript is non-empty AND ends with OVERALL_VERDICT: PASS"
         if: steps.classify.outputs.matched == 'yes'
         id: transcript_check
         run: |
           set -euo pipefail
           mkdir -p evidence
+          # Default: not OK. Three gates must pass:
+          #   1. transcript.md exists and is non-empty
+          #   2. >= 200 chars (guards against trivially-short rubber-stamps)
+          #   3. final non-blank line matches `^OVERALL_VERDICT: PASS$`
+          # An OVERALL_VERDICT of FAIL — or absence of the sentinel —
+          # means the verifier could not conclude safety, so the gate
+          # must fail. Closes the codex-round-2 finding where a "FAIL"
+          # transcript was being marked as a green check.
           if [[ ! -s evidence/transcript.md ]]; then
             echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
+            echo "verdict=missing" >> "$GITHUB_OUTPUT"
             echo "evidence/transcript.md is empty or missing — verifier did not produce evidence" >&2
+            exit 0
+          fi
+          chars=$(wc -c < evidence/transcript.md | tr -d ' ')
+          if [[ "$chars" -lt 200 ]]; then
+            echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
+            echo "verdict=too-short" >> "$GITHUB_OUTPUT"
+            echo "transcript too short ($chars chars) — likely no real verification done" >&2
+            exit 0
+          fi
+          # Tail-grep for sentinel. Strip trailing blank lines first.
+          last_line=$(awk 'NF {ln=$0} END {print ln}' evidence/transcript.md)
+          if [[ "$last_line" == "OVERALL_VERDICT: PASS" ]]; then
+            echo "transcript_ok=yes" >> "$GITHUB_OUTPUT"
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          elif [[ "$last_line" == "OVERALL_VERDICT: FAIL" ]]; then
+            echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "verifier transcript ended with OVERALL_VERDICT: FAIL" >&2
           else
-            chars=$(wc -c < evidence/transcript.md | tr -d ' ')
-            if [[ "$chars" -lt 200 ]]; then
-              echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
-              echo "transcript too short ($chars chars) — likely no real verification done" >&2
-            else
-              echo "transcript_ok=yes" >> "$GITHUB_OUTPUT"
-            fi
+            echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
+            echo "verdict=missing-sentinel" >> "$GITHUB_OUTPUT"
+            echo "transcript final line is not OVERALL_VERDICT: PASS|FAIL — got: $last_line" >&2
           fi
 
       - name: Redact secrets in evidence (pre-publish, fail-closed)
@@ -264,20 +293,29 @@ jobs:
           PR_NUM: ${{ github.event.pull_request.number }}
           VERIFIER_OUTCOME: ${{ steps.verifier.outcome }}
           TRANSCRIPT_OK: ${{ steps.transcript_check.outputs.transcript_ok }}
+          VERDICT: ${{ steps.transcript_check.outputs.verdict }}
         run: |
           set -euo pipefail
           # Conclusion logic:
-          #   verifier action exit 0 + transcript_ok=yes → success
-          #   anything else → failure
+          #   verifier action exit 0 + transcript_ok=yes (i.e. verdict=pass)
+          #     → success
+          #   anything else → failure (verifier crashed, transcript empty/short,
+          #     verdict=fail, or sentinel missing)
           MATCHED_COUNT=$(wc -l < matches.txt | tr -d ' ')
           if [[ "${VERIFIER_OUTCOME}" == "success" && "${TRANSCRIPT_OK}" == "yes" ]]; then
             CONCL="success"
-            TITLE="Verifier evidence captured"
-            SUMMARY="Verified ${MATCHED_COUNT} high-risk path(s). Evidence in artifact verifier-evidence-${PR_NUM}."
+            TITLE="Verifier evidence captured (PASS)"
+            SUMMARY="Verified ${MATCHED_COUNT} high-risk path(s). OVERALL_VERDICT: PASS. Evidence in artifact verifier-evidence-${PR_NUM}."
           else
             CONCL="failure"
-            TITLE="Verifier evidence missing or empty"
-            SUMMARY="Verifier dispatched but did not produce non-empty evidence. transcript_ok=${TRANSCRIPT_OK}, verifier_outcome=${VERIFIER_OUTCOME}. See artifact (if any) for partial output."
+            case "${VERDICT}" in
+              fail)             TITLE="Verifier reported OVERALL_VERDICT: FAIL" ;;
+              missing-sentinel) TITLE="Verifier transcript missing OVERALL_VERDICT sentinel" ;;
+              too-short)        TITLE="Verifier transcript too short to be real verification" ;;
+              missing)          TITLE="Verifier produced no transcript" ;;
+              *)                TITLE="Verifier evidence missing or empty" ;;
+            esac
+            SUMMARY="Verifier did not produce a passing verdict. transcript_ok=${TRANSCRIPT_OK}, verdict=${VERDICT}, verifier_outcome=${VERIFIER_OUTCOME}. See artifact (if any) for partial output."
           fi
           gh api -X POST \
             "/repos/${REPO}/check-runs" \
