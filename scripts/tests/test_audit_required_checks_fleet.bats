@@ -49,3 +49,20 @@ teardown() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage"* ]]
 }
+
+@test "--out writes digest to file (not stdout)" {
+  out_file="$BATS_TEST_TMPDIR/digest.md"
+  run "$SCRIPT" --repos "topcoder1/ok-a topcoder1/warn-b" --out "$out_file"
+  [ "$status" -eq 0 ]
+  [ -f "$out_file" ]
+  grep -q "warn-b" "$out_file"
+  grep -q "phantom check" "$out_file"
+}
+
+@test "--out writes 'all clean' digest to file when nothing flagged" {
+  out_file="$BATS_TEST_TMPDIR/digest.md"
+  run "$SCRIPT" --repos "topcoder1/ok-a topcoder1/ok-b" --out "$out_file"
+  [ "$status" -eq 0 ]
+  [ -f "$out_file" ]
+  grep -q "All 2 repos clean" "$out_file"
+}

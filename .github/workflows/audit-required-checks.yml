@@ -79,6 +79,7 @@ jobs:
             --out per-org-digest-topcoder1.md
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: per-org-digest-topcoder1
           path: per-org-digest-topcoder1.md
@@ -113,6 +114,7 @@ jobs:
             --out per-org-digest-whois-api-llc.md
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: per-org-digest-whois-api-llc
           path: per-org-digest-whois-api-llc.md
@@ -127,6 +129,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
+        continue-on-error: true   # tolerate jobs that failed before uploading
         with:
           pattern: per-org-digest-*
           merge-multiple: true
@@ -194,14 +197,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # Self-heal: ensure the labels exist before `gh issue create` tries
+          # to apply them. --force is idempotent (no-op if label exists).
+          gh label create audit --description "Weekly audit findings" \
+            --color FBCA04 --force >/dev/null
+          gh label create quality-gates --description "Quality Gates rollout artifacts" \
+            --color 0E8A16 --force >/dev/null
+
           WEEK_TAG="$(date -u '+%Y-W%V')"
           TITLE="Required-checks audit: $WEEK_TAG"
           # Check for an open issue with this title (idempotency on re-runs).
           # Don't use --search: GitHub's search parses the colon in the title
           # as a qualifier separator and returns junk. Instead enumerate open
           # issues + jq for an exact title match.
-          existing=$(gh issue list --state open --label audit \
-            --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" \
+          # Use jq with --arg to safely match the title (avoids jq-injection
+          # if the title format ever includes quotes/backslashes).
+          # --limit 200 covers ~4 years of weekly digests; default 30 would
+          # miss matches once retention exceeds that.
+          existing=$(gh issue list --state open --label audit --limit 200 \
+            --json number,title \
+            | jq -r --arg title "$TITLE" '.[] | select(.title == $title) | .number' \
             | head -1 || true)
           if [[ -n "$existing" ]]; then
             gh issue edit "$existing" --body-file combined-digest.md
