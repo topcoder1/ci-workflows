@@ -1,0 +1,241 @@
+name: Tests
+
+# Two roles for this workflow:
+#
+# 1. Self-test: triggers on pull_request + push to main of *this repo* so that
+#    typos in the reusable here get caught before they break every consumer.
+#    Self-test fixtures live in `selftest/` (NOT `tests/`, to make it clear
+#    they're verifying the reusable itself, not production tests).
+#
+# 2. Reusable: other repos call it via
+#       jobs:
+#         tests:
+#           uses: topcoder1/ci-workflows/.github/workflows/tests-runner.yml@main
+#    See callers/tests-runner.yml in the templates dir for a copy-paste-ready
+#    caller.
+#
+# What it does:
+#   - Auto-detects language from manifest files (pyproject.toml / requirements.txt
+#     → python; go.mod → go; package.json → js). Override via `language:` input.
+#   - Multi-language repos: auto-detection aborts; caller must pass `language:`
+#     and `working_directory:` explicitly. See the multi-lang notes in the
+#     installer docs.
+#   - Installs deps and runs the test command appropriate for that language.
+#     `test_command:` input lets the caller override the default invocation
+#     (e.g. `bun run test:unit` instead of `npm test`).
+#
+# Defaults chosen for "drop into an existing repo and surface its current
+# test suite":
+#   - Python with pyproject.toml → `uv sync && uv run pytest -q` (uv is the
+#     fastest sustainable choice and handles lockfiles).
+#   - Python with only requirements.txt → `pip install -r requirements.txt
+#     && pip install pytest && pytest -q`. No coverage gating here; that's
+#     coverage-floor.yml's job.
+#   - Go → `go test ./...`
+#   - JS → respects lockfile to pick runner (bun.lockb → bun; pnpm-lock.yaml
+#     → pnpm; yarn.lock → yarn; else npm), then `<runner> test`. Override via
+#     `test_command:` for repos with non-standard script names.
+#
+# Coverage gating is a separate concern: see coverage-floor.yml.
+# Regression-test convention enforcement: see regression-convention.yml.
+# Interactive/TTY behavioral tests: see tty-tests.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      language:
+        description: "Language: auto | python | go | js. Default auto. Multi-language repos MUST pass explicitly (auto-detect aborts on ambiguity)."
+        required: false
+        type: string
+        default: "auto"
+      working_directory:
+        description: "Directory containing the manifest file (pyproject.toml / requirements.txt / go.mod / package.json). Default '.'. Use for monorepo subdirs like 'web' or 'backend'."
+        required: false
+        type: string
+        default: "."
+      test_command:
+        description: "Override the default test invocation. Empty = use language default. E.g. 'bun run test:unit' or 'pytest tests/unit -q'."
+        required: false
+        type: string
+        default: ""
+      python_version:
+        description: "Python version when language=python. Default '3.13'."
+        required: false
+        type: string
+        default: "3.13"
+      node_version:
+        description: "Node version when language=js. Default '20'."
+        required: false
+        type: string
+        default: "20"
+      go_version:
+        description: "Go version when language=go. Default reads from go.mod's `go` directive, fallback '1.23'."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect language and runner
+    runs-on: ubuntu-latest
+    outputs:
+      language: ${{ steps.d.outputs.language }}
+      runner: ${{ steps.d.outputs.runner }}
+      go_version: ${{ steps.d.outputs.go_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        env:
+          INPUT_LANGUAGE: ${{ inputs.language }}
+          INPUT_WORKDIR: ${{ inputs.working_directory }}
+          INPUT_GO_VERSION: ${{ inputs.go_version }}
+        run: |
+          set -euo pipefail
+          cd "$INPUT_WORKDIR"
+
+          # Auto-detection enumerates ALL signals (not first-match) so we can
+          # fail loudly on multi-language repos rather than silently picking
+          # the wrong one (see techrecon: go.mod root + web/package.json).
+          if [[ "$INPUT_LANGUAGE" == "auto" ]]; then
+            found=()
+            { [[ -f pyproject.toml ]] || [[ -f requirements.txt ]]; } && found+=("python")
+            [[ -f go.mod ]] && found+=("go")
+            [[ -f package.json ]] && found+=("js")
+            if [[ ${#found[@]} -eq 0 ]]; then
+              echo "::error::no language manifest in '$INPUT_WORKDIR' (pyproject.toml / requirements.txt / go.mod / package.json). Pass `language:` explicitly, or set `working_directory:` to the correct subdir."
+              exit 1
+            elif [[ ${#found[@]} -gt 1 ]]; then
+              echo "::error::ambiguous language detection in '$INPUT_WORKDIR' — found: ${found[*]}. Pass `language:` and `working_directory:` explicitly. Multi-language repos need one caller per language."
+              exit 1
+            fi
+            LANG="${found[0]}"
+          else
+            LANG="$INPUT_LANGUAGE"
+          fi
+          echo "language=$LANG" >> "$GITHUB_OUTPUT"
+
+          # JS runner detection by lockfile.
+          RUNNER=""
+          if [[ "$LANG" == "js" ]]; then
+            if [[ -f bun.lockb ]] || [[ -f bun.lock ]]; then RUNNER="bun";
+            elif [[ -f pnpm-lock.yaml ]]; then RUNNER="pnpm";
+            elif [[ -f yarn.lock ]]; then RUNNER="yarn";
+            else RUNNER="npm"; fi
+          fi
+          echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
+
+          # Go version: prefer input, else read go.mod's `go N.NN` directive,
+          # else fall back to 1.23.
+          GO_VER="$INPUT_GO_VERSION"
+          if [[ "$LANG" == "go" && -z "$GO_VER" && -f go.mod ]]; then
+            GO_VER=$(awk '/^go [0-9]+\.[0-9]+/ {print $2; exit}' go.mod || true)
+          fi
+          [[ -z "$GO_VER" ]] && GO_VER="1.23"
+          echo "go_version=$GO_VER" >> "$GITHUB_OUTPUT"
+
+          echo "detected: language=$LANG runner=$RUNNER go_version=$GO_VER workdir=$INPUT_WORKDIR"
+
+  run-python:
+    name: Tests (Python)
+    needs: detect
+    if: needs.detect.outputs.language == 'python'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install deps and run tests
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          INPUT_TEST_COMMAND: ${{ inputs.test_command }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+            echo "Running override: $INPUT_TEST_COMMAND"
+            eval "$INPUT_TEST_COMMAND"
+          elif [[ -f pyproject.toml ]]; then
+            uv sync
+            uv run pytest -q
+          elif [[ -f requirements.txt ]]; then
+            python -m venv .venv
+            .venv/bin/pip install -q -r requirements.txt
+            .venv/bin/pip install -q pytest
+            .venv/bin/pytest -q
+          else
+            echo "::error::python language declared but no pyproject.toml or requirements.txt found"
+            exit 1
+          fi
+
+  run-go:
+    name: Tests (Go)
+    needs: detect
+    if: needs.detect.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.detect.outputs.go_version }}
+      - name: Run tests
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          INPUT_TEST_COMMAND: ${{ inputs.test_command }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+            echo "Running override: $INPUT_TEST_COMMAND"
+            eval "$INPUT_TEST_COMMAND"
+          else
+            go test ./...
+          fi
+
+  run-js:
+    name: Tests (JS)
+    needs: detect
+    if: needs.detect.outputs.language == 'js'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install runner (bun/pnpm) if needed
+        if: needs.detect.outputs.runner == 'bun' || needs.detect.outputs.runner == 'pnpm'
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.detect.outputs.runner }}" == "bun" ]]; then
+            curl -fsSL https://bun.sh/install | bash
+            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          else
+            npm install -g pnpm
+          fi
+      - name: Install deps and run tests
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          INPUT_TEST_COMMAND: ${{ inputs.test_command }}
+          RUNNER: ${{ needs.detect.outputs.runner }}
+        run: |
+          set -euo pipefail
+          case "$RUNNER" in
+            bun)   bun install --frozen-lockfile ;;
+            pnpm)  pnpm install --frozen-lockfile ;;
+            yarn)  yarn install --frozen-lockfile ;;
+            npm)   npm ci ;;
+          esac
+          if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+            echo "Running override: $INPUT_TEST_COMMAND"
+            eval "$INPUT_TEST_COMMAND"
+          else
+            "$RUNNER" test
+          fi

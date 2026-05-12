@@ -1,0 +1,15 @@
+[project]
+name = "ci-workflows-selftest"
+version = "0.0.0"
+description = "Self-test fixtures for ci-workflows reusable workflows. Not a published package."
+requires-python = ">=3.13"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["selftest"]
