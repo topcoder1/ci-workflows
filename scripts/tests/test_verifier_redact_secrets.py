@@ -53,6 +53,22 @@ def test_preserves_full_git_sha(tmp_path):
     assert sha in f.read_text(), "full git SHA was wrongly redacted"
 
 
+SAFE_EVIDENCE_VALUES = [
+    ("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "sha256 hex"),
+    ("aabbccddeeff00112233445566778899", "md5 hex / UUID-no-hyphens"),
+    ("550e8400-e29b-41d4-a716-446655440000", "UUID with hyphens"),
+]
+
+
+@pytest.mark.parametrize("value,label", SAFE_EVIDENCE_VALUES)
+def test_preserves_legitimate_evidence_values(tmp_path, value, label):
+    f = tmp_path / "evidence.txt"
+    f.write_text(f"computed digest: {value}\n")
+    rc = _run([str(f)])
+    assert rc.returncode == 0
+    assert value in f.read_text(), f"{label} ({value}) was wrongly redacted"
+
+
 def test_no_args_exits_nonzero():
     rc = _run([])
     assert rc.returncode != 0

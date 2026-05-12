@@ -43,17 +43,34 @@ SECRET_PATTERNS = [
     re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
     # key=value / key:value form (catches arbitrary providers when labeled)
     re.compile(r"(?i)(api[_-]?key|secret|token|credential|password|passwd)\s*[:=]\s*\S{8,}"),
-    # High-entropy base64-like chunks >= 32 chars; allowlist full git SHAs.
-    # Now includes URL-safe base64 (- and _) per codex finding.
-    re.compile(r"\b[A-Za-z0-9+/=_\-]{32,}\b"),
+    # High-entropy base64-like chunks >= 40 chars (raised from 32 per codex
+    # round 3 — 32-char hex collides with UUIDs-without-hyphens, 32-char
+    # alnum collides with cache/build IDs). The allowlist below covers
+    # common-shape legitimate evidence values (git SHAs, sha256 digests,
+    # UUIDs). Catch-all kept for genuinely high-entropy unknown blobs.
+    re.compile(r"\b[A-Za-z0-9+/=_\-]{40,}\b"),
 ]
-KNOWN_SAFE_RE = re.compile(r"^[0-9a-f]{40}$")  # full git SHAs
+# Known-safe tokens that look high-entropy but are legitimate evidence.
+# Ordered most-specific-first; checked before any redaction.
+KNOWN_SAFE_PATTERNS = [
+    re.compile(r"^[0-9a-f]{40}$"),                                # full git SHA
+    re.compile(r"^[0-9a-f]{64}$"),                                # sha256 hex
+    re.compile(r"^[0-9a-f]{56}$"),                                # sha224 hex
+    re.compile(r"^[0-9a-f]{96}$"),                                # sha384 hex
+    re.compile(r"^[0-9a-f]{128}$"),                               # sha512 hex
+    re.compile(r"^[0-9a-fA-F]{32}$"),                             # md5 hex / UUID-no-hyphens
+    re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"),  # UUID
+]
+
+
+def _is_known_safe(snippet: str) -> bool:
+    return any(p.match(snippet) for p in KNOWN_SAFE_PATTERNS)
 
 
 def redact(text: str) -> str:
     def _sub(m: re.Match) -> str:
         snippet = m.group(0)
-        if KNOWN_SAFE_RE.match(snippet):
+        if _is_known_safe(snippet):
             return snippet
         return f"[REDACTED:{len(snippet)}ch]"
     out = text

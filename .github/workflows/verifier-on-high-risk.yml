@@ -193,16 +193,22 @@ jobs:
                 - The exact command you ran
                 - The output (truncated to 500 chars per command)
                 - Pass/fail conclusion
-            - The LAST line of the transcript MUST be exactly one of:
-                OVERALL_VERDICT: PASS
-                OVERALL_VERDICT: FAIL
-              The workflow parses this sentinel; a missing or non-PASS
-              sentinel produces a failed check-run regardless of how
-              long the transcript is.
+            - SEPARATELY write the machine-readable verdict to
+              \`evidence/verdict.txt\` containing EXACTLY one of these
+              5-character payloads (no whitespace, no trailing newline
+              optional, nothing else):
+                  PASS
+                  FAIL
+              The workflow ONLY trusts evidence/verdict.txt — never the
+              transcript prose — to decide the check-run conclusion. This
+              is deliberate: prose can quote untrusted PR content that
+              ends with "OVERALL_VERDICT: PASS", but the dedicated file
+              cannot be confused with content. If verdict.txt is missing,
+              empty, or anything other than PASS, the gate FAILS.
 
           Empty transcript = FAILURE per spec section B1. If you cannot verify
           a claim, say so explicitly in the transcript — don't omit it,
-          and emit OVERALL_VERDICT: FAIL.
+          and write FAIL to evidence/verdict.txt.
           PROMPT_BODY
             echo "${DELIM}"
           } >> "$GITHUB_OUTPUT"
@@ -216,20 +222,20 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.prompt.outputs.text }}
 
-      - name: "Verify transcript is non-empty AND ends with OVERALL_VERDICT: PASS"
+      - name: Verify transcript and verdict file
         if: steps.classify.outputs.matched == 'yes'
         id: transcript_check
         run: |
           set -euo pipefail
           mkdir -p evidence
-          # Default: not OK. Three gates must pass:
+          # Three gates must pass:
           #   1. transcript.md exists and is non-empty
           #   2. >= 200 chars (guards against trivially-short rubber-stamps)
-          #   3. final non-blank line matches `^OVERALL_VERDICT: PASS$`
-          # An OVERALL_VERDICT of FAIL — or absence of the sentinel —
-          # means the verifier could not conclude safety, so the gate
-          # must fail. Closes the codex-round-2 finding where a "FAIL"
-          # transcript was being marked as a green check.
+          #   3. evidence/verdict.txt contains exactly the 4-byte string PASS
+          # Trust ONLY verdict.txt for the verdict signal — not the
+          # transcript prose. Codex round 3 finding: prose-based sentinel
+          # can be tricked by quoted untrusted content. The dedicated
+          # one-line file cannot be confused with markdown / fenced blocks.
           if [[ ! -s evidence/transcript.md ]]; then
             echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
             echo "verdict=missing" >> "$GITHUB_OUTPUT"
@@ -243,19 +249,39 @@ jobs:
             echo "transcript too short ($chars chars) — likely no real verification done" >&2
             exit 0
           fi
-          # Tail-grep for sentinel. Strip trailing blank lines first.
-          last_line=$(awk 'NF {ln=$0} END {print ln}' evidence/transcript.md)
-          if [[ "$last_line" == "OVERALL_VERDICT: PASS" ]]; then
+          # Verdict file must exist and contain exactly PASS or FAIL after
+          # stripping trailing whitespace/newlines.
+          if [[ ! -f evidence/verdict.txt ]]; then
+            echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
+            echo "verdict=missing-verdict-file" >> "$GITHUB_OUTPUT"
+            echo "evidence/verdict.txt missing — verifier did not produce machine verdict" >&2
+            exit 0
+          fi
+          # Read the file, trim whitespace, and compare verbatim. Reject
+          # any file with multiple non-empty lines (the contract is one
+          # token, no extra content).
+          mapfile -t verdict_lines < <(grep -v '^[[:space:]]*$' evidence/verdict.txt || true)
+          if [[ "${#verdict_lines[@]}" -ne 1 ]]; then
+            echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
+            echo "verdict=malformed-verdict-file" >> "$GITHUB_OUTPUT"
+            echo "evidence/verdict.txt must contain exactly one non-blank line, got ${#verdict_lines[@]}" >&2
+            exit 0
+          fi
+          payload="${verdict_lines[0]}"
+          # Strip surrounding whitespace.
+          payload="${payload#"${payload%%[![:space:]]*}"}"
+          payload="${payload%"${payload##*[![:space:]]}"}"
+          if [[ "$payload" == "PASS" ]]; then
             echo "transcript_ok=yes" >> "$GITHUB_OUTPUT"
             echo "verdict=pass" >> "$GITHUB_OUTPUT"
-          elif [[ "$last_line" == "OVERALL_VERDICT: FAIL" ]]; then
+          elif [[ "$payload" == "FAIL" ]]; then
             echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
-            echo "verifier transcript ended with OVERALL_VERDICT: FAIL" >&2
+            echo "verifier verdict.txt = FAIL" >&2
           else
             echo "transcript_ok=no" >> "$GITHUB_OUTPUT"
-            echo "verdict=missing-sentinel" >> "$GITHUB_OUTPUT"
-            echo "transcript final line is not OVERALL_VERDICT: PASS|FAIL — got: $last_line" >&2
+            echo "verdict=invalid-verdict-payload" >> "$GITHUB_OUTPUT"
+            echo "evidence/verdict.txt payload not PASS or FAIL — got: $(printf '%q' "$payload")" >&2
           fi
 
       - name: Redact secrets in evidence (pre-publish, fail-closed)
@@ -309,11 +335,13 @@ jobs:
           else
             CONCL="failure"
             case "${VERDICT}" in
-              fail)             TITLE="Verifier reported OVERALL_VERDICT: FAIL" ;;
-              missing-sentinel) TITLE="Verifier transcript missing OVERALL_VERDICT sentinel" ;;
-              too-short)        TITLE="Verifier transcript too short to be real verification" ;;
-              missing)          TITLE="Verifier produced no transcript" ;;
-              *)                TITLE="Verifier evidence missing or empty" ;;
+              fail)                     TITLE="Verifier reported FAIL" ;;
+              missing-verdict-file)     TITLE="Verifier produced no verdict.txt" ;;
+              malformed-verdict-file)   TITLE="Verifier verdict.txt malformed (must be one line PASS or FAIL)" ;;
+              invalid-verdict-payload)  TITLE="Verifier verdict.txt payload neither PASS nor FAIL" ;;
+              too-short)                TITLE="Verifier transcript too short to be real verification" ;;
+              missing)                  TITLE="Verifier produced no transcript" ;;
+              *)                        TITLE="Verifier evidence missing or empty" ;;
             esac
             SUMMARY="Verifier did not produce a passing verdict. transcript_ok=${TRANSCRIPT_OK}, verdict=${VERDICT}, verifier_outcome=${VERIFIER_OUTCOME}. See artifact (if any) for partial output."
           fi
