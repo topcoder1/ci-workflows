@@ -50,16 +50,19 @@ SECRET_PATTERNS = [
     # UUIDs). Catch-all kept for genuinely high-entropy unknown blobs.
     re.compile(r"\b[A-Za-z0-9+/=_\-]{40,}\b"),
 ]
-# Known-safe tokens that look high-entropy but are legitimate evidence.
-# Ordered most-specific-first; checked before any redaction.
+# Known-safe tokens that look high-entropy but are uniquely identifiable
+# as not-secrets. Conservative by design: any token shape that overlaps
+# with real secret shapes (hex HMAC keys, UUID-shaped bearer tokens, etc.)
+# is NOT allowlisted. Codex round 4 finding: a permissive allowlist is a
+# redaction bypass. We accept that legitimate sha256/UUID-shaped values
+# in evidence will be redacted as the cost of fail-safe. Verifier prose
+# can still reference values by label (e.g., "computed sha256: <hash>")
+# — the labeled key=val pattern still fires, but the prose context survives.
+#
+# Only the full 40-hex-lowercase git-SHA shape is allowlisted: it is
+# uniquely git's commit SHA format and is not a known secret shape.
 KNOWN_SAFE_PATTERNS = [
-    re.compile(r"^[0-9a-f]{40}$"),                                # full git SHA
-    re.compile(r"^[0-9a-f]{64}$"),                                # sha256 hex
-    re.compile(r"^[0-9a-f]{56}$"),                                # sha224 hex
-    re.compile(r"^[0-9a-f]{96}$"),                                # sha384 hex
-    re.compile(r"^[0-9a-f]{128}$"),                               # sha512 hex
-    re.compile(r"^[0-9a-fA-F]{32}$"),                             # md5 hex / UUID-no-hyphens
-    re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"),  # UUID
+    re.compile(r"^[0-9a-f]{40}$"),  # full git SHA (lowercase, no other shape)
 ]
 
 

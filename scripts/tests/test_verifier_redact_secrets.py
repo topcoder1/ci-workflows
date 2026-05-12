@@ -53,20 +53,26 @@ def test_preserves_full_git_sha(tmp_path):
     assert sha in f.read_text(), "full git SHA was wrongly redacted"
 
 
-SAFE_EVIDENCE_VALUES = [
-    ("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "sha256 hex"),
-    ("aabbccddeeff00112233445566778899", "md5 hex / UUID-no-hyphens"),
-    ("550e8400-e29b-41d4-a716-446655440000", "UUID with hyphens"),
+# Codex round 4: KNOWN_SAFE allowlist for hex HMAC / UUID shapes was a
+# redaction bypass (real secrets often take those shapes). The allowlist
+# is now restricted to ONLY full git-SHAs. The values below SHOULD be
+# redacted by the catch-all >= 40-char regex — we accept the false-
+# positive on legitimate sha256 digests as the cost of fail-safe.
+HEX_LIKE_SECRET_SHAPES = [
+    ("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "sha256-shaped (could be HMAC)"),
+    ("550e8400e29b41d4a716446655440000abcdef0123456789abcdef0123456789", "high-entropy 64ch hex"),
 ]
 
 
-@pytest.mark.parametrize("value,label", SAFE_EVIDENCE_VALUES)
-def test_preserves_legitimate_evidence_values(tmp_path, value, label):
+@pytest.mark.parametrize("value,label", HEX_LIKE_SECRET_SHAPES)
+def test_redacts_hex_like_high_entropy_strings(tmp_path, value, label):
+    """Hex tokens >= 40 chars are redacted UNLESS they match the
+    git-SHA allowlist (40 lowercase hex). 64-char shapes do not match."""
     f = tmp_path / "evidence.txt"
-    f.write_text(f"computed digest: {value}\n")
+    f.write_text(f"value: {value}\n")
     rc = _run([str(f)])
     assert rc.returncode == 0
-    assert value in f.read_text(), f"{label} ({value}) was wrongly redacted"
+    assert value not in f.read_text(), f"{label} should have been redacted"
 
 
 def test_no_args_exits_nonzero():
