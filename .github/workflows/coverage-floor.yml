@@ -1,0 +1,313 @@
+name: Coverage Floor
+
+# Two roles for this workflow:
+#
+# 1. Self-test: triggers on pull_request + push to main of *this repo*.
+#    `.coverage-floor` at repo root holds {"current": 99.0, "target": 100.0, …}
+#    so enforce mode runs against the 100% coverage of selftest/sample.py.
+#
+# 2. Reusable: callers do
+#       jobs:
+#         coverage-floor:
+#           uses: topcoder1/ci-workflows/.github/workflows/coverage-floor.yml@main
+#           permissions:
+#             contents: write       # for seed-mode self-commit
+#             pull-requests: write  # for sticky coverage comment
+#    See callers/coverage-floor.yml for a copy-paste-ready caller.
+#
+# What it does:
+#   - Reads .coverage-floor (JSON: {current, target, last_bumped}).
+#   - Measures coverage in CI (Python: pytest --cov; Go: go test -coverprofile;
+#     JS: vitest --coverage with coverage-summary.json).
+#   - SEED MODE: if `current == 0.0`, this is the install PR's first run.
+#     Measure coverage, compute `proposed = max(0, measured - 0.5)`, commit
+#     the updated `.coverage-floor` back to the PR branch with the
+#     `github-actions[bot]` identity. The install PR is now ready to merge.
+#     Future PRs land in enforce mode against the seeded floor.
+#   - ENFORCE MODE: measure coverage, compare to `current`. Below floor → fail.
+#   - Always (PR events): post a sticky comment with measured / floor / target /
+#     gap to target / mode.
+#
+# Note on re-triggering: GITHUB_TOKEN pushes do NOT re-trigger
+# pull_request workflows (GitHub's recursion-prevention). So the seed-mode
+# commit does NOT cause an immediate enforce-mode run on the install PR
+# itself. Enforce mode kicks in on the NEXT PR (after install merge). The
+# install PR exits seed mode with a green check and a comment naming the
+# seeded floor.
+#
+# Coverage gating is intentionally separate from tests-runner.yml. Reasoning:
+# tests must pass before coverage is meaningful. Bundling would couple "tests
+# green" and "coverage above floor" into one signal, hiding which actually
+# failed. Two reusables, two signals.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      language:
+        description: "Language: auto | python | go | js. Default auto. Multi-language repos pass explicitly."
+        required: false
+        type: string
+        default: "auto"
+      working_directory:
+        description: "Directory containing the manifest file (pyproject.toml / requirements.txt / go.mod / package.json). Default '.'."
+        required: false
+        type: string
+        default: "."
+      floor_file:
+        description: "Path to .coverage-floor JSON, relative to working_directory. Default '.coverage-floor'."
+        required: false
+        type: string
+        default: ".coverage-floor"
+      seed_minimum:
+        description: "Minimum measured coverage required for seed mode to commit. Below this, seed-mode warns and stays armed (so a fresh attempt with corrected test infra can re-seed). Default 1.0%."
+        required: false
+        type: number
+        default: 1.0
+      python_version:
+        required: false
+        type: string
+        default: "3.13"
+      node_version:
+        required: false
+        type: string
+        default: "20"
+      go_version:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write       # seed-mode self-commit
+  pull-requests: write  # sticky PR comment
+
+jobs:
+  measure:
+    name: Measure coverage and enforce floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # PR branch ref so seed-mode push targets the right branch.
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          token: ${{ github.token }}
+
+      - name: Read .coverage-floor
+        id: floor
+        env:
+          INPUT_WORKDIR: ${{ inputs.working_directory || '.' }}
+          INPUT_FLOOR_FILE: ${{ inputs.floor_file || '.coverage-floor' }}
+        run: |
+          set -euo pipefail
+          cd "$INPUT_WORKDIR"
+          if [[ ! -f "$INPUT_FLOOR_FILE" ]]; then
+            echo "::error::missing $INPUT_FLOOR_FILE — run install-coverage-floor.sh to seed it"
+            exit 1
+          fi
+          # Validate JSON before parsing fields.
+          if ! jq empty "$INPUT_FLOOR_FILE" 2>/dev/null; then
+            echo "::error::$INPUT_FLOOR_FILE is not valid JSON"
+            exit 1
+          fi
+          CURRENT=$(jq -r '.current' "$INPUT_FLOOR_FILE")
+          TARGET=$(jq -r '.target' "$INPUT_FLOOR_FILE")
+          LAST_BUMPED=$(jq -r '.last_bumped' "$INPUT_FLOOR_FILE")
+          # Seed mode triggers when current == 0.0 (or 0).
+          MODE="enforce"
+          if awk -v c="$CURRENT" 'BEGIN {exit !(c <= 0.0)}'; then
+            MODE="seed"
+          fi
+          {
+            echo "current=$CURRENT"
+            echo "target=$TARGET"
+            echo "last_bumped=$LAST_BUMPED"
+            echo "mode=$MODE"
+          } >> "$GITHUB_OUTPUT"
+          echo ".coverage-floor: current=$CURRENT target=$TARGET last_bumped=$LAST_BUMPED mode=$MODE"
+
+      - name: Detect language
+        id: detect
+        env:
+          INPUT_LANGUAGE: ${{ inputs.language || 'auto' }}
+          INPUT_WORKDIR: ${{ inputs.working_directory || '.' }}
+          INPUT_GO_VERSION: ${{ inputs.go_version || '' }}
+        run: |
+          set -euo pipefail
+          cd "$INPUT_WORKDIR"
+          if [[ "$INPUT_LANGUAGE" == "auto" ]]; then
+            found=()
+            { [[ -f pyproject.toml ]] || [[ -f requirements.txt ]]; } && found+=("python")
+            [[ -f go.mod ]] && found+=("go")
+            [[ -f package.json ]] && found+=("js")
+            if [[ ${#found[@]} -eq 0 ]]; then
+              echo "::error::no language manifest in '$INPUT_WORKDIR' (pyproject.toml / requirements.txt / go.mod / package.json). Pass \`language:\` explicitly."
+              exit 1
+            elif [[ ${#found[@]} -gt 1 ]]; then
+              echo "::error::ambiguous language detection: ${found[*]}. Pass \`language:\` and \`working_directory:\` explicitly."
+              exit 1
+            fi
+            LANG="${found[0]}"
+          else
+            LANG="$INPUT_LANGUAGE"
+          fi
+          GO_VER="$INPUT_GO_VERSION"
+          if [[ "$LANG" == "go" && -z "$GO_VER" && -f go.mod ]]; then
+            GO_VER=$(awk '/^go [0-9]+\.[0-9]+/ {print $2; exit}' go.mod || true)
+          fi
+          [[ -z "$GO_VER" ]] && GO_VER="1.23"
+          {
+            echo "language=$LANG"
+            echo "go_version=$GO_VER"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.detect.outputs.language == 'python'
+        with:
+          python-version: ${{ inputs.python_version || '3.13' }}
+      - name: Install uv (python)
+        if: steps.detect.outputs.language == 'python'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-go@v5
+        if: steps.detect.outputs.language == 'go'
+        with:
+          go-version: ${{ steps.detect.outputs.go_version }}
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.language == 'js'
+        with:
+          node-version: ${{ inputs.node_version || '20' }}
+
+      - name: Measure coverage
+        id: measure
+        working-directory: ${{ inputs.working_directory || '.' }}
+        env:
+          LANG_TYPE: ${{ steps.detect.outputs.language }}
+        run: |
+          set -euo pipefail
+          case "$LANG_TYPE" in
+            python)
+              if [[ -f pyproject.toml ]]; then
+                uv sync --quiet
+                uv pip install --quiet pytest-cov
+                # `|| true` lets us still parse coverage.json even when tests fail
+                # (tests-runner.yml is the gate for test pass/fail; we just need
+                # the coverage number here).
+                uv run pytest --cov --cov-report=json --quiet || true
+              else
+                python -m venv .venv
+                .venv/bin/pip install -q -r requirements.txt pytest pytest-cov
+                .venv/bin/pytest --cov --cov-report=json --quiet || true
+              fi
+              if [[ ! -f coverage.json ]]; then
+                echo "::error::pytest-cov did not produce coverage.json — check [tool.coverage.run] config or test discovery"
+                exit 1
+              fi
+              MEASURED=$(jq '.totals.percent_covered' coverage.json)
+              ;;
+            go)
+              go test -coverprofile=cov.out ./... 2>&1 || true
+              if [[ ! -f cov.out ]]; then
+                echo "::error::go test did not produce cov.out — no testable packages?"
+                exit 1
+              fi
+              MEASURED=$(go tool cover -func=cov.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+              ;;
+            js)
+              # Caller must configure their test script to emit
+              # coverage/coverage-summary.json (vitest --coverage, jest --coverage
+              # --coverageReporters=json-summary, etc).
+              if [[ -f bun.lockb || -f bun.lock ]]; then
+                curl -fsSL https://bun.sh/install | bash
+                export PATH="$HOME/.bun/bin:$PATH"
+                bun install --frozen-lockfile
+                bun test --coverage || true
+              elif [[ -f pnpm-lock.yaml ]]; then
+                npm install -g pnpm
+                pnpm install --frozen-lockfile
+                pnpm test --coverage || true
+              elif [[ -f yarn.lock ]]; then
+                yarn install --frozen-lockfile
+                yarn test --coverage || true
+              else
+                npm ci
+                npm test -- --coverage --coverage-reporter=json-summary || true
+              fi
+              if [[ ! -f coverage/coverage-summary.json ]]; then
+                echo "::error::no coverage/coverage-summary.json — configure your test runner with --coverage + json-summary reporter"
+                exit 1
+              fi
+              MEASURED=$(jq '.total.lines.pct' coverage/coverage-summary.json)
+              ;;
+          esac
+          # Round to 1 decimal for stability across runs.
+          MEASURED=$(awk -v m="$MEASURED" 'BEGIN {printf "%.1f", m}')
+          echo "measured=$MEASURED" >> "$GITHUB_OUTPUT"
+          echo "measured coverage: $MEASURED%"
+
+      - name: Seed mode — write floor and self-commit
+        if: steps.floor.outputs.mode == 'seed'
+        working-directory: ${{ inputs.working_directory || '.' }}
+        env:
+          MEASURED: ${{ steps.measure.outputs.measured }}
+          TARGET: ${{ steps.floor.outputs.target }}
+          INPUT_FLOOR_FILE: ${{ inputs.floor_file || '.coverage-floor' }}
+          SEED_MIN: ${{ inputs.seed_minimum || '1.0' }}
+        run: |
+          set -euo pipefail
+          # Loop-prevention guard: if measured < seed_minimum, refuse to seed.
+          # Seed mode stays armed for the next attempt (with a fixed test setup
+          # or an explicit --floor override). This avoids the "measured 0% →
+          # seed 0% → next run also seed mode → ..." loop on repos whose
+          # test infra isn't producing coverage.
+          if awk -v m="$MEASURED" -v t="$SEED_MIN" 'BEGIN {exit !(m < t)}'; then
+            echo "::warning::measured coverage $MEASURED% < seed_minimum $SEED_MIN% — skipping seed commit. Investigate test infra (missing --cov= source, no tests collected, etc.), or pass --floor N.N to install-coverage-floor.sh."
+            exit 0
+          fi
+          PROPOSED=$(awk -v m="$MEASURED" 'BEGIN {x = m - 0.5; if (x < 0) x = 0; printf "%.1f", x}')
+          TODAY=$(date -u +%Y-%m-%d)
+          jq --argjson c "$PROPOSED" --argjson t "$TARGET" --arg d "$TODAY" \
+            '{current: $c, target: $t, last_bumped: $d}' "$INPUT_FLOOR_FILE" > "$INPUT_FLOOR_FILE.tmp"
+          mv "$INPUT_FLOOR_FILE.tmp" "$INPUT_FLOOR_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$INPUT_FLOOR_FILE"
+          git commit -m "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
+            -m "Auto-seeded by coverage-floor.yml on install PR. Future PRs enforce this floor."
+          git push
+          echo "seeded floor at $PROPOSED% (measured $MEASURED%) and pushed to PR branch"
+
+      - name: Enforce mode — compare measured vs floor
+        if: steps.floor.outputs.mode == 'enforce'
+        env:
+          MEASURED: ${{ steps.measure.outputs.measured }}
+          FLOOR: ${{ steps.floor.outputs.current }}
+        run: |
+          set -euo pipefail
+          if awk -v m="$MEASURED" -v f="$FLOOR" 'BEGIN {exit !(m >= f)}'; then
+            echo "PASS: measured $MEASURED% >= floor $FLOOR%"
+          else
+            DROP=$(awk -v m="$MEASURED" -v f="$FLOOR" 'BEGIN {printf "%.1f", f - m}')
+            echo "::error::FAIL: measured $MEASURED% < floor $FLOOR% (drop of $DROP%)"
+            exit 1
+          fi
+
+      - name: Post sticky PR comment
+        if: github.event_name == 'pull_request' && always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage-floor
+          message: |
+            **Coverage Floor** — mode: `${{ steps.floor.outputs.mode }}`
+
+            | metric | value |
+            |---|---|
+            | measured | `${{ steps.measure.outputs.measured }}%` |
+            | floor (current) | `${{ steps.floor.outputs.current }}%` |
+            | target | `${{ steps.floor.outputs.target }}%` |
+            | last bumped | `${{ steps.floor.outputs.last_bumped }}` |
+
+            ${{ steps.floor.outputs.mode == 'seed' && '_Seed mode: floor written to `.coverage-floor` via auto-commit. After this PR merges, future PRs run in enforce mode against the seeded floor._' || '' }}

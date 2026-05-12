@@ -8,8 +8,15 @@ requires-python = ">=3.13"
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["selftest*"]
+
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pytest-cov"]
 
 [tool.pytest.ini_options]
 testpaths = ["selftest"]
+
+[tool.coverage.run]
+source = ["selftest"]
+omit = ["selftest/test_*.py"]

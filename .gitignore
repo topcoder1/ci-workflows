@@ -2,3 +2,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
+
+# selftest build artifacts
+.coverage
+coverage.json
+.venv/
+*.egg-info/
+
