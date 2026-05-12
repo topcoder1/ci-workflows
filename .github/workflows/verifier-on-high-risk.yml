@@ -32,7 +32,14 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  checks: write # post the verifier / evidence-bound check-run
+  checks: write   # post the verifier / evidence-bound check-run
+  id-token: write # required by claude-code-action@v1 for OIDC token fetch
+                  # (callee permissions are the CEILING for reusable workflows;
+                  # caller perms don't merge in. Verified by smoke on
+                  # attaxion_dev#110 which crashed with "Could not fetch an
+                  # OIDC token. Did you remember to add 'id-token: write'..."
+                  # 3× before this fix. claude-review.yml has the same perm
+                  # for the same reason — see that file for precedent.)
 
 concurrency:
   group: verifier-on-high-risk-${{ github.event.pull_request.number }}
