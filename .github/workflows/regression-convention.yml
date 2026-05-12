@@ -1,0 +1,161 @@
+name: Regression Convention
+
+# Two roles for this workflow:
+#
+# 1. Self-test: triggers on pull_request + push to main of *this repo*. Wired
+#    with `lessons_files: ""` (no Lessons section tracked in this repo); the
+#    workflow no-ops gracefully. Synthetic FAIL-path testing happens during
+#    Phase 3 install on dotclaude (which DOES have a `## Lessons` section).
+#
+# 2. Reusable: callers do
+#       jobs:
+#         regression-convention:
+#           uses: topcoder1/ci-workflows/.github/workflows/regression-convention.yml@main
+#           with:
+#             lessons_files: "MEMORY.md,CLAUDE.md"  # whichever holds `## Lessons`
+#    See callers/regression-convention.yml for the installer-generated caller.
+#
+# What it does:
+#   - For each path in `lessons_files`, extract the `## Lessons` section
+#     (from `^## Lessons` to the next `^## ` or EOF) in BOTH base and head.
+#     If they differ, the PR modified the Lessons section.
+#   - If ANY configured lessons file's Lessons section changed AND the PR
+#     did NOT add or modify a file under `regression_dir` (default
+#     `tests/regression/`), FAIL with a clear message.
+#   - Empty `lessons_files` → no-op (no Lessons section tracked yet).
+#   - Deletions of Lessons bullets are NOT a violation (pruning is fine);
+#     only additions/modifications count. (Implementation: compare hashes of
+#     the *additive* changes — simplest: any inequality in section content
+#     triggers the check, but the message hints at "add a test OR remove
+#     the lesson edit" so deletions are explicitly fine.)
+#
+# Why the per-repo config (no default lessons file): the fleet convention is
+# split. Global CLAUDE.md says "append to MEMORY.md", but `wxa_vpn` keeps
+# lessons in CLAUDE.md, `wxa-jake-ai` has both, several repos have neither
+# file with Lessons. A single default would either fire on a file most repos
+# don't use or miss the file they do. The installer (Phase 2 Task 2.4)
+# auto-detects per repo and wires the explicit path(s) into the caller.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      lessons_files:
+        description: "REQUIRED for callers. Comma-separated list of paths to files holding `## Lessons` (e.g. 'MEMORY.md,CLAUDE.md'). Empty string = no-op (workflow installs but doesn't fire until a Lessons section is added). The installer auto-detects per-repo and writes the resolved path(s) here."
+        required: false
+        type: string
+        default: ""
+      lessons_section_header:
+        description: "Markdown header line that begins the lessons section. Default '## Lessons'."
+        required: false
+        type: string
+        default: "## Lessons"
+      regression_dir:
+        description: "Directory that must contain a new/modified file when the lessons section changes. Default 'tests/regression'."
+        required: false
+        type: string
+        default: "tests/regression"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Lessons must have tests
+    runs-on: ubuntu-latest
+    # Only meaningful on pull_request events; push events to main run as a
+    # no-op (no diff to enforce against).
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Resolve base + head refs
+        id: refs
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "$BASE_REF"
+          BASE_SHA=$(git rev-parse "origin/$BASE_REF")
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE_SHA head=$HEAD_SHA"
+
+      - name: Check lessons-vs-regression-tests contract
+        env:
+          LESSONS_FILES_RAW: ${{ inputs.lessons_files || '' }}
+          LESSONS_HEADER: ${{ inputs.lessons_section_header || '## Lessons' }}
+          REGRESSION_DIR: ${{ inputs.regression_dir || 'tests/regression' }}
+          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$LESSONS_FILES_RAW" ]]; then
+            echo "lessons_files is empty — no Lessons section tracked in this repo. Skipping."
+            exit 0
+          fi
+
+          # Extract the section from `^${header}` to the next `^## ` or EOF.
+          extract_section() {
+            local content="$1"
+            local header="$2"
+            awk -v h="$header" '
+              $0 == h { p = 1; next }
+              /^## / { if (p) exit }
+              p { print }
+            ' <<<"$content"
+          }
+
+          IFS=, read -ra FILES <<<"$LESSONS_FILES_RAW"
+          LESSONS_CHANGED_IN=()
+          for raw_path in "${FILES[@]}"; do
+            # Trim whitespace around comma-split entries.
+            path=$(echo "$raw_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [[ -z "$path" ]] && continue
+
+            # `git show <sha>:<path>` errors if file doesn't exist at that sha.
+            # Treat "not present at base" as empty (new file = additive change).
+            BASE_CONTENT=$(git show "$BASE_SHA:$path" 2>/dev/null || echo "")
+            HEAD_CONTENT=$(git show "$HEAD_SHA:$path" 2>/dev/null || echo "")
+
+            BASE_SECTION=$(extract_section "$BASE_CONTENT" "$LESSONS_HEADER")
+            HEAD_SECTION=$(extract_section "$HEAD_CONTENT" "$LESSONS_HEADER")
+
+            if [[ "$BASE_SECTION" != "$HEAD_SECTION" ]]; then
+              LESSONS_CHANGED_IN+=("$path")
+              echo "lessons section changed in: $path"
+            fi
+          done
+
+          if [[ ${#LESSONS_CHANGED_IN[@]} -eq 0 ]]; then
+            echo "PASS: no lessons-section changes detected in [${LESSONS_FILES_RAW}]"
+            exit 0
+          fi
+
+          # Lessons changed. Now check whether a regression test was added or
+          # modified under $REGRESSION_DIR.
+          CHANGED_TEST_FILES=$(git diff --name-only --diff-filter=AM "$BASE_SHA..$HEAD_SHA" -- "$REGRESSION_DIR/" || true)
+
+          if [[ -n "$CHANGED_TEST_FILES" ]]; then
+            echo "PASS: lessons changed in [${LESSONS_CHANGED_IN[*]}], and PR adds/modifies regression test(s):"
+            echo "$CHANGED_TEST_FILES" | sed 's/^/  /'
+            exit 0
+          fi
+
+          # FAIL.
+          {
+            echo "::error::PR modifies '${LESSONS_HEADER}' in [${LESSONS_CHANGED_IN[*]}] but does NOT add or modify a file under ${REGRESSION_DIR}/."
+            echo "::error::Either:"
+            echo "::error::  (a) add a regression test in ${REGRESSION_DIR}/ that would have caught the bug the lesson is about, or"
+            echo "::error::  (b) remove the lesson edit from this PR and ship it separately with the test."
+            echo "::error::Pure deletions/prunings of lessons bullets are fine — but this PR adds or modifies bullet content."
+          }
+          exit 1
