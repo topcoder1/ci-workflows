@@ -146,6 +146,19 @@ jobs:
 
       # === MATCH PATH (verifier dispatched) ===
 
+      - name: Reset evidence/ to empty (defeats pre-staged verdict.txt)
+        if: steps.classify.outputs.matched == 'yes'
+        run: |
+          set -euo pipefail
+          # Codex round 5: a PR could check in evidence/verdict.txt = PASS
+          # and a >200-char transcript, then rely on a no-op verifier
+          # success to satisfy the gate. Wiping the directory immediately
+          # before dispatch ensures the verdict + transcript are produced
+          # by THIS run, not by the PR author.
+          rm -rf evidence
+          mkdir evidence
+          echo "evidence/ reset to empty"
+
       - name: Build verifier prompt (substitute matches.txt content)
         if: steps.classify.outputs.matched == 'yes'
         id: prompt
