@@ -1,0 +1,212 @@
+name: Audit required checks
+
+# Weekly audit of every fleet repo's required-status-check ruleset against
+# the workflows that actually report those check names. Catches the "phantom
+# required check" class of bug — see MEMORY.md "wxa-jake-ai 2026-05-01"
+# incident — proactively rather than at the moment a PR is blocked.
+#
+# Output: a single weekly digest issue, opened only when at least one repo
+# emitted a warning or error. If every repo is clean, the workflow exits
+# silently (no issue created/updated; no notification noise).
+#
+# DEVIATION FROM PLAN: the plan spec described a single FLEET_AUDIT_PAT
+# secret with cross-org access. In practice the operator ships per-org
+# PATs (FLEET_AUDIT_PAT_TOPCODER1 + FLEET_AUDIT_PAT_WHOIS_API_LLC) because
+# fine-grained PATs are single-owner and the existing org-scoped automerge
+# PATs are already provisioned. We dispatch two parallel jobs (one per
+# org), each setting GH_TOKEN to its org's PAT and calling the fleet
+# wrapper with that org's repo list. A separate digest job aggregates
+# both per-org digests and decides whether to open/update the issue.
+
+on:
+  schedule:
+    # Mondays at 10:00 UTC.
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+    inputs:
+      repos_topcoder1:
+        description: "Override topcoder1/* repo list (space-separated). Empty = use hardcoded fleet."
+        required: false
+        default: ''
+      repos_whois_api_llc:
+        description: "Override whois-api-llc/* repo list (space-separated). Empty = use hardcoded fleet."
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write    # to create / update the digest issue
+
+concurrency:
+  group: audit-required-checks
+  cancel-in-progress: false   # don't kill an in-flight audit if a manual dispatch fires
+
+jobs:
+  audit-topcoder1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      digest_path: per-org-digest-topcoder1.md
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run fleet audit (topcoder1)
+        env:
+          # FLEET_AUDIT_PAT_TOPCODER1 must be set on this repo's secrets.
+          # Falls back to GITHUB_TOKEN if missing — gives partial coverage
+          # on the 2 public/same-org repos with errors in the digest for
+          # the others.
+          GH_TOKEN: ${{ secrets.FLEET_AUDIT_PAT_TOPCODER1 || secrets.GITHUB_TOKEN }}
+          OVERRIDE: ${{ github.event.inputs.repos_topcoder1 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$OVERRIDE" ]]; then
+            REPOS="$OVERRIDE"
+          else
+            # Hardcoded topcoder1/* fleet (verified 2026-05-12).
+            REPOS="topcoder1/attaxion_dev topcoder1/ci-workflows topcoder1/dotclaude topcoder1/finsight topcoder1/hr-center topcoder1/nanoclaw topcoder1/product-center topcoder1/webcrawl topcoder1/wxaintel-platform"
+          fi
+
+          # Make validate-required-checks.sh discoverable on PATH for
+          # the fleet wrapper (which uses `command -v` first).
+          mkdir -p "$RUNNER_TEMP/bin"
+          cp scripts/validate-required-checks.sh "$RUNNER_TEMP/bin/"
+          chmod +x "$RUNNER_TEMP/bin/validate-required-checks.sh"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+
+          bash scripts/audit-required-checks-fleet.sh \
+            --repos "$REPOS" \
+            --out per-org-digest-topcoder1.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: per-org-digest-topcoder1
+          path: per-org-digest-topcoder1.md
+          if-no-files-found: ignore
+
+  audit-whois-api-llc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run fleet audit (whois-api-llc)
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_AUDIT_PAT_WHOIS_API_LLC || secrets.GITHUB_TOKEN }}
+          OVERRIDE: ${{ github.event.inputs.repos_whois_api_llc }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$OVERRIDE" ]]; then
+            REPOS="$OVERRIDE"
+          else
+            # Hardcoded whois-api-llc/* fleet (verified 2026-05-12).
+            REPOS="whois-api-llc/techrecon whois-api-llc/wxa-graph whois-api-llc/wxa-jake-ai whois-api-llc/wxa-mcp-server whois-api-llc/wxa_webcat"
+          fi
+
+          mkdir -p "$RUNNER_TEMP/bin"
+          cp scripts/validate-required-checks.sh "$RUNNER_TEMP/bin/"
+          chmod +x "$RUNNER_TEMP/bin/validate-required-checks.sh"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+
+          bash scripts/audit-required-checks-fleet.sh \
+            --repos "$REPOS" \
+            --out per-org-digest-whois-api-llc.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: per-org-digest-whois-api-llc
+          path: per-org-digest-whois-api-llc.md
+          if-no-files-found: ignore
+
+  digest:
+    needs: [audit-topcoder1, audit-whois-api-llc]
+    if: always()    # run even if a per-org job failed, so we get a digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: per-org-digest-*
+          merge-multiple: true
+
+      - name: Combine per-org digests + decide whether to open issue
+        id: combine
+        run: |
+          set -euo pipefail
+          ISO_DATE="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          # Concatenate per-org digests in deterministic order. If both
+          # are "All N repos clean..." then we mark needs_issue=no.
+          : > combined-digest.md
+          all_clean=yes
+          for f in per-org-digest-topcoder1.md per-org-digest-whois-api-llc.md; do
+            if [[ ! -f "$f" ]]; then
+              all_clean=no
+              {
+                echo "## ${f%.md}"
+                echo ""
+                echo "(missing — per-org job failed before producing digest)"
+                echo ""
+              } >> combined-digest.md
+              continue
+            fi
+            first_line=$(head -1 "$f")
+            if [[ "$first_line" != "All "*"clean."* ]]; then
+              all_clean=no
+            fi
+            org="${f#per-org-digest-}"
+            org="${org%.md}"
+            {
+              echo "## $org"
+              echo ""
+              cat "$f"
+              echo ""
+            } >> combined-digest.md
+          done
+
+          # Prepend a top header summarizing the combined run.
+          {
+            echo "# Required-checks audit digest"
+            echo
+            echo "Run: $ISO_DATE"
+            echo
+            cat combined-digest.md
+          } > final-digest.md
+          mv final-digest.md combined-digest.md
+
+          if [[ "$all_clean" == "yes" ]]; then
+            echo "needs_issue=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_issue=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-digest
+          path: combined-digest.md
+          if-no-files-found: ignore
+
+      - name: Create or update weekly digest issue (only when not clean)
+        if: steps.combine.outputs.needs_issue == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WEEK_TAG="$(date -u '+%Y-W%V')"
+          TITLE="Required-checks audit: $WEEK_TAG"
+          # Check for an open issue with this title (idempotency on re-runs).
+          # Don't use --search: GitHub's search parses the colon in the title
+          # as a qualifier separator and returns junk. Instead enumerate open
+          # issues + jq for an exact title match.
+          existing=$(gh issue list --state open --label audit \
+            --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" \
+            | head -1 || true)
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --body-file combined-digest.md
+            echo "Updated existing issue #$existing"
+          else
+            gh issue create --title "$TITLE" --body-file combined-digest.md \
+              --label "audit,quality-gates"
+          fi
