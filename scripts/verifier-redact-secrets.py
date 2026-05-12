@@ -21,12 +21,31 @@ import sys
 from pathlib import Path
 
 SECRET_PATTERNS = [
+    # AWS access key ID
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    # GCP API key
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+    # GitHub personal access tokens (classic + fine-grained) + OAuth tokens
+    re.compile(r"\bghp_[A-Za-z0-9]{36,}"),
+    re.compile(r"\bgho_[A-Za-z0-9]{36,}"),
+    re.compile(r"\bghu_[A-Za-z0-9]{36,}"),
+    re.compile(r"\bghs_[A-Za-z0-9]{36,}"),
+    re.compile(r"\bghr_[A-Za-z0-9]{36,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{60,}"),
+    # OpenAI / Anthropic API keys
+    re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{32,}"),
+    re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{32,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{32,}"),
+    # Slack / Discord / Stripe
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\b(rk|sk|pk)_(live|test)_[A-Za-z0-9]{20,}"),
+    # Bearer tokens
     re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
+    # key=value / key:value form (catches arbitrary providers when labeled)
     re.compile(r"(?i)(api[_-]?key|secret|token|credential|password|passwd)\s*[:=]\s*\S{8,}"),
     # High-entropy base64-like chunks >= 32 chars; allowlist full git SHAs.
-    re.compile(r"\b[A-Za-z0-9+/=]{32,}\b"),
+    # Now includes URL-safe base64 (- and _) per codex finding.
+    re.compile(r"\b[A-Za-z0-9+/=_\-]{32,}\b"),
 ]
 KNOWN_SAFE_RE = re.compile(r"^[0-9a-f]{40}$")  # full git SHAs
 

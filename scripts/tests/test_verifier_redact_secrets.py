@@ -26,6 +26,10 @@ PROBES = [
     ("AIzaSyA0123456789abcdefghijklmnopqrstuvwxyz", "GCP API key"),
     ("Bearer abcdefghijklmnopqrstuvwxyz1234567890", "raw bearer"),
     ("api_key=verysecret_pleasedonotleak0xDEADBEEF", "key=val"),
+    ("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD", "GitHub PAT classic"),
+    ("github_pat_11ABC1234567890abcdefghij_abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHabcdef", "GitHub fine-grained PAT"),
+    ("sk-ant-api03-abcdefghij1234567890abcdefghij1234567890ABCDEFGH", "Anthropic API key"),
+    ("sk-proj-abcdefghij1234567890abcdefghij1234567890ABCDEFGH", "OpenAI project key"),
 ]
 
 
