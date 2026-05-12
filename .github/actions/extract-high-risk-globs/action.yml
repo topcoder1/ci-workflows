@@ -1,0 +1,66 @@
+name: extract-high-risk-globs
+description: |
+  Parse the high-risk path glob list out of claude-author-automerge.yml and
+  emit it as an output. Single source of truth: callers pin to a specific
+  SHA of this composite action to lock the glob list.
+
+  Fail-closed: if the parser extracts zero patterns, the action exits 1
+  rather than silently passing every PR.
+
+  Output format: one regex per line in `patterns_file` (path on disk).
+  Outputs `count` for assertion in caller workflows.
+
+outputs:
+  patterns_file:
+    description: "Path to a file containing one regex per line"
+    value: ${{ steps.extract.outputs.patterns_file }}
+  count:
+    description: "Number of patterns extracted"
+    value: ${{ steps.extract.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Extract high-risk path globs
+      id: extract
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The source-of-truth heredoc lives in claude-author-automerge.yml
+        # under a `patterns='...'` shell variable inside the `risk` step.
+        # We extract the contents between the opening and closing single
+        # quotes, one pattern per line.
+        SRC="${{ github.action_path }}/../../workflows/claude-author-automerge.yml"
+        if [[ ! -f "$SRC" ]]; then
+          echo "extract-high-risk-globs: source file not found at $SRC" >&2
+          exit 1
+        fi
+        # awk extracts the heredoc body. Boundaries: line containing
+        # "patterns='" starts the body (excluding the opening quote);
+        # the next line ending with "'" closes it (excluding the closing
+        # quote). Any leading whitespace per line is stripped.
+        OUT=$(mktemp)
+        awk '
+          /patterns='\''/ {
+            sub(/.*patterns='\''/, "")
+            in_block = 1
+          }
+          in_block && /'\''$/ {
+            sub(/'\''$/, "")
+            sub(/^[[:space:]]+/, "")
+            if (length($0) > 0) print
+            exit
+          }
+          in_block {
+            sub(/^[[:space:]]+/, "")
+            if (length($0) > 0) print
+          }
+        ' "$SRC" > "$OUT"
+        COUNT=$(wc -l < "$OUT" | tr -d ' ')
+        if [[ "$COUNT" -eq 0 ]]; then
+          echo "extract-high-risk-globs: parsed zero patterns from $SRC — fail-closed" >&2
+          exit 1
+        fi
+        echo "extract-high-risk-globs: extracted $COUNT pattern(s)"
+        echo "patterns_file=$OUT" >> "$GITHUB_OUTPUT"
+        echo "count=$COUNT" >> "$GITHUB_OUTPUT"
