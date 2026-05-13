@@ -87,6 +87,21 @@ on:
         required: false
         type: string
         default: ""
+      services_postgres:
+        description: "Spin up postgres:16 on port 5432 and export DATABASE_URL + TEST_DATABASE_URL to the test step. Default false."
+        required: false
+        type: boolean
+        default: false
+      services_redis:
+        description: "Spin up redis:7 on port 6379 and export REDIS_URL to the test step. Default false."
+        required: false
+        type: boolean
+        default: false
+      extra_env:
+        description: "Newline-separated KEY=value pairs injected into the test step's env (e.g. DISABLE_SENTRY=true). Default empty."
+        required: false
+        type: string
+        default: ""
     secrets:
       AUTOMERGE_PAT:
         description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock."
@@ -100,6 +115,29 @@ jobs:
   measure:
     name: Measure coverage and enforce floor
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -193,6 +231,27 @@ jobs:
         if: steps.detect.outputs.language == 'js'
         with:
           node-version: ${{ inputs.node_version || '20' }}
+
+      - name: Export service env vars + extra_env
+        env:
+          SERVICES_POSTGRES: ${{ inputs.services_postgres || 'false' }}
+          SERVICES_REDIS: ${{ inputs.services_redis || 'false' }}
+          EXTRA_ENV: ${{ inputs.extra_env || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$SERVICES_POSTGRES" == "true" ]]; then
+            echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
+            echo "TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
+          fi
+          if [[ "$SERVICES_REDIS" == "true" ]]; then
+            echo "REDIS_URL=redis://localhost:6379/0" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "$EXTRA_ENV" ]]; then
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              echo "$line" >> "$GITHUB_ENV"
+            done <<< "$EXTRA_ENV"
+          fi
 
       - name: Measure coverage
         id: measure
