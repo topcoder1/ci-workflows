@@ -263,6 +263,44 @@ jobs:
             done <<< "$EXTRA_ENV"
           fi
 
+      - name: Configure git for cross-org clones (Python only)
+        # `uv sync` invokes `git clone` for git-URL dependencies (e.g.
+        # `webcrawl @ git+https://github.com/topcoder1/webcrawl.git`). The
+        # checkout step authenticated git with `github.token`, which is
+        # scoped to the calling repo only — cross-org clones to a different
+        # org return 404 (or appear empty in workflows that swallow stderr).
+        # When the caller forwards `AUTOMERGE_PAT` (already deployed fleet-
+        # wide for the seed-PR flow), reuse it here as a read credential for
+        # the topcoder1 org's public-but-rate-limited repos.
+        #
+        # We only rewrite URLs for `topcoder1/*` — not a global insteadOf —
+        # so the PAT never leaks to clones of other orgs. If
+        # AUTOMERGE_PAT isn't forwarded, this step no-ops and uv sync uses
+        # the github.token configured by actions/checkout (which works for
+        # same-org git URLs but not cross-org). Same fallback shape as the
+        # seed-PR step below.
+        #
+        # Burn 2026-05-13: wxa_webcat PRs failing coverage-floor with
+        # `failed to fetch commit 27970847... topcoder1/webcrawl.git` —
+        # uv sync couldn't clone the pinned webcrawl revision because the
+        # github.token from whois-api-llc/wxa_webcat doesn't read from
+        # topcoder1/webcrawl. The CI workflow (`Lint and Test`) didn't hit
+        # this because it uses a different uv invocation that doesn't
+        # actually exercise the git-URL dep at install time.
+        if: steps.detect.outputs.language == 'python'
+        env:
+          CROSS_ORG_PAT: ${{ secrets.AUTOMERGE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${CROSS_ORG_PAT:-}" ]]; then
+            git config --global \
+              url."https://x-access-token:${CROSS_ORG_PAT}@github.com/topcoder1/".insteadOf \
+              "https://github.com/topcoder1/"
+            echo "==> Configured git insteadOf for topcoder1/* using AUTOMERGE_PAT"
+          else
+            echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies (e.g. webcrawl from topcoder1/*) will fail with 404 on uv sync. Forward the secret in the caller's job spec — see callers/coverage-floor.yml."
+          fi
+
       - name: Measure coverage
         id: measure
         working-directory: ${{ inputs.working_directory || '.' }}

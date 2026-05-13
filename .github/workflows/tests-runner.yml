@@ -76,6 +76,10 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      AUTOMERGE_PAT:
+        description: "PAT with cross-org `repo` read scope. When forwarded, `uv sync` can resolve git-URL dependencies that point to repos in a different org (e.g. `whois-api-llc/*` repos depending on `topcoder1/webcrawl`). Same secret already deployed fleet-wide for `claude-author-automerge.yml` and `coverage-floor.yml` seed-PR flow. Absence falls back to GITHUB_TOKEN with a warning."
+        required: false
 
 permissions:
   contents: read
@@ -158,6 +162,27 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Configure git for cross-org clones
+        # `uv sync` invokes `git clone` for git-URL dependencies (e.g.
+        # `webcrawl @ git+https://github.com/topcoder1/webcrawl.git`). The
+        # checkout step authenticated git with `github.token`, which is
+        # scoped to the calling repo only — cross-org clones return 404.
+        # When the caller forwards `AUTOMERGE_PAT` (already deployed fleet-
+        # wide), use it as a read credential for the topcoder1 org. Only
+        # `topcoder1/*` URLs are rewritten so the PAT never leaks to clones
+        # of other orgs. Mirrors coverage-floor.yml's same step.
+        env:
+          CROSS_ORG_PAT: ${{ secrets.AUTOMERGE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${CROSS_ORG_PAT:-}" ]]; then
+            git config --global \
+              url."https://x-access-token:${CROSS_ORG_PAT}@github.com/topcoder1/".insteadOf \
+              "https://github.com/topcoder1/"
+            echo "==> Configured git insteadOf for topcoder1/* using AUTOMERGE_PAT"
+          else
+            echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies will fail with 404 on uv sync."
+          fi
       - name: Install deps and run tests
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
