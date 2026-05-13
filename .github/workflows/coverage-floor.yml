@@ -89,7 +89,7 @@ on:
         default: ""
     secrets:
       AUTOMERGE_PAT:
-        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward: `secrets: AUTOMERGE_PAT: ${{ secrets.AUTOMERGE_PAT }}`. Required for the post-merge seed flow to land without manual unblock."
+        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward: `secrets: AUTOMERGE_PAT: $${{ secrets.AUTOMERGE_PAT }}`. Required for the post-merge seed flow to land without manual unblock."
         required: false  # absence falls back to GITHUB_TOKEN + warning
 
 permissions:
@@ -319,7 +319,7 @@ jobs:
           else
             export GH_TOKEN="${{ github.token }}"
             PUSH_URL="origin"
-            echo "::warning::AUTOMERGE_PAT secret not forwarded by caller. Falling back to GITHUB_TOKEN, which won't spawn pull_request workflows on the seed PR. The seed PR will be 'blocked' until someone pushes an empty commit to its branch. Forward the secret in the caller: 'secrets: AUTOMERGE_PAT: \${{ secrets.AUTOMERGE_PAT }}'"
+            echo "::warning::AUTOMERGE_PAT secret not forwarded by caller. Falling back to GITHUB_TOKEN, which won't spawn pull_request workflows on the seed PR. The seed PR will be 'blocked' until someone pushes an empty commit to its branch. Forward the secret in the caller: 'secrets: AUTOMERGE_PAT: $\${{ secrets.AUTOMERGE_PAT }}'"
           fi
 
           # Ensure the label exists (idempotent).
