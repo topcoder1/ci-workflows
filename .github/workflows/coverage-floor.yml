@@ -350,8 +350,16 @@ jobs:
           # Open auto-mergeable PR. Single .coverage-floor file change is
           # safe-paths-automerge eligible per the central policy.
           PR_BODY=$(printf 'Post-merge seed of `.coverage-floor` after coverage-floor caller install. Measured coverage on main: %s%%. Floor seeded at %s%% (measured - 0.5%% buffer).\n\nAfter this merges, future PRs run `coverage-floor.yml` in enforce mode against this floor.\n\n🤖 Auto-opened by topcoder1/ci-workflows/.github/workflows/coverage-floor.yml' "$MEASURED" "$PROPOSED")
+          # Pass --head explicitly. `git push -u "$PUSH_URL" "$BRANCH"` set the
+          # upstream tracking to the PAT-embedded URL (not `origin`), so gh
+          # can't autodetect the head branch from upstream config. Without
+          # --head it errors: "you must first push the current branch to a
+          # remote, or use the --head flag". Caught on wxa-graph install
+          # (the seed branch was pushed, but PR-create failed).
           gh pr create --title "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
             --body "$PR_BODY" \
+            --base "${GITHUB_REF_NAME}" \
+            --head "$BRANCH" \
             --label coverage-floor-seed 2>&1 | tail -1
 
       - name: Enforce mode — compare measured vs floor
