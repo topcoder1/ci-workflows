@@ -95,8 +95,24 @@ jobs:
           REGRESSION_DIR: ${{ inputs.regression_dir || 'tests/regression' }}
           BASE_SHA: ${{ steps.refs.outputs.base_sha }}
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+
+          # Skip for bot-authored PRs — bots can't add paired regression tests.
+          # Covers: github-actions[bot], dependabot[bot], renovate[bot], etc.
+          # Also skip for the coverage-floor seed branch: it diffs against a
+          # potentially-stale base, which can make CLAUDE.md Lessons bullets
+          # appear removed then re-added as a false-positive diff.
+          if [[ "$PR_AUTHOR" == *"[bot]" ]]; then
+            echo "skipping convention check: bot-authored PR (${PR_AUTHOR}) — bots can't add paired regression tests"
+            exit 0
+          fi
+          if [[ "$PR_HEAD_BRANCH" == chore/coverage-floor-seed* ]]; then
+            echo "skipping convention check: coverage-floor seed branch (${PR_HEAD_BRANCH}) — stale-base diffs are expected"
+            exit 0
+          fi
 
           if [[ -z "$LESSONS_FILES_RAW" ]]; then
             echo "lessons_files is empty — no Lessons section tracked in this repo. Skipping."

@@ -88,15 +88,25 @@ on:
         type: string
         default: ""
       services_postgres:
-        description: "Spin up postgres:16 on port 5432 and export DATABASE_URL + TEST_DATABASE_URL to the test step. Default false."
+        description: "Spin up a postgres container on port 5432 and export DATABASE_URL + TEST_DATABASE_URL to the test step. Default false."
         required: false
         type: boolean
         default: false
+      postgres_image:
+        description: "Docker image for the postgres service. Default 'postgres:16'. Use e.g. 'pgvector/pgvector:pg16' when tests need the vector extension."
+        required: false
+        type: string
+        default: "postgres:16"
       services_redis:
-        description: "Spin up redis:7 on port 6379 and export REDIS_URL to the test step. Default false."
+        description: "Spin up a redis container on port 6379 and export REDIS_URL to the test step. Default false."
         required: false
         type: boolean
         default: false
+      redis_image:
+        description: "Docker image for the redis service. Default 'redis:7'."
+        required: false
+        type: string
+        default: "redis:7"
       extra_env:
         description: "Newline-separated KEY=value pairs injected into the test step's env (e.g. DISABLE_SENTRY=true). Default empty."
         required: false
@@ -117,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: ${{ inputs.postgres_image || 'postgres:16' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -130,7 +140,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis:7
+        image: ${{ inputs.redis_image || 'redis:7' }}
         ports:
           - 6379:6379
         options: >-
@@ -405,15 +415,20 @@ jobs:
             exit 0
           fi
 
-          # Deterministic branch name keyed on HEAD SHA so concurrent runs
-          # on main (from rapid back-to-back merges) collide on push instead
-          # of opening parallel seed PRs. Caught 2026-05-12 on wxa_webcat:
-          # 3 install PRs merged in rapid succession, all 3 Coverage Floor
-          # runs passed the idempotency check before any opened a PR, and 2
-          # duplicate seed PRs (#331, #332) shipped. Timestamp branches gave
-          # each run a unique ref; SHA-keyed branches give the second push
-          # an already-existing ref to collide with.
-          BRANCH="chore/coverage-floor-seed-${GITHUB_SHA:0:10}"
+          # SHA-INDEPENDENT branch name so the git-push itself is the atomic
+          # lock. Concurrent runs on main (e.g. 5 back-to-back merges) each
+          # pass the `gh pr list --label` idempotency check before any of them
+          # has opened a PR — the check races. A SHA-keyed branch doesn't help
+          # because each concurrent run is on a different HEAD SHA, giving each
+          # run a unique branch with no collision. A fixed branch name means
+          # only the first push succeeds; subsequent pushes fail with
+          # "already exists" and exit 0 (see the `if !` guard below).
+          # Caught 2026-05-12 on wxa_webcat: 3 install PRs merged rapidly,
+          # all 3 runs passed the label check, 2 duplicate seed PRs (#331, #332)
+          # opened and merged. The label check stays as belt-and-suspenders for
+          # the case where a previous seed PR merged but its branch was deleted
+          # while a label still exists.
+          BRANCH="chore/coverage-floor-seed"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
@@ -425,13 +440,16 @@ jobs:
           git add "$INPUT_FLOOR_FILE"
           git commit -m "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
             -m "Auto-seeded post-merge by coverage-floor.yml. After this PR merges, future PRs enforce this floor."
-          git push -u "$PUSH_URL" "$BRANCH"
+          if ! git push -u "$PUSH_URL" "$BRANCH" 2>&1; then
+            echo "::warning::another seed-floor run beat us to pushing the branch — skipping (this is safe; one seed PR is enough)"
+            exit 0
+          fi
 
           # Open the seed PR. `.coverage-floor` is NOT in the built-in
           # safe-paths-automerge globs (which cover docs/** and tests/**
           # only), so safe-paths-automerge.yml will no-op on this PR and
           # nothing else self-enables auto-merge — the branch prefix
-          # `chore/coverage-floor-seed-*` doesn't match claude-author-
+          # `chore/coverage-floor-seed` doesn't match claude-author-
           # automerge's `claude/*` detection either. So we enable auto-
           # merge here explicitly.
           PR_BODY=$(printf 'Post-merge seed of `.coverage-floor` after coverage-floor caller install. Measured coverage on main: %s%%. Floor seeded at %s%% (measured - 0.5%% buffer).\n\nAfter this merges, future PRs run `coverage-floor.yml` in enforce mode against this floor.\n\n🤖 Auto-opened by topcoder1/ci-workflows/.github/workflows/coverage-floor.yml' "$MEASURED" "$PROPOSED")
