@@ -327,12 +327,9 @@ jobs:
 
           # Open auto-mergeable PR. Single .coverage-floor file change is
           # safe-paths-automerge eligible per the central policy.
+          PR_BODY=$(printf 'Post-merge seed of `.coverage-floor` after coverage-floor caller install. Measured coverage on main: %s%%. Floor seeded at %s%% (measured - 0.5%% buffer).\n\nAfter this merges, future PRs run `coverage-floor.yml` in enforce mode against this floor.\n\n🤖 Auto-opened by topcoder1/ci-workflows/.github/workflows/coverage-floor.yml' "$MEASURED" "$PROPOSED")
           gh pr create --title "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
-            --body "Post-merge seed of \`.coverage-floor\` after coverage-floor caller install. Measured coverage on main: ${MEASURED}%. Floor seeded at ${PROPOSED}% (measured - 0.5% buffer).
-
-After this merges, future PRs run \`coverage-floor.yml\` in enforce mode against this floor.
-
-🤖 Auto-opened by topcoder1/ci-workflows/.github/workflows/coverage-floor.yml" \
+            --body "$PR_BODY" \
             --label coverage-floor-seed 2>&1 | tail -1
 
       - name: Enforce mode — compare measured vs floor
