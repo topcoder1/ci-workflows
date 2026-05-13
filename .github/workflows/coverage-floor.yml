@@ -87,10 +87,14 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      AUTOMERGE_PAT:
+        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward: `secrets: AUTOMERGE_PAT: ${{ secrets.AUTOMERGE_PAT }}`. Required for the post-merge seed flow to land without manual unblock."
+        required: false  # absence falls back to GITHUB_TOKEN + warning
 
 permissions:
-  contents: write       # seed-mode self-commit
-  pull-requests: write  # sticky PR comment
+  contents: write       # post-merge seed branch + push
+  pull-requests: write  # sticky PR comment + open seed PR
 
 jobs:
   measure:
@@ -287,7 +291,12 @@ jobs:
           TARGET: ${{ steps.floor.outputs.target }}
           INPUT_FLOOR_FILE: ${{ inputs.floor_file || '.coverage-floor' }}
           SEED_MIN: ${{ inputs.seed_minimum || '1.0' }}
-          GH_TOKEN: ${{ github.token }}
+          # Use AUTOMERGE_PAT if forwarded by the caller; fall back to
+          # GITHUB_TOKEN with a warning (recursion-prevention means seed
+          # PR opened by GITHUB_TOKEN won't spawn pull_request workflows,
+          # so the seed PR will sit "blocked" until a user pushes an
+          # empty commit to its branch).
+          AUTOMERGE_PAT: ${{ secrets.AUTOMERGE_PAT }}
         run: |
           set -euo pipefail
           # Loop-prevention guard: refuse to seed below seed_minimum.
@@ -299,6 +308,19 @@ jobs:
           fi
           PROPOSED=$(awk -v m="$MEASURED" 'BEGIN {x = m - 0.5; if (x < 0) x = 0; printf "%.1f", x}')
           TODAY=$(date -u +%Y-%m-%d)
+
+          # Select the auth token. Prefer AUTOMERGE_PAT (the seed PR will
+          # spawn pull_request workflows naturally); fall back to GITHUB_TOKEN
+          # with a warning so the operator knows manual unblock is needed.
+          if [[ -n "${AUTOMERGE_PAT:-}" ]]; then
+            export GH_TOKEN="$AUTOMERGE_PAT"
+            PUSH_URL="https://x-access-token:${AUTOMERGE_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+            echo "==> Using AUTOMERGE_PAT for seed branch push + PR open (workflows will fire naturally)"
+          else
+            export GH_TOKEN="${{ github.token }}"
+            PUSH_URL="origin"
+            echo "::warning::AUTOMERGE_PAT secret not forwarded by caller. Falling back to GITHUB_TOKEN, which won't spawn pull_request workflows on the seed PR. The seed PR will be 'blocked' until someone pushes an empty commit to its branch. Forward the secret in the caller: 'secrets: AUTOMERGE_PAT: \${{ secrets.AUTOMERGE_PAT }}'"
+          fi
 
           # Ensure the label exists (idempotent).
           gh label create coverage-floor-seed \
@@ -323,7 +345,7 @@ jobs:
           git add "$INPUT_FLOOR_FILE"
           git commit -m "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
             -m "Auto-seeded post-merge by coverage-floor.yml. After this PR merges, future PRs enforce this floor."
-          git push -u origin "$BRANCH"
+          git push -u "$PUSH_URL" "$BRANCH"
 
           # Open auto-mergeable PR. Single .coverage-floor file change is
           # safe-paths-automerge eligible per the central policy.
