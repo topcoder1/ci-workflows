@@ -212,6 +212,12 @@ jobs:
                 # crawl-infra all needed per-repo pyproject mirrors). Coverage
                 # measurement wants maximum dep coverage anyway.
                 uv sync --quiet --all-extras
+                # Some repos have pyproject.toml as config-only (no [project]
+                # deps section) and keep actual deps in requirements.txt
+                # (inbox_superpilot/backend pattern). Install those on top so
+                # `uv run pytest` can import everything.
+                [[ -f requirements.txt ]]     && uv pip install --quiet -r requirements.txt
+                [[ -f requirements-dev.txt ]] && uv pip install --quiet -r requirements-dev.txt
                 uv pip install --quiet pytest-cov
                 # `|| true` lets us still parse coverage.json even when tests fail
                 # (tests-runner.yml is the gate for test pass/fail; we just need
