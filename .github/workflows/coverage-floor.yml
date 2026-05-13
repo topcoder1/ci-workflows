@@ -333,7 +333,15 @@ jobs:
             exit 0
           fi
 
-          BRANCH="chore/coverage-floor-seed-$(date +%s)"
+          # Deterministic branch name keyed on HEAD SHA so concurrent runs
+          # on main (from rapid back-to-back merges) collide on push instead
+          # of opening parallel seed PRs. Caught 2026-05-12 on wxa_webcat:
+          # 3 install PRs merged in rapid succession, all 3 Coverage Floor
+          # runs passed the idempotency check before any opened a PR, and 2
+          # duplicate seed PRs (#331, #332) shipped. Timestamp branches gave
+          # each run a unique ref; SHA-keyed branches give the second push
+          # an already-existing ref to collide with.
+          BRANCH="chore/coverage-floor-seed-${GITHUB_SHA:0:10}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
@@ -347,8 +355,13 @@ jobs:
             -m "Auto-seeded post-merge by coverage-floor.yml. After this PR merges, future PRs enforce this floor."
           git push -u "$PUSH_URL" "$BRANCH"
 
-          # Open auto-mergeable PR. Single .coverage-floor file change is
-          # safe-paths-automerge eligible per the central policy.
+          # Open the seed PR. `.coverage-floor` is NOT in the built-in
+          # safe-paths-automerge globs (which cover docs/** and tests/**
+          # only), so safe-paths-automerge.yml will no-op on this PR and
+          # nothing else self-enables auto-merge — the branch prefix
+          # `chore/coverage-floor-seed-*` doesn't match claude-author-
+          # automerge's `claude/*` detection either. So we enable auto-
+          # merge here explicitly.
           PR_BODY=$(printf 'Post-merge seed of `.coverage-floor` after coverage-floor caller install. Measured coverage on main: %s%%. Floor seeded at %s%% (measured - 0.5%% buffer).\n\nAfter this merges, future PRs run `coverage-floor.yml` in enforce mode against this floor.\n\n🤖 Auto-opened by topcoder1/ci-workflows/.github/workflows/coverage-floor.yml' "$MEASURED" "$PROPOSED")
           # Pass --head explicitly. `git push -u "$PUSH_URL" "$BRANCH"` set the
           # upstream tracking to the PAT-embedded URL (not `origin`), so gh
@@ -356,11 +369,22 @@ jobs:
           # --head it errors: "you must first push the current branch to a
           # remote, or use the --head flag". Caught on wxa-graph install
           # (the seed branch was pushed, but PR-create failed).
-          gh pr create --title "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
+          PR_URL=$(gh pr create --title "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
             --body "$PR_BODY" \
             --base "${GITHUB_REF_NAME}" \
             --head "$BRANCH" \
-            --label coverage-floor-seed 2>&1 | tail -1
+            --label coverage-floor-seed)
+          echo "Opened seed PR: $PR_URL"
+
+          # Enable auto-merge. Required status checks still gate the merge;
+          # this just queues it to land once they pass. The PR diff is a
+          # single JSON file with a numeric bump — claude-author-automerge's
+          # high-risk-path regex doesn't match, so auto-merge is the right
+          # default. Without this, the seed PR sits open indefinitely after
+          # all checks pass (observed 2026-05-12 across 3 simultaneous
+          # rollouts).
+          gh pr merge --auto --squash "$PR_URL" || \
+            echo "::warning::Failed to enable auto-merge on seed PR. Set it manually with 'gh pr merge --auto --squash $PR_URL'."
 
       - name: Enforce mode — compare measured vs floor
         if: steps.floor.outputs.mode == 'enforce' && github.event_name == 'pull_request'
