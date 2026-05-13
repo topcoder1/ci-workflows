@@ -168,7 +168,10 @@ jobs:
             echo "Running override: $INPUT_TEST_COMMAND"
             eval "$INPUT_TEST_COMMAND"
           elif [[ -f pyproject.toml ]]; then
-            uv sync
+            # --all-extras matches coverage-floor.yml — install every
+            # [project.optional-dependencies] extra so test deps in old-style
+            # extras blocks get picked up alongside [dependency-groups].
+            uv sync --all-extras
             uv run pytest -q
           elif [[ -f requirements.txt ]]; then
             python -m venv .venv

@@ -204,7 +204,14 @@ jobs:
           case "$LANG_TYPE" in
             python)
               if [[ -f pyproject.toml ]]; then
-                uv sync --quiet
+                # --all-extras installs every [project.optional-dependencies]
+                # extra (e.g. `dev`, `test`) in addition to [dependency-groups].
+                # Without it, repos that put test deps only in optional-
+                # dependencies hit ModuleNotFoundError at pytest collection
+                # (burned 2026-05-12 wave-3 — domain-rank, ipgeo_core,
+                # crawl-infra all needed per-repo pyproject mirrors). Coverage
+                # measurement wants maximum dep coverage anyway.
+                uv sync --quiet --all-extras
                 uv pip install --quiet pytest-cov
                 # `|| true` lets us still parse coverage.json even when tests fail
                 # (tests-runner.yml is the gate for test pass/fail; we just need
