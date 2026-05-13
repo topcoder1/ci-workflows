@@ -11,29 +11,38 @@ name: Coverage Floor
 #         coverage-floor:
 #           uses: topcoder1/ci-workflows/.github/workflows/coverage-floor.yml@main
 #           permissions:
-#             contents: write       # for seed-mode self-commit
-#             pull-requests: write  # for sticky coverage comment
+#             contents: write       # for post-merge seed PR
+#             pull-requests: write  # for sticky coverage comment + seed PR
 #    See callers/coverage-floor.yml for a copy-paste-ready caller.
 #
 # What it does:
 #   - Reads .coverage-floor (JSON: {current, target, last_bumped}).
 #   - Measures coverage in CI (Python: pytest --cov; Go: go test -coverprofile;
 #     JS: vitest --coverage with coverage-summary.json).
-#   - SEED MODE: if `current == 0.0`, this is the install PR's first run.
-#     Measure coverage, compute `proposed = max(0, measured - 0.5)`, commit
-#     the updated `.coverage-floor` back to the PR branch with the
-#     `github-actions[bot]` identity. The install PR is now ready to merge.
-#     Future PRs land in enforce mode against the seeded floor.
-#   - ENFORCE MODE: measure coverage, compare to `current`. Below floor → fail.
-#   - Always (PR events): post a sticky comment with measured / floor / target /
-#     gap to target / mode.
 #
-# Note on re-triggering: GITHUB_TOKEN pushes do NOT re-trigger
-# pull_request workflows (GitHub's recursion-prevention). So the seed-mode
-# commit does NOT cause an immediate enforce-mode run on the install PR
-# itself. Enforce mode kicks in on the NEXT PR (after install merge). The
-# install PR exits seed mode with a green check and a comment naming the
-# seeded floor.
+# Modes:
+#   - SEED-NOT-YET (`current == 0.0`):
+#       • On pull_request: PASS. Post a comment naming the proposed floor.
+#         The install PR is unblocked and can merge without any self-commit.
+#       • On push:main: open a follow-up PR titled
+#         `chore(coverage): seed floor at X.X%` containing the seeded
+#         `.coverage-floor`. That PR is 1-file-change (safe-paths-automerge
+#         eligible) and lands the real floor.
+#   - ENFORCE (`current > 0.0`):
+#       • On pull_request: compare measured vs `current`. Below → FAIL.
+#       • On push:main: no-op (post-merge baselines tracked via PR
+#         comments, not enforced).
+#
+# Why split the seed into a separate post-merge PR (not a self-commit on
+# the install PR):
+#   GitHub's recursion-prevention means `GITHUB_TOKEN` pushes do NOT
+#   re-trigger pull_request workflows. A self-commit on the install PR
+#   creates a new HEAD SHA with no check runs → PR is "blocked" forever
+#   without manual close-and-reopen + empty user push. The original
+#   seed-mode design (self-commit on the install PR) hit this on every
+#   install. Splitting into a post-merge follow-up PR sidesteps the
+#   re-trigger problem entirely. The two-PR flow (install + seed) keeps
+#   each PR minimal and auto-mergeable.
 #
 # Coverage gating is intentionally separate from tests-runner.yml. Reasoning:
 # tests must pass before coverage is meaningful. Bundling would couple "tests
@@ -259,40 +268,72 @@ jobs:
           echo "measured=$MEASURED" >> "$GITHUB_OUTPUT"
           echo "measured coverage: $MEASURED%"
 
-      - name: Seed mode — write floor and self-commit
-        if: steps.floor.outputs.mode == 'seed'
+      - name: Seed-not-yet on PR — pass-through with comment
+        # Install PR ships current=0. Don't self-commit (would create a new
+        # HEAD SHA that GITHUB_TOKEN can't re-trigger workflows on). Just
+        # pass and let the install PR merge naturally. The push:main run
+        # opens a follow-up seed PR with the real value.
+        if: steps.floor.outputs.mode == 'seed' && github.event_name == 'pull_request'
+        env:
+          MEASURED: ${{ steps.measure.outputs.measured }}
+        run: |
+          echo "seed-not-yet on PR: measured $MEASURED%; PASS (will seed via post-merge follow-up PR)"
+
+      - name: Seed-not-yet on main — open follow-up seed PR
+        if: steps.floor.outputs.mode == 'seed' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
           MEASURED: ${{ steps.measure.outputs.measured }}
           TARGET: ${{ steps.floor.outputs.target }}
           INPUT_FLOOR_FILE: ${{ inputs.floor_file || '.coverage-floor' }}
           SEED_MIN: ${{ inputs.seed_minimum || '1.0' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Loop-prevention guard: if measured < seed_minimum, refuse to seed.
-          # Seed mode stays armed for the next attempt (with a fixed test setup
-          # or an explicit --floor override). This avoids the "measured 0% →
-          # seed 0% → next run also seed mode → ..." loop on repos whose
-          # test infra isn't producing coverage.
+          # Loop-prevention guard: refuse to seed below seed_minimum.
+          # Otherwise an install on a repo with broken test infra would
+          # generate a 0% seed PR; here on main, we just no-op with a warning.
           if awk -v m="$MEASURED" -v t="$SEED_MIN" 'BEGIN {exit !(m < t)}'; then
-            echo "::warning::measured coverage $MEASURED% < seed_minimum $SEED_MIN% — skipping seed commit. Investigate test infra (missing --cov= source, no tests collected, etc.), or pass --floor N.N to install-coverage-floor.sh."
+            echo "::warning::measured coverage $MEASURED% < seed_minimum $SEED_MIN% on main — not opening seed PR. Investigate test infra OR manually edit .coverage-floor with the right value."
             exit 0
           fi
           PROPOSED=$(awk -v m="$MEASURED" 'BEGIN {x = m - 0.5; if (x < 0) x = 0; printf "%.1f", x}')
           TODAY=$(date -u +%Y-%m-%d)
+
+          # Ensure the label exists (idempotent).
+          gh label create coverage-floor-seed \
+            --description "Auto-opened by coverage-floor.yml to seed the floor after install" \
+            --color 0E8A16 2>/dev/null || true
+
+          # Idempotency: if a seed PR is already open from this workflow, skip.
+          if gh pr list --state open --label coverage-floor-seed --limit 1 --json number --jq '.[].number' | grep -q .; then
+            echo "a coverage-floor-seed PR is already open — skipping"
+            exit 0
+          fi
+
+          BRANCH="chore/coverage-floor-seed-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
           jq --argjson c "$PROPOSED" --argjson t "$TARGET" --arg d "$TODAY" \
             '{current: $c, target: $t, last_bumped: $d}' "$INPUT_FLOOR_FILE" > "$INPUT_FLOOR_FILE.tmp"
           mv "$INPUT_FLOOR_FILE.tmp" "$INPUT_FLOOR_FILE"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add "$INPUT_FLOOR_FILE"
           git commit -m "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
-            -m "Auto-seeded by coverage-floor.yml on install PR. Future PRs enforce this floor."
-          git push
-          echo "seeded floor at $PROPOSED% (measured $MEASURED%) and pushed to PR branch"
+            -m "Auto-seeded post-merge by coverage-floor.yml. After this PR merges, future PRs enforce this floor."
+          git push -u origin "$BRANCH"
+
+          # Open auto-mergeable PR. Single .coverage-floor file change is
+          # safe-paths-automerge eligible per the central policy.
+          PR_BODY=$(printf 'Post-merge seed of `.coverage-floor` after coverage-floor caller install. Measured coverage on main: %s%%. Floor seeded at %s%% (measured - 0.5%% buffer).\n\nAfter this merges, future PRs run `coverage-floor.yml` in enforce mode against this floor.\n\n🤖 Auto-opened by topcoder1/ci-workflows/.github/workflows/coverage-floor.yml' "$MEASURED" "$PROPOSED")
+          gh pr create --title "chore(coverage): seed floor at ${PROPOSED}% (measured ${MEASURED}%)" \
+            --body "$PR_BODY" \
+            --label coverage-floor-seed 2>&1 | tail -1
 
       - name: Enforce mode — compare measured vs floor
-        if: steps.floor.outputs.mode == 'enforce'
+        if: steps.floor.outputs.mode == 'enforce' && github.event_name == 'pull_request'
         env:
           MEASURED: ${{ steps.measure.outputs.measured }}
           FLOOR: ${{ steps.floor.outputs.current }}
@@ -305,6 +346,14 @@ jobs:
             echo "::error::FAIL: measured $MEASURED% < floor $FLOOR% (drop of $DROP%)"
             exit 1
           fi
+
+      - name: Enforce mode on main — no-op (baseline tracking only)
+        if: steps.floor.outputs.mode == 'enforce' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          MEASURED: ${{ steps.measure.outputs.measured }}
+          FLOOR: ${{ steps.floor.outputs.current }}
+        run: |
+          echo "post-merge baseline: measured $MEASURED% vs floor $FLOOR% (no enforcement on main; PR gates handle regressions)"
 
       - name: Post sticky PR comment
         if: github.event_name == 'pull_request' && always()
@@ -321,4 +370,4 @@ jobs:
             | target | `${{ steps.floor.outputs.target }}%` |
             | last bumped | `${{ steps.floor.outputs.last_bumped }}` |
 
-            ${{ steps.floor.outputs.mode == 'seed' && '_Seed mode: floor written to `.coverage-floor` via auto-commit. After this PR merges, future PRs run in enforce mode against the seeded floor._' || '' }}
+            ${{ steps.floor.outputs.mode == 'seed' && '_Seed-not-yet: floor==0 means coverage is not enforced yet. After this PR merges, the push:main run opens a follow-up PR `chore(coverage): seed floor at X.X%` to commit the real value. From then on, future PRs run in enforce mode._' || '' }}
