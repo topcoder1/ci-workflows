@@ -172,6 +172,11 @@ jobs:
             # [project.optional-dependencies] extra so test deps in old-style
             # extras blocks get picked up alongside [dependency-groups].
             uv sync --all-extras
+            # Some repos have pyproject.toml as config-only with deps in
+            # requirements.txt (inbox_superpilot/backend pattern). Install
+            # those on top so `uv run pytest` finds them.
+            [[ -f requirements.txt ]]     && uv pip install -r requirements.txt
+            [[ -f requirements-dev.txt ]] && uv pip install -r requirements-dev.txt
             uv run pytest -q
           elif [[ -f requirements.txt ]]; then
             python -m venv .venv
