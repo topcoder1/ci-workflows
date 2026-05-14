@@ -82,11 +82,16 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --quiet origin "$BASE_REF"
-          BASE_SHA=$(git rev-parse "origin/$BASE_REF")
+          # Use merge-base, not base tip, so we only see what THIS PR changed —
+          # not what main happened to add since the branch forked. Two-dot diff
+          # against the moving base tip false-positives on stale-base PRs
+          # whenever main lands a Lessons edit in the interim (dotclaude#90).
+          BASE_TIP=$(git rev-parse "origin/$BASE_REF")
           HEAD_SHA=$(git rev-parse HEAD)
+          BASE_SHA=$(git merge-base "$BASE_TIP" "$HEAD_SHA")
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "base=$BASE_SHA head=$HEAD_SHA"
+          echo "base_tip=$BASE_TIP merge_base=$BASE_SHA head=$HEAD_SHA"
 
       - name: Check lessons-vs-regression-tests contract
         env:
