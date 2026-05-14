@@ -87,7 +87,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Checkout PR head with PAT
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Check out the PR's head ref (not the merge commit) so our push
           # writes back to the same branch the PR is tracking.
