@@ -98,7 +98,7 @@ jobs:
           token: ${{ secrets.automerge_pat }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           # Cache only when a root lockfile exists (mirrors lint.yml — see
