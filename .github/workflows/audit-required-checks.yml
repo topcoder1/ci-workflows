@@ -78,7 +78,7 @@ jobs:
             --repos "$REPOS" \
             --out per-org-digest-topcoder1.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: per-org-digest-topcoder1
@@ -113,7 +113,7 @@ jobs:
             --repos "$REPOS" \
             --out per-org-digest-whois-api-llc.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: per-org-digest-whois-api-llc
@@ -185,7 +185,7 @@ jobs:
             echo "needs_issue=yes" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: audit-digest
           path: combined-digest.md
