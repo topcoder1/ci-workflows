@@ -112,6 +112,25 @@ on:
         required: false
         type: string
         default: ""
+      test_command:
+        description: |
+          Caller-provided shell command to install deps and run tests with coverage.
+          Completely replaces the default language-specific install + pytest/go-test/npm-test
+          invocation. The command MUST produce the coverage file expected by the language:
+            - python: `coverage.json` at working_directory (use `pytest --cov --cov-report=json`)
+            - go:     `cov.out` at working_directory (use `go test -coverprofile=cov.out ./...`)
+            - js:     `coverage/coverage-summary.json` at working_directory (configure
+                      vitest/jest with json-summary reporter)
+          Use when the default install path can't handle your repo's structure (e.g. layered
+          projects where root pyproject defines the package and tests live in a subdir, or
+          repos that need pre-install steps the reusable doesn't know about). Run with
+          `set -euo pipefail` style discipline. Trailing `|| true` is appropriate after the
+          test invocation so the coverage file gets parsed even when tests fail (coverage
+          floor cares about the number, not pass/fail — that's tests-runner.yml's job).
+          Default empty (use the language-specific default path).
+        required: false
+        type: string
+        default: ""
     secrets:
       AUTOMERGE_PAT:
         description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock."
@@ -306,11 +325,22 @@ jobs:
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
           LANG_TYPE: ${{ steps.detect.outputs.language }}
+          INPUT_TEST_COMMAND: ${{ inputs.test_command || '' }}
         run: |
           set -euo pipefail
+          # When the caller provides test_command, it replaces the language-specific
+          # install + pytest/go-test/npm-test invocation. The coverage-file existence
+          # check + MEASURED extraction at the end of each case branch still runs,
+          # so the caller's command MUST produce the file the workflow expects
+          # (Python: coverage.json, Go: cov.out, JS: coverage/coverage-summary.json).
+          # Used by layered repos where the default `uv sync` / `pip install -r`
+          # path can't pick up the right package + extras.
           case "$LANG_TYPE" in
             python)
-              if [[ -f pyproject.toml ]]; then
+              if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+                echo "==> caller test_command override (python)"
+                eval "$INPUT_TEST_COMMAND"
+              elif [[ -f pyproject.toml ]]; then
                 # --all-extras installs every [project.optional-dependencies]
                 # extra (e.g. `dev`, `test`) in addition to [dependency-groups].
                 # Without it, repos that put test deps only in optional-
@@ -342,7 +372,12 @@ jobs:
               MEASURED=$(jq '.totals.percent_covered' coverage.json)
               ;;
             go)
-              go test -coverprofile=cov.out ./... 2>&1 || true
+              if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+                echo "==> caller test_command override (go)"
+                eval "$INPUT_TEST_COMMAND"
+              else
+                go test -coverprofile=cov.out ./... 2>&1 || true
+              fi
               if [[ ! -f cov.out ]]; then
                 echo "::error::go test did not produce cov.out — no testable packages?"
                 exit 1
@@ -361,7 +396,10 @@ jobs:
               #   - bun:    bun test --coverage emits coverage-summary.json by default
               # If neither is present, the workflow fails with a clear error
               # pointing at the caller's test config.
-              if [[ -f bun.lockb || -f bun.lock ]]; then
+              if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+                echo "==> caller test_command override (js)"
+                eval "$INPUT_TEST_COMMAND"
+              elif [[ -f bun.lockb || -f bun.lock ]]; then
                 curl -fsSL https://bun.sh/install | bash
                 export PATH="$HOME/.bun/bin:$PATH"
                 bun install --frozen-lockfile
