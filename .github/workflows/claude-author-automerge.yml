@@ -191,11 +191,50 @@ jobs:
             exit 1
           fi
 
+      # Option A: explicit human approval via label.
+      # Run BEFORE the risk-tier path-scan so an oversized PR (>20k diff
+      # lines, GitHub's `gh pr diff` HTTP 406 cap) can still bypass-merge.
+      # Without this ordering, the path-scan dies on the diff fetch BEFORE
+      # ever consulting the bypass label, leaving the workflow exit-1
+      # with no way for the human to override. Verified against
+      # topcoder1/attaxion_dev#71 (2026-05-04, 261k-line data drop) where
+      # `auto-merge-approved` was applied but the workflow died at the
+      # diff-fetch step regardless.
+      #
+      # When a Claude PR matches the risk-tier classifier (or the
+      # path-scan can't run), you can apply the `auto-merge-approved`
+      # label from the PR list page (one click, no PR detail navigation)
+      # to bypass both the risk gate AND the size-cap failure mode.
+      # Confirms "yes I read it, auto-merge it" without requiring the
+      # actual click-merge round-trip.
+      - name: Check risk bypass label (Option A)
+        id: bypass_label
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1'
+        env:
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BYPASS_LABEL" ]; then
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+            echo "Bypass label disabled (input empty)."
+            exit 0
+          fi
+          if echo "$LABELS_JSON" | jq -e --arg L "$BYPASS_LABEL" '.[] | select(.name == $L)' >/dev/null 2>&1; then
+            echo "bypass=1" >> "$GITHUB_OUTPUT"
+            echo "Bypass label '$BYPASS_LABEL' present — risk-tier gate overridden (path-scan will be skipped)."
+          else
+            echo "bypass=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check risk-tier paths
         id: risk
         if: |
           steps.detect.outputs.claude_authored == '1' &&
-          steps.classifier_verdict.outputs.blocked != '1'
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.bypass_label.outputs.bypass != '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -251,31 +290,6 @@ jobs:
           else
             echo "risky=0" >> "$GITHUB_OUTPUT"
             echo "No risk-tier paths matched."
-          fi
-
-      # Option A: explicit human approval via label.
-      # When a Claude PR matches the risk-tier classifier, you can apply the
-      # `auto-merge-approved` label from the PR list page (one click, no PR
-      # detail navigation) to bypass the risk gate. Confirms "yes I read it,
-      # auto-merge it" without requiring the actual click-merge round-trip.
-      - name: Check risk bypass label (Option A)
-        id: bypass_label
-        if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1'
-        env:
-          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
-          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
-        run: |
-          set -euo pipefail
-          if [ -z "$BYPASS_LABEL" ]; then
-            echo "bypass=0" >> "$GITHUB_OUTPUT"
-            echo "Bypass label disabled (input empty)."
-            exit 0
-          fi
-          if echo "$LABELS_JSON" | jq -e --arg L "$BYPASS_LABEL" '.[] | select(.name == $L)' >/dev/null 2>&1; then
-            echo "bypass=1" >> "$GITHUB_OUTPUT"
-            echo "Bypass label '$BYPASS_LABEL' present — risk-tier gate overridden."
-          else
-            echo "bypass=0" >> "$GITHUB_OUTPUT"
           fi
 
       # Option B: Codex review trust.
