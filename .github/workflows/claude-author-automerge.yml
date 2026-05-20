@@ -14,8 +14,16 @@ name: Claude-author Auto-merge (reusable)
 #     - DB migrations / SQL files
 #     - billing / payment / pricing / invoice
 #     - production infra: Dockerfile, docker-compose, .github/workflows,
-#       .github/risk-paths.yml, .github/CODEOWNERS, infra/, terraform/,
-#       pulumi/, k8s/, fly.toml, deploy/, deploy*.{sh,yaml}
+#       .github/risk-paths.yml, .github/CODEOWNERS, infra/iam/, infra
+#       subdirs (deploy/terraform/pulumi/k8s/cloudformation/ansible/
+#       digitalocean/scanner-id/nginx), systemd units + Terraform files
+#       anywhere under infra/, top-level terraform/, pulumi/, k8s/,
+#       fly.toml, deploy/, deploy*.{sh,yaml}.
+#       Specifically NOT risky under infra/: cron schedule files
+#       (infra/crontabs/*.crontab), runbook .md files, example configs.
+#       The earlier broad `^infra/.*` rule over-classified cron-only
+#       changes (lesson 2026-05-04, wxa_vpn#250) and was narrowed
+#       2026-05-20.
 #
 # Customer-copy diffs (legal / marketing wording) are NOT mechanically
 # detected — Claude Review handles that semantically and blocks via the
@@ -218,7 +226,10 @@ jobs:
           ^\.github/workflows/.*
           ^\.github/risk-paths\.yml$
           ^\.github/CODEOWNERS$
-          ^infra/.*
+          ^infra/iam/.*
+          ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
+          ^infra/nginx.*
+          ^infra/.*\.(service|slice|timer|tf|hcl|sh)$
           ^terraform/.*
           ^pulumi/.*
           ^k8s/.*
