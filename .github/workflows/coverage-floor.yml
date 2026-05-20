@@ -112,6 +112,28 @@ on:
         required: false
         type: string
         default: ""
+      extras:
+        description: |
+          (Python only) Which `[project.optional-dependencies]` extras to install before
+          running pytest-cov. Accepts:
+            - "all"  (default) — `uv sync --all-extras`, preserves prior behavior
+            - "none" — `uv sync` with no extras
+            - comma-separated list like "dev,api,model" — `uv sync --extra dev --extra api --extra model`
+
+          Use a targeted list when an extra contains cross-org git deps that uv can't clone
+          in CI (e.g. webcat's `crawl` extra pins `webcrawl @ git+https://github.com/topcoder1/webcrawl.git`,
+          which needs a PAT with read access to that repo; passing `extras: "dev,api,model,data,headless"`
+          skips the crawl extra entirely without changing AUTOMERGE_PAT's scope).
+
+          Burn 2026-05-19 (wxa_webcat): coverage-floor failed silently for 6 days because
+          `--all-extras` triggered uv to clone `topcoder1/webcrawl` and AUTOMERGE_PAT lacked
+          read scope on that repo. Adding this input lets callers skip the problematic
+          extra without the security tradeoff of broadening the fleet PAT's scope.
+
+          No-op for go/js callers (only the python branch honors this input).
+        required: false
+        type: string
+        default: "all"
     secrets:
       AUTOMERGE_PAT:
         description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock."
@@ -306,19 +328,45 @@ jobs:
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
           LANG_TYPE: ${{ steps.detect.outputs.language }}
+          EXTRAS: ${{ inputs.extras }}
         run: |
           set -euo pipefail
           case "$LANG_TYPE" in
             python)
               if [[ -f pyproject.toml ]]; then
-                # --all-extras installs every [project.optional-dependencies]
-                # extra (e.g. `dev`, `test`) in addition to [dependency-groups].
-                # Without it, repos that put test deps only in optional-
-                # dependencies hit ModuleNotFoundError at pytest collection
-                # (burned 2026-05-12 wave-3 — domain-rank, ipgeo_core,
-                # crawl-infra all needed per-repo pyproject mirrors). Coverage
-                # measurement wants maximum dep coverage anyway.
-                uv sync --quiet --all-extras
+                # extras controls which [project.optional-dependencies] extras get
+                # installed before pytest-cov runs. Default ("all") preserves the
+                # original --all-extras behavior — repos that put test deps only
+                # in optional-dependencies need this so pytest collection doesn't
+                # hit ModuleNotFoundError (burned 2026-05-12 wave-3 — domain-rank,
+                # ipgeo_core, crawl-infra all needed per-repo pyproject mirrors).
+                #
+                # "none" skips extras entirely. A comma-separated list installs
+                # only the named extras. Use the list form when an extra contains
+                # cross-org git deps that uv can't clone in CI (burn 2026-05-19,
+                # wxa_webcat — webcat's `crawl` extra pulls webcrawl from topcoder1
+                # which needs broader PAT scope than AUTOMERGE_PAT provides).
+                case "${EXTRAS:-all}" in
+                  all)
+                    uv sync --quiet --all-extras
+                    ;;
+                  none|"")
+                    uv sync --quiet
+                    ;;
+                  *)
+                    # Comma-separated list. Build --extra flags.
+                    EXTRA_FLAGS=()
+                    IFS=',' read -ra EXTRA_LIST <<< "$EXTRAS"
+                    for e in "${EXTRA_LIST[@]}"; do
+                      e_trimmed="$(echo "$e" | xargs)"  # strip whitespace
+                      if [[ -n "$e_trimmed" ]]; then
+                        EXTRA_FLAGS+=("--extra" "$e_trimmed")
+                      fi
+                    done
+                    echo "==> uv sync --quiet ${EXTRA_FLAGS[*]}"
+                    uv sync --quiet "${EXTRA_FLAGS[@]}"
+                    ;;
+                esac
                 # Some repos have pyproject.toml as config-only (no [project]
                 # deps section) and keep actual deps in requirements.txt
                 # (inbox_superpilot/backend pattern). Install those on top so
