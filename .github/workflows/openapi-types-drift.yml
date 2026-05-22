@@ -124,8 +124,12 @@ jobs:
           set -euo pipefail
           case "$REV_SOURCE" in
             head)
-              echo "rev=HEAD" >> "$GITHUB_OUTPUT"
-              echo "rev_display=HEAD (no pin)" >> "$GITHUB_OUTPUT"
+              # Empty rev means actions/checkout@v5 uses the default branch of
+              # the contracts repo (equivalent to omitting `ref:`). Passing the
+              # literal string "HEAD" would be treated as a branch/tag name,
+              # which fails on repos that have no branch named "HEAD".
+              echo "rev=" >> "$GITHUB_OUTPUT"
+              echo "rev_display=HEAD (default branch, no pin)" >> "$GITHUB_OUTPUT"
               ;;
             contracts-rev)
               pin_file="consumer/$REV_FILE"
@@ -148,13 +152,22 @@ jobs:
                 echo "::error::contracts_rev_source=go-mod but go.mod not found."
                 exit 1
               fi
-              # Accepts both `require` SHA pseudo-versions and `replace` directives
+              # Go pseudo-versions have the form: v0.0.0-YYYYMMDDHHMMSS-XXXXXXXXXXXX
+              # where the last 12 hex chars are the commit SHA prefix. Plain `require`
+              # lines with a SemVer tag also resolve correctly via the tag name.
+              # Extract the 12-char SHA suffix from pseudo-versions first; fall back to
+              # a plain SemVer tag on the same line if no pseudo-version SHA found.
               rev=$(grep -E '(require|replace).*${{ inputs.contracts_repo }}' "$gomod" \
-                | grep -oE '[0-9a-f]{12,40}' | head -1 || true)
+                | sed -n 's/.*-\([0-9a-f]\{12\}\)$/\1/p' | head -1 || true)
               if [ -z "$rev" ]; then
-                echo "::warning::Could not find a SHA for '${{ inputs.contracts_repo }}' in go.mod — falling back to HEAD."
-                echo "rev=HEAD" >> "$GITHUB_OUTPUT"
-                echo "rev_display=HEAD (go-mod SHA not found)" >> "$GITHUB_OUTPUT"
+                # No pseudo-version SHA — try a plain tag (e.g. v1.2.3)
+                rev=$(grep -E '(require|replace).*${{ inputs.contracts_repo }}' "$gomod" \
+                  | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1 || true)
+              fi
+              if [ -z "$rev" ]; then
+                echo "::warning::Could not find a rev for '${{ inputs.contracts_repo }}' in go.mod — falling back to default branch."
+                echo "rev=" >> "$GITHUB_OUTPUT"
+                echo "rev_display=HEAD (go-mod rev not found)" >> "$GITHUB_OUTPUT"
               else
                 echo "rev=$rev" >> "$GITHUB_OUTPUT"
                 echo "rev_display=$rev (from go.mod)" >> "$GITHUB_OUTPUT"
@@ -167,16 +180,38 @@ jobs:
                 exit 1
               fi
               repo_name=$(basename "${{ inputs.contracts_repo }}")
-              rev=$(jq -r --arg pkg "$repo_name" \
+              raw_rev=$(jq -r --arg pkg "$repo_name" \
                 '(.dependencies // {}) + (.devDependencies // {}) | .[$pkg] // ""' \
                 "$pkgjson")
-              if [ -z "$rev" ]; then
-                echo "::warning::Package '$repo_name' not found in package.json deps — falling back to HEAD."
-                echo "rev=HEAD" >> "$GITHUB_OUTPUT"
+              if [ -z "$raw_rev" ]; then
+                echo "::warning::Package '$repo_name' not found in package.json deps — falling back to default branch."
+                echo "rev=" >> "$GITHUB_OUTPUT"
                 echo "rev_display=HEAD (package-json key not found)" >> "$GITHUB_OUTPUT"
               else
-                echo "rev=$rev" >> "$GITHUB_OUTPUT"
-                echo "rev_display=$rev (from package.json)" >> "$GITHUB_OUTPUT"
+                # Normalise the package spec value to a checkout-safe ref:
+                #   git+https://github.com/owner/repo#abc123  → abc123
+                #   github:owner/repo#abc123                  → abc123
+                #   owner/repo#abc123                         → abc123
+                #   ^1.2.3 / ~1.2.3 / 1.2.3 / v1.2.3        → v1.2.3 (strip leading ^/~)
+                #   empty fragment or no # separator          → fall back to default branch
+                if echo "$raw_rev" | grep -q '#'; then
+                  # Extract fragment after the last '#'
+                  rev="${raw_rev##*#}"
+                elif echo "$raw_rev" | grep -qE '^[\^~]?[0-9]+\.[0-9]+\.[0-9]+'; then
+                  # Plain SemVer — normalise to vX.Y.Z tag (strip leading ^/~)
+                  rev="v$(echo "$raw_rev" | sed 's/^[^0-9]*//')"
+                else
+                  # Unknown spec format — warn and fall back to default branch
+                  echo "::warning::Cannot parse checkout ref from package.json value '$raw_rev' — falling back to default branch. Use contracts_rev_source=contracts-rev for an explicit SHA pin."
+                  rev=""
+                fi
+                if [ -n "$rev" ]; then
+                  echo "rev=$rev" >> "$GITHUB_OUTPUT"
+                  echo "rev_display=$rev (from package.json)" >> "$GITHUB_OUTPUT"
+                else
+                  echo "rev=" >> "$GITHUB_OUTPUT"
+                  echo "rev_display=HEAD (package-json parse fallback)" >> "$GITHUB_OUTPUT"
+                fi
               fi
               ;;
             *)
@@ -189,8 +224,16 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ inputs.contracts_repo }}
+          # Empty string here (contracts_rev_source=head) means actions/checkout
+          # uses the contracts repo's default branch — correct behavior.
           ref: ${{ steps.resolve_rev.outputs.rev }}
           path: contracts
+          # contracts_read_token must be wired for private contracts repos in any
+          # org (including same org — GITHUB_TOKEN is scoped to the caller repo
+          # and cannot read other repos, even in the same org, unless they are
+          # public). For public contracts repos, github.token works as fallback.
+          # If contracts_read_token is absent and contracts_repo is private, the
+          # checkout step will fail with HTTP 404 / "Repository not found".
           token: ${{ secrets.contracts_read_token || github.token }}
           fetch-depth: 1
 
