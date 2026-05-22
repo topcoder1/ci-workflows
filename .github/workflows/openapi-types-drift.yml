@@ -96,9 +96,11 @@ on:
     secrets:
       contracts_read_token:
         description: >-
-          Optional PAT or token used to clone a private contracts repo.
-          When unset, the workflow uses the built-in GITHUB_TOKEN for same-org
-          repos or attempts an unauthenticated clone for public repos.
+          PAT or token used to clone the contracts repo.
+          Required for ANY private contracts repo (the built-in GITHUB_TOKEN
+          is scoped to the caller repository only — it cannot read other
+          repositories, including same-org private ones). For public contracts
+          repos the fallback to GITHUB_TOKEN is safe.
           Required scopes: contents:read on the contracts repo.
         required: false
 
@@ -152,17 +154,48 @@ jobs:
                 echo "::error::contracts_rev_source=go-mod but go.mod not found."
                 exit 1
               fi
-              # Go pseudo-versions have the form: v0.0.0-YYYYMMDDHHMMSS-XXXXXXXXXXXX
-              # where the last 12 hex chars are the commit SHA prefix. Plain `require`
-              # lines with a SemVer tag also resolve correctly via the tag name.
-              # Extract the 12-char SHA suffix from pseudo-versions first; fall back to
-              # a plain SemVer tag on the same line if no pseudo-version SHA found.
-              rev=$(grep -E '(require|replace).*${{ inputs.contracts_repo }}' "$gomod" \
-                | sed -n 's/.*-\([0-9a-f]\{12\}\)$/\1/p' | head -1 || true)
-              if [ -z "$rev" ]; then
-                # No pseudo-version SHA — try a plain tag (e.g. v1.2.3)
-                rev=$(grep -E '(require|replace).*${{ inputs.contracts_repo }}' "$gomod" \
-                  | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1 || true)
+              # go.mod has two forms for module pinning:
+              #
+              # 1. Single-line:  require example.com/foo v1.2.3
+              # 2. Multi-line block:
+              #      require (
+              #          example.com/foo v1.2.3
+              #      )
+              #
+              # In the block form the line containing the module path does NOT
+              # have the word "require" on it. grep for the module path directly
+              # rather than for "require" + path on the same line.
+              #
+              # The version field on the matched line is either:
+              #   v0.0.0-YYYYMMDDHHMMSS-XXXXXXXXXXXX  (pseudo-version / commit SHA)
+              #   v1.2.3[-suffix]                     (tagged release)
+              #
+              # For pseudo-versions we extract the full version string and pass it
+              # to actions/checkout as a tag lookup — Go's module proxy creates
+              # synthetic v0.0.0-... tags so checkout can resolve them. Alternatively
+              # we extract the 12-char SHA suffix for a direct commit checkout.
+              # Using the full pseudo-version string is safer because it round-trips
+              # through Go module tooling.
+              module_path=$(basename "${{ inputs.contracts_repo }}")
+              matched_line=$(grep -E "^\s*${module_path}(\s|$)" "$gomod" | head -1 || true)
+              if [ -z "$matched_line" ]; then
+                # Try full owner/repo path (for replace directives)
+                matched_line=$(grep -E "${{ inputs.contracts_repo }}" "$gomod" | grep -v '^//' | head -1 || true)
+              fi
+              if [ -n "$matched_line" ]; then
+                # Extract version token (last whitespace-separated word)
+                version_token=$(echo "$matched_line" | awk '{print $NF}')
+                # Pseudo-version: extract 12-char SHA suffix for direct commit checkout
+                sha_suffix=$(echo "$version_token" | sed -n 's/.*-\([0-9a-f]\{12\}\)$/\1/p')
+                if [ -n "$sha_suffix" ]; then
+                  rev="$sha_suffix"
+                elif echo "$version_token" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+                  rev="$version_token"
+                else
+                  rev=""
+                fi
+              else
+                rev=""
               fi
               if [ -z "$rev" ]; then
                 echo "::warning::Could not find a rev for '${{ inputs.contracts_repo }}' in go.mod — falling back to default branch."
@@ -188,15 +221,31 @@ jobs:
                 echo "rev=" >> "$GITHUB_OUTPUT"
                 echo "rev_display=HEAD (package-json key not found)" >> "$GITHUB_OUTPUT"
               else
-                # Normalise the package spec value to a checkout-safe ref:
-                #   git+https://github.com/owner/repo#abc123  → abc123
-                #   github:owner/repo#abc123                  → abc123
-                #   owner/repo#abc123                         → abc123
-                #   ^1.2.3 / ~1.2.3 / 1.2.3 / v1.2.3        → v1.2.3 (strip leading ^/~)
-                #   empty fragment or no # separator          → fall back to default branch
+                # Normalise the package spec value to a checkout-safe ref.
+                # actions/checkout only resolves a hex string as a commit SHA when it
+                # is exactly 40 characters; shorter strings are looked up as branch/tag
+                # names. For abbreviated commit SHAs in git+URL / github: fragments,
+                # recommend upgrading to a full 40-char SHA or using contracts-rev.
+                #
+                # Supported forms:
+                #   git+https://github.com/owner/repo#<40-char-SHA>  → SHA
+                #   github:owner/repo#<40-char-SHA>                   → SHA
+                #   owner/repo#<40-char-SHA>                          → SHA
+                #   ^1.2.3 / ~1.2.3 / 1.2.3 / v1.2.3               → v1.2.3 (tag)
+                #   Short fragment (#abc123 < 40 chars)               → warn, fall back
                 if echo "$raw_rev" | grep -q '#'; then
                   # Extract fragment after the last '#'
-                  rev="${raw_rev##*#}"
+                  fragment="${raw_rev##*#}"
+                  # Only treat as a checkout ref when it is a full 40-char SHA or
+                  # a tag-looking string. Short fragments are ambiguous.
+                  if echo "$fragment" | grep -qE '^[0-9a-f]{40}$'; then
+                    rev="$fragment"
+                  elif echo "$fragment" | grep -qE '^v[0-9]+\.[0-9]+'; then
+                    rev="$fragment"
+                  else
+                    echo "::warning::package.json fragment '#$fragment' is not a 40-char SHA or tag — cannot safely resolve for checkout. Use a full 40-char SHA or switch to contracts_rev_source=contracts-rev."
+                    rev=""
+                  fi
                 elif echo "$raw_rev" | grep -qE '^[\^~]?[0-9]+\.[0-9]+\.[0-9]+'; then
                   # Plain SemVer — normalise to vX.Y.Z tag (strip leading ^/~)
                   rev="v$(echo "$raw_rev" | sed 's/^[^0-9]*//')"
