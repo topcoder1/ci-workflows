@@ -492,7 +492,7 @@ jobs:
       - name: Upload evidence artifact
         if: steps.classify.outputs.matched == 'yes'
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: verifier-evidence-${{ github.event.pull_request.number }}
           # Explicit per-file list, NOT `evidence/` recursive. Shell
