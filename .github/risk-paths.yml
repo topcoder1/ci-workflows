@@ -26,7 +26,7 @@ blocked:
   - '.github/workflows/**'
   - '.github/risk-paths.yml'
   - '.github/CODEOWNERS'
-  - 'infra/**'
+  - 'infra/iam/**'  # narrowed 2026-05-22 (was 'infra/**' — over-classified safe IaC sync PRs)
   - 'terraform/**'
   - 'k8s/**'
 
