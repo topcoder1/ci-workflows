@@ -48,7 +48,7 @@ Detects drift between a committed generated-types file (e.g. `src/api/types.gen.
 
 **Secrets:**
 
-- `contracts_read_token` (optional) — PAT for private contracts repos in a different org; built-in `GITHUB_TOKEN` suffices for same-org private repos
+- `contracts_read_token` — PAT required for ANY private contracts repo (the built-in `GITHUB_TOKEN` is scoped to the caller repo only; it cannot read other private repos, even in the same org). Not needed for public contracts repos.
 
 **On drift:** fails the check and posts a sticky PR comment with the first 50 lines of the diff and regen instructions. Removes the comment automatically when the PR is updated and drift is gone.
 

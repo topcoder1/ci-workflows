@@ -183,12 +183,21 @@ jobs:
                 matched_line=$(grep -E "${{ inputs.contracts_repo }}" "$gomod" | grep -v '^//' | head -1 || true)
               fi
               if [ -n "$matched_line" ]; then
-                # Extract version token (last whitespace-separated word)
-                version_token=$(echo "$matched_line" | awk '{print $NF}')
+                # Strip inline comments (// indirect, // comments) then take the
+                # last whitespace-separated word as the version token.
+                version_token=$(echo "$matched_line" | sed 's/\/\/.*$//' | awk '{print $NF}')
                 # Pseudo-version: extract 12-char SHA suffix for direct commit checkout
                 sha_suffix=$(echo "$version_token" | sed -n 's/.*-\([0-9a-f]\{12\}\)$/\1/p')
                 if [ -n "$sha_suffix" ]; then
-                  rev="$sha_suffix"
+                  # actions/checkout requires a 40-char full SHA to resolve a
+                  # commit directly. The 12-char suffix from a pseudo-version is
+                  # not sufficient. Use the full pseudo-version string instead —
+                  # the Go module proxy creates synthetic tags of this form that
+                  # the contracts repo's git history can resolve. If the contracts
+                  # repo is not a Go module proxy consumer (e.g. it is a plain
+                  # npm-only repo), this tag lookup will fail; in that case switch
+                  # to contracts_rev_source=contracts-rev with a full 40-char SHA.
+                  rev="$version_token"
                 elif echo "$version_token" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
                   rev="$version_token"
                 else
@@ -246,9 +255,17 @@ jobs:
                     echo "::warning::package.json fragment '#$fragment' is not a 40-char SHA or tag — cannot safely resolve for checkout. Use a full 40-char SHA or switch to contracts_rev_source=contracts-rev."
                     rev=""
                   fi
-                elif echo "$raw_rev" | grep -qE '^[\^~]?[0-9]+\.[0-9]+\.[0-9]+'; then
-                  # Plain SemVer — normalise to vX.Y.Z tag (strip leading ^/~)
-                  rev="v$(echo "$raw_rev" | sed 's/^[^0-9]*//')"
+                elif echo "$raw_rev" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+                  # Exact SemVer without operator — normalise to vX.Y.Z tag
+                  rev="v${raw_rev}"
+                elif echo "$raw_rev" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+[^-]*$'; then
+                  # Already v-prefixed exact tag (no range operator)
+                  rev="$raw_rev"
+                elif echo "$raw_rev" | grep -qE '^[\^~]'; then
+                  # Semver range — cannot determine exact pinned version without
+                  # reading the lockfile. Warn and fall back; use contracts-rev.
+                  echo "::warning::package.json contains semver range '$raw_rev' — cannot determine exact contracts revision without reading the lockfile. Switch to contracts_rev_source=contracts-rev with a full 40-char SHA for a precise drift check."
+                  rev=""
                 else
                   # Unknown spec format — warn and fall back to default branch
                   echo "::warning::Cannot parse checkout ref from package.json value '$raw_rev' — falling back to default branch. Use contracts_rev_source=contracts-rev for an explicit SHA pin."
