@@ -66,6 +66,17 @@ on:
         required: false
         type: string
         default: ".contracts-rev"
+      contracts_package_name:
+        description: >-
+          Package name to look up in package.json when contracts_rev_source=
+          package-json. Defaults to the basename of contracts_repo, which works
+          for unscoped packages (e.g. "asm-contracts-v2" from
+          "topcoder1/asm-contracts-v2"). Set explicitly for scoped packages
+          (e.g. "@topcoder1/asm-contracts-v2") or when the npm package name
+          differs from the repo name.
+        required: false
+        type: string
+        default: ""
       contracts_gen_cmd:
         description: >-
           Command to regenerate types, run from inside the contracts repo.
@@ -189,15 +200,17 @@ jobs:
                 # Pseudo-version: extract 12-char SHA suffix for direct commit checkout
                 sha_suffix=$(echo "$version_token" | sed -n 's/.*-\([0-9a-f]\{12\}\)$/\1/p')
                 if [ -n "$sha_suffix" ]; then
-                  # actions/checkout requires a 40-char full SHA to resolve a
-                  # commit directly. The 12-char suffix from a pseudo-version is
-                  # not sufficient. Use the full pseudo-version string instead —
-                  # the Go module proxy creates synthetic tags of this form that
-                  # the contracts repo's git history can resolve. If the contracts
-                  # repo is not a Go module proxy consumer (e.g. it is a plain
-                  # npm-only repo), this tag lookup will fail; in that case switch
-                  # to contracts_rev_source=contracts-rev with a full 40-char SHA.
-                  rev="$version_token"
+                  # Go pseudo-versions (v0.0.0-YYYYMMDDHHMMSS-XXXXXXXXXXXX) are
+                  # NOT real git tags in the contracts repo — they exist only in
+                  # the Go module proxy index. actions/checkout will fail when
+                  # given a pseudo-version string unless the contracts repo has an
+                  # identically-named tag (unlikely). The cleanest fix is to emit
+                  # a warning and fall back: the drift check runs against contracts
+                  # HEAD, which is advisory-quality but avoids a hard checkout
+                  # failure. For a precise check, switch to
+                  # contracts_rev_source=contracts-rev with a full 40-char SHA.
+                  echo "::warning::go.mod contains pseudo-version '$version_token'. Pseudo-versions are not git tags and cannot be resolved by actions/checkout. Falling back to contracts default branch. Switch to contracts_rev_source=contracts-rev for a precise pin."
+                  rev=""
                 elif echo "$version_token" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
                   rev="$version_token"
                 else
@@ -221,12 +234,19 @@ jobs:
                 echo "::error::contracts_rev_source=package-json but package.json not found."
                 exit 1
               fi
-              repo_name=$(basename "${{ inputs.contracts_repo }}")
-              raw_rev=$(jq -r --arg pkg "$repo_name" \
+              # Use the explicit package name input if provided; fall back to the
+              # repo basename. Callers with scoped packages (e.g.
+              # @topcoder1/asm-contracts-v2) must set contracts_package_name.
+              if [ -n "${{ inputs.contracts_package_name }}" ]; then
+                pkg_name="${{ inputs.contracts_package_name }}"
+              else
+                pkg_name=$(basename "${{ inputs.contracts_repo }}")
+              fi
+              raw_rev=$(jq -r --arg pkg "$pkg_name" \
                 '(.dependencies // {}) + (.devDependencies // {}) | .[$pkg] // ""' \
                 "$pkgjson")
               if [ -z "$raw_rev" ]; then
-                echo "::warning::Package '$repo_name' not found in package.json deps — falling back to default branch."
+                echo "::warning::Package '$pkg_name' not found in package.json deps — falling back to default branch. If the npm package name differs from the repo basename, set the contracts_package_name input."
                 echo "rev=" >> "$GITHUB_OUTPUT"
                 echo "rev_display=HEAD (package-json key not found)" >> "$GITHUB_OUTPUT"
               else
