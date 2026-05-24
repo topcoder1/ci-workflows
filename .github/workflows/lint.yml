@@ -27,11 +27,18 @@ name: Lint
 #   - prettier auto-installs the target repo's deps if a package.json exists,
 #     so prettier plugins (prettier-plugin-svelte etc.) resolve correctly.
 #     Skip with `install_node_deps: false` for plain markdown-only repos.
+#   - prettier runs on pull_request events ONLY. Push events (including
+#     post-merge push:main) skip prettier entirely. Rationale: prettier on
+#     push:main provides zero value (the merge already landed) and creates a
+#     feedback loop — prettier-autofix fires on push:main, pushes a fix
+#     commit, which triggers another push:main, repeat. The prettier-autofix
+#     workflow already handles main-branch formatting drift. Actionlint and
+#     shellcheck are NOT gated this way — they run on both event types.
 #   - prettier in PR mode checks ONLY files added/modified/renamed by the PR
-#     (intersected with `markdown_glob`). On push events it scans the full
-#     glob. Set `prettier_changed_only: false` to scan the full glob on PRs
-#     too. Rationale: a single badly-formatted file landing on main otherwise
-#     poisons every subsequent docs PR's lint check across the fleet.
+#     (intersected with `markdown_glob`). Set `prettier_changed_only: false`
+#     to scan the full glob on PRs instead. Rationale: a single
+#     badly-formatted file landing on main otherwise poisons every subsequent
+#     docs PR's lint check across the fleet.
 #   - shellcheck on .sh files is OFF by default for the same reason as
 #     actionlint's shellcheck: most repos have pre-existing style/info
 #     drift. When opted in, defaults to severity=error so only real bugs
@@ -139,7 +146,12 @@ jobs:
 
   prettier:
     name: prettier (markdown)
-    if: ${{ format('{0}', inputs.run_prettier) != 'false' }}
+    # Skip entirely on push events — prettier-autofix handles main-branch
+    # drift and push events have no PR context for changed-only mode anyway.
+    # Running prettier on push:main caused a feedback loop: prettier fails →
+    # prettier-autofix pushes a fix commit → another push:main → repeat.
+    # Actionlint and shellcheck are NOT gated this way (they remain on both).
+    if: ${{ github.event_name == 'pull_request' && format('{0}', inputs.run_prettier) != 'false' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
