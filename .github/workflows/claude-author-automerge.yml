@@ -9,10 +9,17 @@ name: Claude-author Auto-merge (reusable)
 #     repo-specific block path without us having to keep a parallel regex).
 #
 #  2. Touching any risk-tier path category from the global CLAUDE.md policy:
-#     - auth / login / session / oauth / sso
+#     - auth / login / session / oauth / oauth2 / sso
 #     - secrets / env files / keychain / credentials
 #     - DB migrations / SQL files
 #     - billing / payment / pricing / invoice
+#     - Go service entrypoints (main.go at any depth — wires routes,
+#       middleware, secrets loading, DB init; touching it can change
+#       auth or transport behavior. Lesson 2026-05-24 from
+#       whois-api-llc/wxa-mcp-server#193 + #197 where Claude PRs
+#       modifying main.go + internal/oauth2/ auto-merged because the
+#       `oauth` alternation didn't catch `oauth2` and main.go had no
+#       pattern at all.)
 #     - production infra: Dockerfile, docker-compose, .github/workflows,
 #       .github/risk-paths.yml, .github/CODEOWNERS, infra/iam/, infra
 #       subdirs (deploy/terraform/pulumi/k8s/cloudformation/ansible/
@@ -252,7 +259,7 @@ jobs:
           # Risk-tier glob patterns (kept in sync with global CLAUDE.md policy).
           # If you add a category, also update install-automerge-policy.sh and
           # the CLAUDE.md policy block.
-          patterns='^(.*/)?(auth|login|session|oauth|sso)(/|$)
+          patterns='^(.*/)?(auth|login|session|oauth|oauth2|sso)(/|$)
           ^(.*/)?secrets(/|$)
           ^(.*/)?\.env($|\..*)
           ^(.*/)?keychain.*
@@ -260,6 +267,7 @@ jobs:
           ^(.*/)?migrations(/|$)
           .*\.sql$
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?)(/|$)
+          (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
           ^docker-compose.*\.ya?ml$
           ^\.github/workflows/.*

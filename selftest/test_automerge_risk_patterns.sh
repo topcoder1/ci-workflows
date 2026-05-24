@@ -12,7 +12,7 @@ set -euo pipefail
 
 # Mirror the patterns block from .github/workflows/claude-author-automerge.yml.
 # Keep these in lock-step — if you edit one, edit the other.
-patterns='^(.*/)?(auth|login|session|oauth|sso)(/|$)
+patterns='^(.*/)?(auth|login|session|oauth|oauth2|sso)(/|$)
 ^(.*/)?secrets(/|$)
 ^(.*/)?\.env($|\..*)
 ^(.*/)?keychain.*
@@ -20,6 +20,7 @@ patterns='^(.*/)?(auth|login|session|oauth|sso)(/|$)
 ^(.*/)?migrations(/|$)
 .*\.sql$
 ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?)(/|$)
+(^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
 ^docker-compose.*\.ya?ml$
 ^\.github/workflows/.*
@@ -52,6 +53,13 @@ matches() {
 # Cases the regex MUST flag as risky (manual click-merge).
 RISKY=(
   "src/auth/login.py"
+  "internal/auth/security.go"            # auth segment, Go layout
+  "internal/oauth2/server.go"            # oauth2 alternation — wxa-mcp-server#193/#197 gap (2026-05-24)
+  "internal/oauth2/handler.go"
+  "pkg/oauth2/token.go"
+  "main.go"                              # Go entrypoint at root — wxa-mcp-server#193 gap
+  "cmd/server/main.go"                   # Go entrypoint under cmd/
+  "cmd/wxa-mcp-server/main.go"
   "secrets/api-keys.json"
   ".env.production"
   "src/keychain_helpers.py"
@@ -92,6 +100,11 @@ SAFE=(
   "src/wxa_vpn/api/routes.py"
   "tests/test_anything.py"
   "docs/data-dictionary.md"
+  "main_test.go"                         # adjacent to main.go but a test file
+  "internal/foo/main_test.go"
+  "internal/oauth2.md"                   # doc file mentioning oauth2 — pattern needs trailing / or end
+  "cmd/server/mainview.go"               # starts with "main" but not the literal main.go
+  "src/oauth2helper.go"                  # oauth2 substring but not a path segment
   "scripts/run_analysis.py"
   "infra/crontabs/wxa-scanner.crontab"   # cron schedule — wxa_vpn#439 case
   "infra/crontabs/wxa-scanner-active.crontab"
