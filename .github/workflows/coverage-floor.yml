@@ -135,6 +135,32 @@ on:
         required: false
         type: string
         default: "all"
+      pre_measured_coverage_artifact:
+        description: |
+          Opt-in. When non-empty, skip the install + test step and download an
+          artifact of this name from the same workflow_run. The artifact must
+          contain `coverage-percent.txt` — a single-line file with the coverage
+          percentage as a number (e.g. "87.4"). Coverage Floor reads the number,
+          skips the language-specific install + test invocation, and runs only
+          the floor comparison + seed + sticky-comment logic.
+
+          Caller pattern: in a single workflow, the test job runs pytest --cov
+          (or equivalent), writes the coverage % to coverage-percent.txt, uploads
+          it as an artifact. The coverage-floor job depends on the test job via
+          `needs:` and consumes that artifact name via this input.
+
+          The pre-measured caller template lives in topcoder1/dotclaude at
+          templates/ci-workflows/callers/coverage-floor-pre-measured.yml.
+
+          Saves ~50% of Coverage Floor's per-run minutes for repos where the
+          caller's CI already runs the same test suite. Existing callers that
+          don't pass this input keep the current behavior (run tests fresh).
+
+          Language-agnostic — the reusable just reads the percent. Caller's CI
+          computes it however (pytest-cov, go cover, vitest, custom script).
+        required: false
+        type: string
+        default: ""
       test_command:
         description: |
           Caller-provided shell command to install deps and run tests with coverage.
@@ -266,25 +292,38 @@ jobs:
             echo "go_version=$GO_VER"
           } >> "$GITHUB_OUTPUT"
 
+      # Download pre-measured coverage when the caller's CI already ran tests
+      # with --cov and uploaded a coverage-percent.txt artifact. Skips all the
+      # install + test steps below.
+      - name: Download pre-measured coverage artifact
+        if: inputs.pre_measured_coverage_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.pre_measured_coverage_artifact }}
+          path: ${{ inputs.working_directory || '.' }}
+
+      # Language + tooling setup. Skipped when consuming a pre-measured artifact
+      # (no tests to run → no toolchain needed).
       - uses: actions/setup-python@v5
-        if: steps.detect.outputs.language == 'python'
+        if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         with:
           python-version: ${{ inputs.python_version || '3.13' }}
       - name: Install uv (python)
-        if: steps.detect.outputs.language == 'python'
+        if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-go@v5
-        if: steps.detect.outputs.language == 'go'
+        if: steps.detect.outputs.language == 'go' && inputs.pre_measured_coverage_artifact == ''
         with:
           go-version: ${{ steps.detect.outputs.go_version }}
       - uses: actions/setup-node@v4
-        if: steps.detect.outputs.language == 'js'
+        if: steps.detect.outputs.language == 'js' && inputs.pre_measured_coverage_artifact == ''
         with:
           node-version: ${{ inputs.node_version || '20' }}
 
       - name: Export service env vars + extra_env
+        if: inputs.pre_measured_coverage_artifact == ''
         env:
           SERVICES_POSTGRES: ${{ inputs.services_postgres || 'false' }}
           SERVICES_REDIS: ${{ inputs.services_redis || 'false' }}
@@ -329,7 +368,7 @@ jobs:
         # topcoder1/webcrawl. The CI workflow (`Lint and Test`) didn't hit
         # this because it uses a different uv invocation that doesn't
         # actually exercise the git-URL dep at install time.
-        if: steps.detect.outputs.language == 'python'
+        if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         env:
           CROSS_ORG_PAT: ${{ secrets.AUTOMERGE_PAT }}
         run: |
@@ -343,8 +382,29 @@ jobs:
             echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies (e.g. webcrawl from topcoder1/*) will fail with 404 on uv sync. Forward the secret in the caller's job spec — see callers/coverage-floor.yml."
           fi
 
+      # Parse pre-measured artifact when caller opted in.
+      - name: Read coverage from pre-measured artifact
+        id: measure_cached
+        if: inputs.pre_measured_coverage_artifact != ''
+        working-directory: ${{ inputs.working_directory || '.' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f coverage-percent.txt ]]; then
+            echo "::error::pre_measured_coverage_artifact '${{ inputs.pre_measured_coverage_artifact }}' is missing coverage-percent.txt at working_directory. Caller's test job must emit this file and include it in the uploaded artifact."
+            exit 1
+          fi
+          RAW=$(tr -d '[:space:]' < coverage-percent.txt)
+          if ! [[ "$RAW" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::coverage-percent.txt contains non-numeric content: '$RAW'. Expected a single number like '87.4'."
+            exit 1
+          fi
+          MEASURED=$(awk -v m="$RAW" 'BEGIN {printf "%.1f", m}')
+          echo "measured=$MEASURED" >> "$GITHUB_OUTPUT"
+          echo "measured coverage (from artifact): $MEASURED%"
+
       - name: Measure coverage
-        id: measure
+        id: measure_fresh
+        if: inputs.pre_measured_coverage_artifact == ''
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
           LANG_TYPE: ${{ steps.detect.outputs.language }}
@@ -486,7 +546,7 @@ jobs:
         # opens a follow-up seed PR with the real value.
         if: steps.floor.outputs.mode == 'seed' && github.event_name == 'pull_request'
         env:
-          MEASURED: ${{ steps.measure.outputs.measured }}
+          MEASURED: ${{ steps.measure_fresh.outputs.measured || steps.measure_cached.outputs.measured }}
         run: |
           echo "seed-not-yet on PR: measured $MEASURED%; PASS (will seed via post-merge follow-up PR)"
 
@@ -494,7 +554,7 @@ jobs:
         if: steps.floor.outputs.mode == 'seed' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
-          MEASURED: ${{ steps.measure.outputs.measured }}
+          MEASURED: ${{ steps.measure_fresh.outputs.measured || steps.measure_cached.outputs.measured }}
           TARGET: ${{ steps.floor.outputs.target }}
           INPUT_FLOOR_FILE: ${{ inputs.floor_file || '.coverage-floor' }}
           SEED_MIN: ${{ inputs.seed_minimum || '1.0' }}
@@ -604,7 +664,7 @@ jobs:
       - name: Enforce mode — compare measured vs floor
         if: steps.floor.outputs.mode == 'enforce' && github.event_name == 'pull_request'
         env:
-          MEASURED: ${{ steps.measure.outputs.measured }}
+          MEASURED: ${{ steps.measure_fresh.outputs.measured || steps.measure_cached.outputs.measured }}
           FLOOR: ${{ steps.floor.outputs.current }}
         run: |
           set -euo pipefail
@@ -619,7 +679,7 @@ jobs:
       - name: Enforce mode on main — no-op (baseline tracking only)
         if: steps.floor.outputs.mode == 'enforce' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
-          MEASURED: ${{ steps.measure.outputs.measured }}
+          MEASURED: ${{ steps.measure_fresh.outputs.measured || steps.measure_cached.outputs.measured }}
           FLOOR: ${{ steps.floor.outputs.current }}
         run: |
           echo "post-merge baseline: measured $MEASURED% vs floor $FLOOR% (no enforcement on main; PR gates handle regressions)"
@@ -634,7 +694,7 @@ jobs:
 
             | metric | value |
             |---|---|
-            | measured | `${{ steps.measure.outputs.measured }}%` |
+            | measured | `${{ steps.measure_fresh.outputs.measured || steps.measure_cached.outputs.measured }}%` |
             | floor (current) | `${{ steps.floor.outputs.current }}%` |
             | target | `${{ steps.floor.outputs.target }}%` |
             | last bumped | `${{ steps.floor.outputs.last_bumped }}` |
