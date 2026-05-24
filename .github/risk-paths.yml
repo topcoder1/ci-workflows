@@ -21,7 +21,21 @@ blocked:
   - 'Dockerfile*'
   - 'docker-compose*.yaml'
   - 'docker-compose*.yml'
-  - '**/.env*'
+  # Only the actual secrets-bearing .env variants are blocked. Documentation
+  # templates (.env.example, .env.sample, .env.template, .env.dist) are NOT
+  # secrets — they ship literal-string placeholders to teach readers which
+  # env vars exist. Treating them as `blocked` was a false-positive that
+  # bounced wxa-graph PR #154 in 2026-05-23.
+  - '**/.env'
+  - '**/.env.local'
+  - '**/.env.development'
+  - '**/.env.development.local'
+  - '**/.env.production'
+  - '**/.env.production.local'
+  - '**/.env.staging'
+  - '**/.env.staging.local'
+  - '**/.env.test'
+  - '**/.env.test.local'
   - '**/secrets*'
   - '.github/workflows/**'
   - '.github/risk-paths.yml'
