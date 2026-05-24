@@ -1,0 +1,452 @@
+name: OpenAPI Types Drift Check (reusable)
+
+# Detects drift between a committed generated-types file (e.g. src/api/types.gen.ts)
+# and what `openapi-typescript` would produce from the contracts spec today.
+#
+# Topology this was designed for:
+#   - A "contracts" repo that owns the OpenAPI spec (openapi/v2.yaml) and a
+#     `gen-ts.sh` / `npm run gen-ts` script that writes types.gen.ts.
+#   - A "consumer" repo (this caller) that commits the generated types file
+#     and rebuilds TypeScript from it.
+#   - No compile-time SHA pin between the two repos yet (a .contracts-rev file
+#     is the clean fix — see NOTE below; deferred to a future wave).
+#
+# What this workflow does on every PR:
+#   1. Checks out the contracts repo at the SHA declared by `contracts_rev_source`.
+#      Supported sources:
+#        go-mod         — reads `go.mod` replace directive / require SHA for
+#                         the contracts module (Go-flavoured workspaces).
+#        package-json   — reads `dependencies` or `devDependencies` SHA/semver
+#                         for the contracts package name.
+#        contracts-rev  — reads a plain .contracts-rev file in the caller root
+#                         (most explicit; 40-char SHA).
+#        head           — always checks out contracts HEAD (advisory-only /
+#                         no-pin repos; drift may accumulate across weeks).
+#   2. Re-runs `npm run gen-ts -- <tempfile>` against the contracts spec.
+#   3. `diff` the fresh output against the PR's committed types file.
+#   4. If drift found: FAIL with a clear regen instruction, and post a sticky
+#      PR comment with the first ~50 lines of the diff.
+#   5. If clean: pass.
+#
+# Advisory-only soak: do NOT add this check to required-status-checks until
+# after ~1 week of advisory runs to rule out false positives. See the caller
+# PR body for the planned gating timeline.
+#
+# NOTE on SHA pinning:
+#   When contracts_rev_source=head, this gate detects drift as of contracts HEAD
+#   at CI time. If contracts HEAD advances between your PR's CI run and the next
+#   run, the gate may report spurious drift. The permanent fix is to add a
+#   .contracts-rev file to the consumer repo and switch to contracts_rev_source=
+#   contracts-rev — then drift is always evaluated against the pinned SHA.
+#   See wave-4.5 lesson "types.gen.ts hand-edit drift confirmed" for context.
+
+on:
+  workflow_call:
+    inputs:
+      contracts_repo:
+        description: >-
+          GitHub slug (owner/repo) of the contracts repository that owns the
+          OpenAPI spec and the gen-ts script. E.g. "topcoder1/asm-contracts-v2".
+        required: true
+        type: string
+      contracts_rev_source:
+        description: >-
+          How to determine the contracts revision to check out. One of:
+            head         — always use contracts HEAD (no-pin repos)
+            contracts-rev — read a .contracts-rev file in the caller root (40-char SHA)
+            go-mod       — parse go.mod for the contracts module SHA
+            package-json — parse package.json for the contracts package version/SHA
+        required: false
+        type: string
+        default: "head"
+      contracts_rev_file:
+        description: >-
+          Path to the pin file when contracts_rev_source=contracts-rev.
+          Relative to the consumer repo root. Default ".contracts-rev".
+        required: false
+        type: string
+        default: ".contracts-rev"
+      contracts_package_name:
+        description: >-
+          Package name to look up in package.json when contracts_rev_source=
+          package-json. Defaults to the basename of contracts_repo, which works
+          for unscoped packages (e.g. "asm-contracts-v2" from
+          "topcoder1/asm-contracts-v2"). Set explicitly for scoped packages
+          (e.g. "@topcoder1/asm-contracts-v2") or when the npm package name
+          differs from the repo name.
+        required: false
+        type: string
+        default: ""
+      contracts_gen_cmd:
+        description: >-
+          Command to regenerate types, run from inside the contracts repo.
+          Must accept a positional argument: the output file path.
+          Default: "npm run gen-ts --"
+        required: false
+        type: string
+        default: "npm run gen-ts --"
+      contracts_spec_path:
+        description: >-
+          Path to the OpenAPI spec inside the contracts repo, relative to its
+          root. Used only for display in error messages. Default "openapi/v2.yaml".
+        required: false
+        type: string
+        default: "openapi/v2.yaml"
+      generated_types_path:
+        description: >-
+          Repo-root-relative path to the committed generated-types file in the
+          consumer (caller) repo. Default "src/api/types.gen.ts".
+        required: false
+        type: string
+        default: "src/api/types.gen.ts"
+      node_version:
+        description: "Node.js version for running the codegen. Default '20'."
+        required: false
+        type: string
+        default: "20"
+    secrets:
+      contracts_read_token:
+        description: >-
+          PAT or token used to clone the contracts repo.
+          Required for ANY private contracts repo (the built-in GITHUB_TOKEN
+          is scoped to the caller repository only — it cannot read other
+          repositories, including same-org private ones). For public contracts
+          repos the fallback to GITHUB_TOKEN is safe.
+          Required scopes: contents:read on the contracts repo.
+        required: false
+
+jobs:
+  drift_check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout consumer repo (PR head)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          path: consumer
+
+      - name: Resolve contracts revision
+        id: resolve_rev
+        env:
+          REV_SOURCE: ${{ inputs.contracts_rev_source }}
+          REV_FILE: ${{ inputs.contracts_rev_file }}
+        run: |
+          set -euo pipefail
+          case "$REV_SOURCE" in
+            head)
+              # Empty rev means actions/checkout@v5 uses the default branch of
+              # the contracts repo (equivalent to omitting `ref:`). Passing the
+              # literal string "HEAD" would be treated as a branch/tag name,
+              # which fails on repos that have no branch named "HEAD".
+              echo "rev=" >> "$GITHUB_OUTPUT"
+              echo "rev_display=HEAD (default branch, no pin)" >> "$GITHUB_OUTPUT"
+              ;;
+            contracts-rev)
+              pin_file="consumer/$REV_FILE"
+              if [ ! -f "$pin_file" ]; then
+                echo "::error::contracts_rev_source=contracts-rev but '$REV_FILE' not found in repo root."
+                echo "Create it with the 40-char SHA of the contracts commit you're targeting."
+                exit 1
+              fi
+              rev=$(tr -d '[:space:]' < "$pin_file")
+              if ! echo "$rev" | grep -qE '^[0-9a-f]{40}$'; then
+                echo "::error::$REV_FILE must contain a 40-char lowercase hex SHA. Got: '$rev'"
+                exit 1
+              fi
+              echo "rev=$rev" >> "$GITHUB_OUTPUT"
+              echo "rev_display=$rev" >> "$GITHUB_OUTPUT"
+              ;;
+            go-mod)
+              gomod="consumer/go.mod"
+              if [ ! -f "$gomod" ]; then
+                echo "::error::contracts_rev_source=go-mod but go.mod not found."
+                exit 1
+              fi
+              # go.mod has two forms for module pinning:
+              #
+              # 1. Single-line:  require example.com/foo v1.2.3
+              # 2. Multi-line block:
+              #      require (
+              #          example.com/foo v1.2.3
+              #      )
+              #
+              # In the block form the line containing the module path does NOT
+              # have the word "require" on it. grep for the module path directly
+              # rather than for "require" + path on the same line.
+              #
+              # The version field on the matched line is either:
+              #   v0.0.0-YYYYMMDDHHMMSS-XXXXXXXXXXXX  (pseudo-version / commit SHA)
+              #   v1.2.3[-suffix]                     (tagged release)
+              #
+              # For pseudo-versions we extract the full version string and pass it
+              # to actions/checkout as a tag lookup — Go's module proxy creates
+              # synthetic v0.0.0-... tags so checkout can resolve them. Alternatively
+              # we extract the 12-char SHA suffix for a direct commit checkout.
+              # Using the full pseudo-version string is safer because it round-trips
+              # through Go module tooling.
+              module_path=$(basename "${{ inputs.contracts_repo }}")
+              matched_line=$(grep -E "^\s*${module_path}(\s|$)" "$gomod" | head -1 || true)
+              if [ -z "$matched_line" ]; then
+                # Try full owner/repo path (for replace directives)
+                matched_line=$(grep -E "${{ inputs.contracts_repo }}" "$gomod" | grep -v '^//' | head -1 || true)
+              fi
+              if [ -n "$matched_line" ]; then
+                # Strip inline comments (// indirect, // comments) then take the
+                # last whitespace-separated word as the version token.
+                version_token=$(echo "$matched_line" | sed 's/\/\/.*$//' | awk '{print $NF}')
+                # Pseudo-version: extract 12-char SHA suffix for direct commit checkout
+                sha_suffix=$(echo "$version_token" | sed -n 's/.*-\([0-9a-f]\{12\}\)$/\1/p')
+                if [ -n "$sha_suffix" ]; then
+                  # Go pseudo-versions (v0.0.0-YYYYMMDDHHMMSS-XXXXXXXXXXXX) are
+                  # NOT real git tags in the contracts repo — they exist only in
+                  # the Go module proxy index. actions/checkout will fail when
+                  # given a pseudo-version string unless the contracts repo has an
+                  # identically-named tag (unlikely). The cleanest fix is to emit
+                  # a warning and fall back: the drift check runs against contracts
+                  # HEAD, which is advisory-quality but avoids a hard checkout
+                  # failure. For a precise check, switch to
+                  # contracts_rev_source=contracts-rev with a full 40-char SHA.
+                  echo "::warning::go.mod contains pseudo-version '$version_token'. Pseudo-versions are not git tags and cannot be resolved by actions/checkout. Falling back to contracts default branch. Switch to contracts_rev_source=contracts-rev for a precise pin."
+                  rev=""
+                elif echo "$version_token" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+                  rev="$version_token"
+                else
+                  rev=""
+                fi
+              else
+                rev=""
+              fi
+              if [ -z "$rev" ]; then
+                echo "::warning::Could not find a rev for '${{ inputs.contracts_repo }}' in go.mod — falling back to default branch."
+                echo "rev=" >> "$GITHUB_OUTPUT"
+                echo "rev_display=HEAD (go-mod rev not found)" >> "$GITHUB_OUTPUT"
+              else
+                echo "rev=$rev" >> "$GITHUB_OUTPUT"
+                echo "rev_display=$rev (from go.mod)" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            package-json)
+              pkgjson="consumer/package.json"
+              if [ ! -f "$pkgjson" ]; then
+                echo "::error::contracts_rev_source=package-json but package.json not found."
+                exit 1
+              fi
+              # Use the explicit package name input if provided; fall back to the
+              # repo basename. Callers with scoped packages (e.g.
+              # @topcoder1/asm-contracts-v2) must set contracts_package_name.
+              if [ -n "${{ inputs.contracts_package_name }}" ]; then
+                pkg_name="${{ inputs.contracts_package_name }}"
+              else
+                pkg_name=$(basename "${{ inputs.contracts_repo }}")
+              fi
+              raw_rev=$(jq -r --arg pkg "$pkg_name" \
+                '(.dependencies // {}) + (.devDependencies // {}) | .[$pkg] // ""' \
+                "$pkgjson")
+              if [ -z "$raw_rev" ]; then
+                echo "::warning::Package '$pkg_name' not found in package.json deps — falling back to default branch. If the npm package name differs from the repo basename, set the contracts_package_name input."
+                echo "rev=" >> "$GITHUB_OUTPUT"
+                echo "rev_display=HEAD (package-json key not found)" >> "$GITHUB_OUTPUT"
+              else
+                # Normalise the package spec value to a checkout-safe ref.
+                # actions/checkout only resolves a hex string as a commit SHA when it
+                # is exactly 40 characters; shorter strings are looked up as branch/tag
+                # names. For abbreviated commit SHAs in git+URL / github: fragments,
+                # recommend upgrading to a full 40-char SHA or using contracts-rev.
+                #
+                # Supported forms:
+                #   git+https://github.com/owner/repo#<40-char-SHA>  → SHA
+                #   github:owner/repo#<40-char-SHA>                   → SHA
+                #   owner/repo#<40-char-SHA>                          → SHA
+                #   ^1.2.3 / ~1.2.3 / 1.2.3 / v1.2.3               → v1.2.3 (tag)
+                #   Short fragment (#abc123 < 40 chars)               → warn, fall back
+                if echo "$raw_rev" | grep -q '#'; then
+                  # Extract fragment after the last '#'
+                  fragment="${raw_rev##*#}"
+                  # Only treat as a checkout ref when it is a full 40-char SHA or
+                  # a tag-looking string. Short fragments are ambiguous.
+                  if echo "$fragment" | grep -qE '^[0-9a-f]{40}$'; then
+                    rev="$fragment"
+                  elif echo "$fragment" | grep -qE '^v[0-9]+\.[0-9]+'; then
+                    rev="$fragment"
+                  else
+                    echo "::warning::package.json fragment '#$fragment' is not a 40-char SHA or tag — cannot safely resolve for checkout. Use a full 40-char SHA or switch to contracts_rev_source=contracts-rev."
+                    rev=""
+                  fi
+                elif echo "$raw_rev" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+                  # Exact SemVer without operator — normalise to vX.Y.Z tag
+                  rev="v${raw_rev}"
+                elif echo "$raw_rev" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+[^-]*$'; then
+                  # Already v-prefixed exact tag (no range operator)
+                  rev="$raw_rev"
+                elif echo "$raw_rev" | grep -qE '^[\^~]'; then
+                  # Semver range — cannot determine exact pinned version without
+                  # reading the lockfile. Warn and fall back; use contracts-rev.
+                  echo "::warning::package.json contains semver range '$raw_rev' — cannot determine exact contracts revision without reading the lockfile. Switch to contracts_rev_source=contracts-rev with a full 40-char SHA for a precise drift check."
+                  rev=""
+                else
+                  # Unknown spec format — warn and fall back to default branch
+                  echo "::warning::Cannot parse checkout ref from package.json value '$raw_rev' — falling back to default branch. Use contracts_rev_source=contracts-rev for an explicit SHA pin."
+                  rev=""
+                fi
+                if [ -n "$rev" ]; then
+                  echo "rev=$rev" >> "$GITHUB_OUTPUT"
+                  echo "rev_display=$rev (from package.json)" >> "$GITHUB_OUTPUT"
+                else
+                  echo "rev=" >> "$GITHUB_OUTPUT"
+                  echo "rev_display=HEAD (package-json parse fallback)" >> "$GITHUB_OUTPUT"
+                fi
+              fi
+              ;;
+            *)
+              echo "::error::Unknown contracts_rev_source '$REV_SOURCE'. Must be: head | contracts-rev | go-mod | package-json"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout contracts repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.contracts_repo }}
+          # Empty string here (contracts_rev_source=head) means actions/checkout
+          # uses the contracts repo's default branch — correct behavior.
+          ref: ${{ steps.resolve_rev.outputs.rev }}
+          path: contracts
+          # contracts_read_token must be wired for private contracts repos in any
+          # org (including same org — GITHUB_TOKEN is scoped to the caller repo
+          # and cannot read other repos, even in the same org, unless they are
+          # public). For public contracts repos, github.token works as fallback.
+          # If contracts_read_token is absent and contracts_repo is private, the
+          # checkout step will fail with HTTP 404 / "Repository not found".
+          token: ${{ secrets.contracts_read_token || github.token }}
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install contracts dev deps
+        working-directory: contracts
+        run: npm ci --prefer-offline
+
+      - name: Re-generate types to temp file
+        id: codegen
+        working-directory: contracts
+        env:
+          GEN_CMD: ${{ inputs.contracts_gen_cmd }}
+          TYPES_PATH: ${{ inputs.generated_types_path }}
+          REV: ${{ steps.resolve_rev.outputs.rev_display }}
+          SPEC: ${{ inputs.contracts_spec_path }}
+        run: |
+          set -euo pipefail
+          FRESH_FILE="$(mktemp /tmp/types.gen.XXXXXX.ts)"
+          echo "Running: $GEN_CMD $FRESH_FILE (contracts rev: $REV, spec: $SPEC)"
+          $GEN_CMD "$FRESH_FILE"
+          echo "fresh_file=$FRESH_FILE" >> "$GITHUB_OUTPUT"
+          echo "Codegen complete: $(wc -l < "$FRESH_FILE") lines written."
+
+      - name: Diff against committed types
+        id: diff
+        env:
+          FRESH_FILE: ${{ steps.codegen.outputs.fresh_file }}
+          COMMITTED_FILE: consumer/${{ inputs.generated_types_path }}
+          REV: ${{ steps.resolve_rev.outputs.rev_display }}
+          CONTRACTS_REPO: ${{ inputs.contracts_repo }}
+          TYPES_PATH: ${{ inputs.generated_types_path }}
+        run: |
+          set -euo pipefail
+          if diff -u "$COMMITTED_FILE" "$FRESH_FILE" > /tmp/types-drift.diff 2>&1; then
+            echo "drift=0" >> "$GITHUB_OUTPUT"
+            echo "No drift detected — committed types match regenerated output."
+          else
+            echo "drift=1" >> "$GITHUB_OUTPUT"
+            lines=$(wc -l < /tmp/types-drift.diff | tr -d ' ')
+            echo "diff_lines=$lines" >> "$GITHUB_OUTPUT"
+            echo "::error::types.gen.ts is out of sync with contracts spec at $REV."
+            echo "First 60 lines of diff:"
+            head -60 /tmp/types-drift.diff
+          fi
+
+      - name: Post sticky PR comment on drift
+        if: steps.diff.outputs.drift == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REV: ${{ steps.resolve_rev.outputs.rev_display }}
+          TYPES_PATH: ${{ inputs.generated_types_path }}
+          CONTRACTS_REPO: ${{ inputs.contracts_repo }}
+          SPEC: ${{ inputs.contracts_spec_path }}
+          DIFF_LINES: ${{ steps.diff.outputs.diff_lines }}
+        run: |
+          set -euo pipefail
+          marker="<!-- openapi-types-drift:drift-detected -->"
+          existing=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+
+          # Truncate diff to first 50 lines for the comment; full diff is in CI logs.
+          diff_snippet=$(head -50 /tmp/types-drift.diff)
+
+          {
+            echo "$marker"
+            echo "## \`$TYPES_PATH\` is out of sync with the contracts spec"
+            echo ""
+            echo "**Gate:** \`openapi-types-drift\` (advisory — not yet required-status-check)"
+            echo ""
+            echo "The committed \`$TYPES_PATH\` does not match what \`$CONTRACTS_REPO\`'s"
+            echo "codegen produces from \`$SPEC\` at contracts rev \`$REV\`."
+            echo "($DIFF_LINES diff lines total — first 50 shown below.)"
+            echo ""
+            echo "**To fix:** run the contracts codegen locally and commit the updated file:"
+            echo "\`\`\`bash"
+            echo "# From the contracts repo root:"
+            echo "npm run gen-ts"
+            echo "# Then commit the updated $TYPES_PATH in the consumer repo."
+            echo "\`\`\`"
+            echo ""
+            echo "<details><summary>Diff snippet (first 50 lines)</summary>"
+            echo ""
+            echo "\`\`\`diff"
+            echo "$diff_snippet"
+            echo "\`\`\`"
+            echo "</details>"
+          } > /tmp/drift-comment.md
+
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "/repos/${{ github.repository }}/issues/comments/$existing" \
+              -f body="$(cat /tmp/drift-comment.md)" >/dev/null
+            echo "Updated existing drift comment ($existing)."
+          else
+            gh pr comment "$PR" --body-file /tmp/drift-comment.md
+            echo "Posted new drift comment."
+          fi
+
+      - name: Remove stale drift comment when clean
+        if: steps.diff.outputs.drift == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          marker="<!-- openapi-types-drift:drift-detected -->"
+          existing=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X DELETE "/repos/${{ github.repository }}/issues/comments/$existing" >/dev/null
+            echo "Removed stale drift comment ($existing) — types are now clean."
+          fi
+
+      - name: Fail if drift detected
+        if: steps.diff.outputs.drift == '1'
+        env:
+          REV: ${{ steps.resolve_rev.outputs.rev_display }}
+          TYPES_PATH: ${{ inputs.generated_types_path }}
+          CONTRACTS_REPO: ${{ inputs.contracts_repo }}
+        run: |
+          echo "::error::$TYPES_PATH is out of sync with $CONTRACTS_REPO at $REV."
+          echo "Run 'npm run gen-ts' from the contracts repo root and commit the updated file."
+          exit 1

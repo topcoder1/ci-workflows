@@ -30,6 +30,34 @@ Runs `prettier --write` on PR-changed markdown and pushes the fix back to the br
 
 **Skipped automatically on:** fork PRs (cross-repo push impossible), closed PRs, PRs touching zero markdown.
 
+### `openapi-types-drift.yml`
+
+Detects drift between a committed generated-types file (e.g. `src/api/types.gen.ts`) and what `openapi-typescript` would produce from the contracts spec today. Prevents the "types.gen.ts hand-edit drift" class of bug where contract changes in one repo never propagate to the consumer repo's generated file.
+
+**Topology:** designed for a dual-repo layout where a "contracts" repo owns the OpenAPI spec + codegen script and a separate "consumer" repo commits the generated file. The consumer repo installs this caller.
+
+**Inputs:**
+
+- `contracts_repo` (string, required) — GitHub slug of the contracts repo (`owner/repo`)
+- `contracts_rev_source` (string, default `head`) — how to pin the contracts revision: `head` (no pin), `contracts-rev` (`.contracts-rev` file), `go-mod`, or `package-json`
+- `contracts_rev_file` (string, default `.contracts-rev`) — pin file path when `contracts_rev_source=contracts-rev`
+- `contracts_gen_cmd` (string, default `npm run gen-ts --`) — command run inside contracts repo; must accept a positional output-file argument
+- `contracts_spec_path` (string, default `openapi/v2.yaml`) — spec path for display in error messages
+- `generated_types_path` (string, default `src/api/types.gen.ts`) — repo-root-relative path to the committed generated file in the caller
+- `node_version` (string, default `20`) — Node.js version for codegen
+
+**Secrets:**
+
+- `contracts_read_token` — PAT required for ANY private contracts repo (the built-in `GITHUB_TOKEN` is scoped to the caller repo only; it cannot read other private repos, even in the same org). Not needed for public contracts repos.
+
+**On drift:** fails the check and posts a sticky PR comment with the first 50 lines of the diff and regen instructions. Removes the comment automatically when the PR is updated and drift is gone.
+
+**Advisory soak:** install with `contracts_rev_source: head` first. Do NOT add to required-status-checks until after ~1 week of advisory runs. See the caller PR body for the gating plan.
+
+**Known limitation:** without a `.contracts-rev` pin file, the gate evaluates drift against contracts HEAD at CI time. If contracts HEAD advances between CI runs, the gate may report different results for the same PR. The permanent fix is Path C: add `.contracts-rev` and switch to `contracts_rev_source: contracts-rev`.
+
+**Caller template:** `~/.claude/templates/ci-workflows/callers/openapi-types-drift.yml`
+
 ### `dependabot-auto-merge.yml`
 
 Auto-merges Dependabot PRs for patch (and optionally minor) version bumps once required checks pass.
