@@ -12,14 +12,14 @@ set -euo pipefail
 
 # Mirror the patterns block from .github/workflows/claude-author-automerge.yml.
 # Keep these in lock-step — if you edit one, edit the other.
-patterns='^(.*/)?(auth|login|session|oauth|oauth2|sso)(/|$)
-^(.*/)?secrets(/|$)
+patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|jwt|mfa|totp|webauthn|passkey)(/|$)
+^(.*/)?secret[s]?(/|$)
 ^(.*/)?\.env($|\..*)
 ^(.*/)?keychain.*
 ^(.*/)?credentials.*
 ^(.*/)?migrations(/|$)
 .*\.sql$
-^(.*/)?(billing|payment[s]?|pricing|invoice[s]?)(/|$)
+^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|$)
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
 ^docker-compose.*\.ya?ml$
@@ -60,6 +60,30 @@ RISKY=(
   "main.go"                              # Go entrypoint at root — wxa-mcp-server#193 gap
   "cmd/server/main.go"                   # Go entrypoint under cmd/
   "cmd/wxa-mcp-server/main.go"
+  # Auth-adjacent variants (sibling-gap audit, 2026-05-24).
+  # NOTE: Pattern is path-segment-anchored, not filename-prefix. So
+  # `internal/signin/handler.go` matches (signin is a segment) but
+  # `controllers/sessions_controller.rb` does NOT (sessions is a
+  # filename prefix, not a segment). Per-repo Rails/Django/Express
+  # conventions belong in caller's risk-paths.yml.
+  "internal/signin/handler.go"
+  "internal/signup/form.go"
+  "src/logout/handler.go"
+  "internal/sessions/store.go"           # sessions (plural) — Go convention
+  "internal/jwt/sign.go"
+  "services/mfa/verify.py"
+  "app/totp/generate.go"
+  "lib/webauthn/register.go"
+  "internal/passkey/store.go"
+  # Billing-adjacent variants
+  "internal/subscription/manager.go"
+  "app/subscriptions/cancel.rb"
+  "api/checkout/session.go"
+  "services/refund/issuer.py"
+  "api/refunds/handler.go"
+  # Secret (singular) variants
+  "internal/secret/manager.go"
+  "config/secret/keystore.go"
   "secrets/api-keys.json"
   ".env.production"
   "src/keychain_helpers.py"
@@ -105,6 +129,16 @@ SAFE=(
   "internal/oauth2.md"                   # doc file mentioning oauth2 — pattern needs trailing / or end
   "cmd/server/mainview.go"               # starts with "main" but not the literal main.go
   "src/oauth2helper.go"                  # oauth2 substring but not a path segment
+  # Substrings that look auth/billing-ish but aren't path segments — must NOT over-block
+  "internal/sessionsutil.go"             # "sessionsutil" segment, not "sessions"
+  "pkg/jwtutil.go"                       # "jwtutil" not "jwt"
+  "lib/passkeystore.go"                  # "passkeystore" not "passkey"
+  "internal/totps.go"                    # "totps" — neither "totp/" nor "totp$"
+  "docs/checkout-flow.md"                # "checkout-flow.md" not literal "checkout"
+  "lib/subscriber.go"                    # "subscriber" not "subscription"
+  "internal/secretly.go"                 # "secretly" not "secret"
+  "tests/test_authorization_logic.py"    # "test_authorization_logic.py" — not literal "auth"
+  "docs/signin-flow.md"                  # doc with "signin-flow" substring
   "scripts/run_analysis.py"
   "infra/crontabs/wxa-scanner.crontab"   # cron schedule — wxa_vpn#439 case
   "infra/crontabs/wxa-scanner-active.crontab"

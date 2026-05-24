@@ -9,10 +9,12 @@ name: Claude-author Auto-merge (reusable)
 #     repo-specific block path without us having to keep a parallel regex).
 #
 #  2. Touching any risk-tier path category from the global CLAUDE.md policy:
-#     - auth / login / session / oauth / oauth2 / sso
-#     - secrets / env files / keychain / credentials
+#     - auth / login / signin / signup / logout / session(s) / oauth /
+#       oauth2 / sso / jwt / mfa / totp / webauthn / passkey
+#     - secret(s) / env files / keychain / credentials
 #     - DB migrations / SQL files
-#     - billing / payment / pricing / invoice
+#     - billing / payment / pricing / invoice / subscription(s) /
+#       checkout / refund(s)
 #     - Go service entrypoints (main.go at any depth — wires routes,
 #       middleware, secrets loading, DB init; touching it can change
 #       auth or transport behavior. Lesson 2026-05-24 from
@@ -259,14 +261,14 @@ jobs:
           # Risk-tier glob patterns (kept in sync with global CLAUDE.md policy).
           # If you add a category, also update install-automerge-policy.sh and
           # the CLAUDE.md policy block.
-          patterns='^(.*/)?(auth|login|session|oauth|oauth2|sso)(/|$)
-          ^(.*/)?secrets(/|$)
+          patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|jwt|mfa|totp|webauthn|passkey)(/|$)
+          ^(.*/)?secret[s]?(/|$)
           ^(.*/)?\.env($|\..*)
           ^(.*/)?keychain.*
           ^(.*/)?credentials.*
           ^(.*/)?migrations(/|$)
           .*\.sql$
-          ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?)(/|$)
+          ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
           ^docker-compose.*\.ya?ml$
