@@ -29,7 +29,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout (full history for diff against base)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
