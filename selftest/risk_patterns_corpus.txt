@@ -146,13 +146,18 @@ SAFE: mainview.go
 SAFE: src/oauth2helper.go
 SAFE: oauth2helper.go
 # Intentional parity-not-coverage tradeoffs (Wave 4.4 — match GH workflow):
-# Filenames like `auth.ts`, `login.go`, `billing.py` are intentionally SAFE
-# (NOT matched globally). Repos that need filename coverage put the path in
-# their .github/risk-paths.yml blocked list. Stripe paths likewise — only
-# repos using Stripe declare it as risky per-repo.
+# Filenames like `auth.ts`, `login.go`, `billing.py`, `secret.py`,
+# `secret_key.py` are intentionally SAFE (NOT matched globally because the
+# `(/|$)` segment anchor doesn't match leaf filenames). BB repos that need
+# filename coverage either add an explicit HIGH_RISK_PATTERNS entry (and a
+# RISKY: line here) or rely on Claude Review / Codex Review as the gate.
+# Stripe paths likewise — only the BB-only HIGH_RISK_PATTERNS would have
+# caught `stripe/webhooks.ts`; dropped for GH parity.
 SAFE: src/auth.ts
 SAFE: api/login.go
 SAFE: billing.py
+SAFE: secret.py
+SAFE: config/secret_key.py
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
 # Substrings that look auth/billing-ish but aren't path segments
