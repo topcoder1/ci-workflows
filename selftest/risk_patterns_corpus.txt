@@ -162,10 +162,12 @@ SAFE: src/secrets.py
 SAFE: config/secret_keys.yml
 SAFE: config/secret.json
 SAFE: src/secrets.ts
-# Nested docker-compose paths — intentional parity gap (GH workflow anchors
-# at start-of-path too; only root docker-compose*.yaml is gated). Repos that
-# nest compose files for staging/local should add an explicit RISKY entry.
-SAFE: deploy/local/docker-compose.yml
+# Nested docker-compose paths — partial parity gap:
+#   - `deploy/local/docker-compose.yml` IS still gated (matches `^deploy/.*`).
+#   - `services/api/docker-compose.yaml` is NOT gated globally. Repos that
+#     nest compose files outside `deploy/`, `infra/`, etc. should add an
+#     explicit HIGH_RISK_PATTERNS entry + RISKY: line here.
+RISKY: deploy/local/docker-compose.yml
 SAFE: services/api/docker-compose.yaml
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
