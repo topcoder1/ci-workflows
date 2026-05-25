@@ -162,6 +162,8 @@ SAFE: src/secrets.py
 SAFE: config/secret_keys.yml
 SAFE: config/secret.json
 SAFE: src/secrets.ts
+SAFE: secrets.yaml
+SAFE: secret_manager.py
 # Nested docker-compose paths — partial parity gap:
 #   - `deploy/local/docker-compose.yml` IS still gated (matches `^deploy/.*`).
 #   - `services/api/docker-compose.yaml` is NOT gated globally. Repos that
