@@ -158,6 +158,8 @@ SAFE: api/login.go
 SAFE: billing.py
 SAFE: secret.py
 SAFE: config/secret_key.py
+SAFE: src/secrets.py
+SAFE: config/secret_keys.yml
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
 # Substrings that look auth/billing-ish but aren't path segments
