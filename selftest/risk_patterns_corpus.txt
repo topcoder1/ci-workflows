@@ -160,6 +160,13 @@ SAFE: secret.py
 SAFE: config/secret_key.py
 SAFE: src/secrets.py
 SAFE: config/secret_keys.yml
+SAFE: config/secret.json
+SAFE: src/secrets.ts
+# Nested docker-compose paths — intentional parity gap (GH workflow anchors
+# at start-of-path too; only root docker-compose*.yaml is gated). Repos that
+# nest compose files for staging/local should add an explicit RISKY entry.
+SAFE: deploy/local/docker-compose.yml
+SAFE: services/api/docker-compose.yaml
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
 # Substrings that look auth/billing-ish but aren't path segments
