@@ -50,104 +50,23 @@ matches() {
   return 1
 }
 
-# Cases the regex MUST flag as risky (manual click-merge).
-RISKY=(
-  "src/auth/login.py"
-  "internal/auth/security.go"            # auth segment, Go layout
-  "internal/oauth2/server.go"            # oauth2 alternation — wxa-mcp-server#193/#197 gap (2026-05-24)
-  "internal/oauth2/handler.go"
-  "pkg/oauth2/token.go"
-  "main.go"                              # Go entrypoint at root — wxa-mcp-server#193 gap
-  "cmd/server/main.go"                   # Go entrypoint under cmd/
-  "cmd/wxa-mcp-server/main.go"
-  # Auth-adjacent variants (sibling-gap audit, 2026-05-24).
-  # NOTE: Pattern is path-segment-anchored, not filename-prefix. So
-  # `internal/signin/handler.go` matches (signin is a segment) but
-  # `controllers/sessions_controller.rb` does NOT (sessions is a
-  # filename prefix, not a segment). Per-repo Rails/Django/Express
-  # conventions belong in caller's risk-paths.yml.
-  "internal/signin/handler.go"
-  "internal/signup/form.go"
-  "src/logout/handler.go"
-  "internal/sessions/store.go"           # sessions (plural) — Go convention
-  "internal/jwt/sign.go"
-  "services/mfa/verify.py"
-  "app/totp/generate.go"
-  "lib/webauthn/register.go"
-  "internal/passkey/store.go"
-  # Billing-adjacent variants
-  "internal/subscription/manager.go"
-  "app/subscriptions/cancel.rb"
-  "api/checkout/session.go"
-  "services/refund/issuer.py"
-  "api/refunds/handler.go"
-  # Secret (singular) variants
-  "internal/secret/manager.go"
-  "config/secret/keystore.go"
-  "secrets/api-keys.json"
-  ".env.production"
-  "src/keychain_helpers.py"
-  "credentials.py"
-  "migrations/031_cdn_operator.sql"
-  "src/db/schema.sql"
-  "billing/invoices.py"
-  "Dockerfile"
-  "docker-compose.yml"
-  ".github/workflows/deploy.yml"
-  ".github/risk-paths.yml"
-  ".github/CODEOWNERS"
-  "infra/iam/scanner-role.json"          # IAM policy
-  "infra/iam/wxa-vpn-api-policy.json"
-  "infra/terraform/main.tf"              # IaC under infra/
-  "infra/digitalocean/systemd/wxa.service"
-  "infra/scanner-id/identity.json"
-  "infra/nginx/honeypot.conf"
-  "infra/nginx-checkip-vhost.conf"       # top-level nginx config
-  "infra/wxa-vpn-api.service"            # systemd unit
-  "infra/wxa-workload.slice"
-  "infra/wxa-gt-builder.timer"
-  "infra/some.tf"
-  "infra/deploy-netflow-cron.sh"         # shell script
-  "infra/setup-actions-runner.sh"
-  "infra/deploy-systemd.sh"
-  "terraform/main.tf"
-  "pulumi/index.ts"
-  "k8s/deployment.yaml"
-  "fly.toml"
-  "deploy/prod.sh"
-  "deploy.sh"
-  "deploy-staging.yml"
-)
-
-# Cases the regex MUST allow through to auto-merge (the historical false positives).
-SAFE=(
-  "src/wxa_vpn/api/routes.py"
-  "tests/test_anything.py"
-  "docs/data-dictionary.md"
-  "main_test.go"                         # adjacent to main.go but a test file
-  "internal/foo/main_test.go"
-  "internal/oauth2.md"                   # doc file mentioning oauth2 — pattern needs trailing / or end
-  "cmd/server/mainview.go"               # starts with "main" but not the literal main.go
-  "src/oauth2helper.go"                  # oauth2 substring but not a path segment
-  # Substrings that look auth/billing-ish but aren't path segments — must NOT over-block
-  "internal/sessionsutil.go"             # "sessionsutil" segment, not "sessions"
-  "pkg/jwtutil.go"                       # "jwtutil" not "jwt"
-  "lib/passkeystore.go"                  # "passkeystore" not "passkey"
-  "internal/totps.go"                    # "totps" — neither "totp/" nor "totp$"
-  "docs/checkout-flow.md"                # "checkout-flow.md" not literal "checkout"
-  "lib/subscriber.go"                    # "subscriber" not "subscription"
-  "internal/secretly.go"                 # "secretly" not "secret"
-  "tests/test_authorization_logic.py"    # "test_authorization_logic.py" — not literal "auth"
-  "docs/signin-flow.md"                  # doc with "signin-flow" substring
-  "scripts/run_analysis.py"
-  "infra/crontabs/wxa-scanner.crontab"   # cron schedule — wxa_vpn#439 case
-  "infra/crontabs/wxa-scanner-active.crontab"
-  "infra/crontabs/README.md"
-  "infra/crontabs/wxa-scanner-slow.crontab"
-  "infra/aws-scanner-setup.md"           # runbook docs
-  "infra/crontab.example"                # example config
-  "infra/README.md"
-)
+# Test cases sourced from shared corpus at selftest/risk_patterns_corpus.txt.
+# The corpus is single source of truth for BOTH the GH selftest (this file)
+# AND the BB selftest (test_bb_automerge_risk_patterns.sh), so drift between
+# claude-author-automerge.yml's regex and bb-automerge.py's HIGH_RISK_PATTERNS
+# is caught here.
+CORPUS="$(dirname "$0")/risk_patterns_corpus.txt"
+[ ! -f "$CORPUS" ] && { echo "FAIL: corpus not found at $CORPUS"; exit 2; }
+RISKY=()
+SAFE=()
+while IFS= read -r line; do
+  case "$line" in
+    RISKY_BB:*) ;;  # BB-only entries skipped by GH selftest
+    RISKY:*) RISKY+=("${line#RISKY: }") ;;
+    SAFE:*)  SAFE+=("${line#SAFE: }") ;;
+    "#"*|"") ;;
+  esac
+done < "$CORPUS"
 
 failed=0
 
