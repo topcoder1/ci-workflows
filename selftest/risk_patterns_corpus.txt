@@ -1,0 +1,193 @@
+# Shared corpus for automerge risk-tier selftests (BB + GH).
+# One entry per line: <TYPE>: <path>
+# Types:
+#   RISKY     — must match high-risk patterns in BOTH BB (bb-automerge.py) AND GH (claude-author-automerge.yml)
+#   RISKY_BB  — must match in BB only (e.g. bitbucket-pipelines.yml — irrelevant to GH workflow)
+#   SAFE      — must NOT match in either
+#
+# When you add a new pattern category to claude-author-automerge.yml OR
+# bb-automerge.py's HIGH_RISK_PATTERNS, add a representative RISKY entry here.
+# Both selftests (test_automerge_risk_patterns.sh + test_bb_automerge_risk_patterns.sh)
+# read from this file, so drift between the two pattern sets is caught.
+
+# ── RISKY: auth — all variants the GH workflow detects ─────────────────────
+RISKY: src/auth/login.py
+RISKY: internal/auth/security.go
+# oauth2 alternation — wxa-mcp-server#193/#197 gap (2026-05-24)
+RISKY: internal/oauth2/server.go
+RISKY: internal/oauth2/handler.go
+RISKY: pkg/oauth2/token.go
+# Auth-adjacent variants (sibling-gap audit, 2026-05-24).
+# Pattern is path-segment-anchored, not filename-prefix. So
+# `internal/signin/handler.go` matches (signin is a segment) but
+# `controllers/sessions_controller.rb` does NOT (sessions is a
+# filename prefix, not a segment). Per-repo Rails/Django/Express
+# conventions belong in caller's risk-paths.yml.
+RISKY: internal/signin/handler.go
+RISKY: internal/signup/form.go
+RISKY: src/logout/handler.go
+# sessions (plural) — Go convention
+RISKY: internal/sessions/store.go
+RISKY: internal/jwt/sign.go
+RISKY: services/mfa/verify.py
+RISKY: app/totp/generate.go
+RISKY: lib/webauthn/register.go
+RISKY: internal/passkey/store.go
+
+# ── RISKY: Go entrypoints — wxa-mcp-server#193 gap ─────────────────────────
+RISKY: main.go
+RISKY: cmd/server/main.go
+RISKY: cmd/wxa-mcp-server/main.go
+
+# ── RISKY: billing variants ────────────────────────────────────────────────
+RISKY: internal/subscription/manager.go
+RISKY: app/subscriptions/cancel.rb
+RISKY: src/checkout/flow.tsx
+RISKY: api/checkout/session.go
+RISKY: internal/refund/process.go
+RISKY: services/refund/issuer.py
+RISKY: api/refunds/handler.go
+RISKY: internal/billing/invoice.go
+RISKY: billing/invoices.py
+RISKY: internal/payment/charge.go
+RISKY: internal/pricing/calc.go
+
+# ── RISKY: database (migrations + .sql) ────────────────────────────────────
+RISKY: internal/db/migrations/00049_workflows.sql
+RISKY: internal/db/migrations/00050_workflow_executions.sql
+RISKY: migrations/031_cdn_operator.sql
+RISKY: schema/users.sql
+RISKY: src/db/schema.sql
+
+# ── RISKY: secrets / credentials / env ─────────────────────────────────────
+RISKY: internal/secret/manager.go
+RISKY: config/secret/keystore.go
+RISKY: src/secrets/vault.go
+RISKY: secrets/api-keys.json
+RISKY: config/credentials.yml
+RISKY: credentials.py
+RISKY: .env
+RISKY: .env.production
+RISKY: src/keychain_helpers.py
+
+# ── RISKY: containers + compose ────────────────────────────────────────────
+RISKY: Dockerfile
+RISKY: deploy/Dockerfile.api
+RISKY: docker-compose.yml
+RISKY: docker-compose.staging.yml
+
+# ── RISKY: CI/CD ───────────────────────────────────────────────────────────
+RISKY: .github/workflows/ci.yml
+RISKY: .github/workflows/deploy.yml
+RISKY: .github/workflows/lint.yml
+RISKY: .github/risk-paths.yml
+RISKY: .github/CODEOWNERS
+# BB-only: GH workflow doesn't include bitbucket-pipelines pattern (irrelevant to GH repos)
+RISKY_BB: bitbucket-pipelines.yml
+
+# ── RISKY: infra (IAM, IaC, systemd, nginx, deploy scripts) ────────────────
+RISKY: infra/iam/scanner-role.json
+RISKY: infra/iam/wxa-vpn-api-policy.json
+RISKY: infra/iam/admin-role.tf
+RISKY: infra/terraform/main.tf
+RISKY: infra/k8s/api-deployment.yaml
+RISKY: infra/digitalocean/systemd/wxa.service
+RISKY: infra/scanner-id/identity.json
+RISKY: infra/nginx/honeypot.conf
+RISKY: infra/nginx/site.conf
+RISKY: infra/nginx-checkip-vhost.conf
+RISKY: infra/wxa-vpn-api.service
+RISKY: infra/wxa-workload.slice
+RISKY: infra/wxa-gt-builder.timer
+RISKY: infra/systemd/api.service
+RISKY: infra/some.tf
+RISKY: infra/deploy-netflow-cron.sh
+RISKY: infra/setup-actions-runner.sh
+RISKY: infra/deploy-systemd.sh
+RISKY: terraform/main.tf
+RISKY: terraform/prod/main.tf
+RISKY: pulumi/index.ts
+RISKY: k8s/deployment.yaml
+RISKY: fly.toml
+RISKY: deploy/prod.sh
+RISKY: deploy/deploy.sh
+RISKY: deploy.sh
+RISKY: deploy-staging.yml
+RISKY: scripts/deploy/run.sh
+
+# ── SAFE: must NOT match ───────────────────────────────────────────────────
+SAFE: src/wxa_vpn/api/routes.py
+SAFE: src/components/Button.tsx
+SAFE: src/pages/Dashboard.tsx
+SAFE: src/utils/format.ts
+SAFE: src/api/findingsSlice.ts
+SAFE: docs/architecture.md
+SAFE: docs/data-dictionary.md
+SAFE: README.md
+SAFE: tests/test_anything.py
+SAFE: tests/unit/utils_test.go
+SAFE: openapi/paths/findings.yaml
+SAFE: internal/api/handlers/findings.go
+SAFE: internal/workflows/engine.go
+SAFE: package.json
+SAFE: package-lock.json
+SAFE: go.mod
+SAFE: go.sum
+SAFE: scripts/run_analysis.py
+# Adjacent to main.go but a test file
+SAFE: main_test.go
+SAFE: internal/foo/main_test.go
+# Doc file mentioning oauth2 — pattern needs trailing / or end
+SAFE: internal/oauth2.md
+# Starts with "main" but not the literal main.go
+SAFE: cmd/server/mainview.go
+SAFE: mainview.go
+# oauth2 substring but not a path segment
+SAFE: src/oauth2helper.go
+SAFE: oauth2helper.go
+# Intentional parity-not-coverage tradeoffs (Wave 4.4 — match GH workflow):
+# Filenames like `auth.ts`, `login.go`, `billing.py`, `secret.py`,
+# `secret_key.py` are intentionally SAFE (NOT matched globally because the
+# `(/|$)` segment anchor doesn't match leaf filenames). BB repos that need
+# filename coverage either add an explicit HIGH_RISK_PATTERNS entry (and a
+# RISKY: line here) or rely on Claude Review / Codex Review as the gate.
+# Stripe paths likewise — only the BB-only HIGH_RISK_PATTERNS would have
+# caught `stripe/webhooks.ts`; dropped for GH parity.
+SAFE: src/auth.ts
+SAFE: api/login.go
+SAFE: billing.py
+SAFE: secret.py
+SAFE: config/secret_key.py
+SAFE: src/secrets.py
+SAFE: config/secret_keys.yml
+SAFE: config/secret.json
+SAFE: src/secrets.ts
+SAFE: secrets.yaml
+SAFE: secret_manager.py
+# Nested docker-compose paths — partial parity gap:
+#   - `deploy/local/docker-compose.yml` IS still gated (matches `^deploy/.*`).
+#   - `services/api/docker-compose.yaml` is NOT gated globally. Repos that
+#     nest compose files outside `deploy/`, `infra/`, etc. should add an
+#     explicit HIGH_RISK_PATTERNS entry + RISKY: line here.
+RISKY: deploy/local/docker-compose.yml
+SAFE: services/api/docker-compose.yaml
+SAFE: stripe/webhooks.ts
+SAFE: src/stripe/client.go
+# Substrings that look auth/billing-ish but aren't path segments
+SAFE: internal/sessionsutil.go
+SAFE: pkg/jwtutil.go
+SAFE: lib/passkeystore.go
+SAFE: internal/totps.go
+SAFE: docs/checkout-flow.md
+SAFE: lib/subscriber.go
+SAFE: internal/secretly.go
+SAFE: tests/test_authorization_logic.py
+SAFE: docs/signin-flow.md
+# Cron files SHOULD be safe — wxa_vpn#250 / wxa_vpn#439 lesson
+SAFE: infra/crontabs/wxa-scanner.crontab
+SAFE: infra/crontabs/wxa-scanner-active.crontab
+SAFE: infra/crontabs/wxa-scanner-slow.crontab
+SAFE: infra/crontabs/README.md
+SAFE: infra/aws-scanner-setup.md
+SAFE: infra/crontab.example
+SAFE: infra/README.md
