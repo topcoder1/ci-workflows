@@ -145,6 +145,16 @@ SAFE: mainview.go
 # oauth2 substring but not a path segment
 SAFE: src/oauth2helper.go
 SAFE: oauth2helper.go
+# Intentional parity-not-coverage tradeoffs (Wave 4.4 — match GH workflow):
+# Filenames like `auth.ts`, `login.go`, `billing.py` are intentionally SAFE
+# (NOT matched globally). Repos that need filename coverage put the path in
+# their .github/risk-paths.yml blocked list. Stripe paths likewise — only
+# repos using Stripe declare it as risky per-repo.
+SAFE: src/auth.ts
+SAFE: api/login.go
+SAFE: billing.py
+SAFE: stripe/webhooks.ts
+SAFE: src/stripe/client.go
 # Substrings that look auth/billing-ish but aren't path segments
 SAFE: internal/sessionsutil.go
 SAFE: pkg/jwtutil.go
