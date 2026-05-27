@@ -122,7 +122,7 @@ jobs:
     if: ${{ format('{0}', inputs.run_actionlint) != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download actionlint
         id: get_actionlint
@@ -165,7 +165,7 @@ jobs:
       # startup_failure if exceeded by the caller's grant.
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
@@ -367,7 +367,7 @@ jobs:
     if: ${{ format('{0}', inputs.run_shellcheck_scripts) == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run shellcheck
         # Ubuntu runners ship with shellcheck preinstalled, so no install

@@ -48,7 +48,7 @@ jobs:
     outputs:
       digest_path: per-org-digest-topcoder1.md
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run fleet audit (topcoder1)
         env:
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run fleet audit (whois-api-llc)
         env:
@@ -126,7 +126,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/download-artifact@v4
         continue-on-error: true   # tolerate jobs that failed before uploading
