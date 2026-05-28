@@ -24,6 +24,11 @@ name: Prettier Autofix
 # Skip behavior:
 #   - Forks: skipped (cross-repo push not allowed).
 #   - Closed PRs: skipped.
+#   - Bot-authored PRs (dependabot/renovate): skipped. GitHub withholds
+#     Actions secrets from dependabot-triggered runs, so `automerge_pat` is
+#     empty and the checkout fails with "Input required and not supplied:
+#     token" — a permanent red X on every dependabot PR. Mirrors the
+#     bot-skip in claude-review.yml. Dependency bumps don't need autofix.
 #   - PRs that touched zero markdown files: skipped (no-op).
 #   - PRs already cleanly formatted: skipped (no commit pushed).
 
@@ -74,11 +79,14 @@ jobs:
   autofix:
     name: prettier auto-fix
     runs-on: ubuntu-latest
-    # Skip on fork PRs (cross-repo push impossible) and on closed PRs.
+    # Skip on fork PRs (cross-repo push impossible), closed PRs, and
+    # bot-authored PRs (dependabot/renovate runs can't read the PAT secret).
     if: |
       github.event_name == 'pull_request' &&
       github.event.pull_request.state == 'open' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'renovate[bot]'
     permissions:
       # Needed to push the autofix commit. The PAT supplies the actual
       # auth; declaring contents:write here just unblocks the runner.
