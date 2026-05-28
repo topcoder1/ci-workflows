@@ -15,6 +15,13 @@ name: Claude-author Auto-merge (reusable)
 #     - DB migrations / SQL files
 #     - billing / payment / pricing / invoice / subscription(s) /
 #       checkout / refund(s)
+#     - NAF credit/billing gate code (naf.py / naf/ module at any depth —
+#       the validate_call/log_successful_call client that decides whether a
+#       customer API call is authorized and charged. Lesson 2026-05-28 from
+#       whois-api-llc/wxa_webcat#438: a fix to src/webcat/api/middleware/naf.py
+#       auto-merged because the path has no auth/billing keyword even though
+#       the file IS the billing gate. Matched specifically, not via a broad
+#       `middleware/` rule, to avoid over-blocking benign middleware.)
 #     - Go service entrypoints (main.go at any depth — wires routes,
 #       middleware, secrets loading, DB init; touching it can change
 #       auth or transport behavior. Lesson 2026-05-24 from
@@ -269,6 +276,7 @@ jobs:
           ^(.*/)?migrations(/|$)
           .*\.sql$
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|$)
+          (^|/)naf(/|\.(py|go|ts|js)$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
           ^docker-compose.*\.ya?ml$

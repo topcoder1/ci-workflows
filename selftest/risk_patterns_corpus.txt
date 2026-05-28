@@ -52,6 +52,13 @@ RISKY: billing/invoices.py
 RISKY: internal/payment/charge.go
 RISKY: internal/pricing/calc.go
 
+# ── RISKY: NAF credit/billing gate (wxa_webcat#438 gap, 2026-05-28) ─────────
+# The validate_call/log_successful_call client that authorizes + charges each
+# customer API call. Path has no auth/billing keyword so it slipped through.
+RISKY: src/webcat/api/middleware/naf.py
+RISKY: asm/asm-core/src/naf/client.go
+RISKY: internal/naf/validate.go
+
 # ── RISKY: database (migrations + .sql) ────────────────────────────────────
 RISKY: internal/db/migrations/00049_workflows.sql
 RISKY: internal/db/migrations/00050_workflow_executions.sql
@@ -183,6 +190,10 @@ SAFE: lib/subscriber.go
 SAFE: internal/secretly.go
 SAFE: tests/test_authorization_logic.py
 SAFE: docs/signin-flow.md
+# `naf` gate is matched as a file/dir segment, not a substring — these stay safe
+SAFE: docs/naf-integration.md
+SAFE: src/naffle/handler.py
+SAFE: internal/snafu/retry.go
 # Cron files SHOULD be safe — wxa_vpn#250 / wxa_vpn#439 lesson
 SAFE: infra/crontabs/wxa-scanner.crontab
 SAFE: infra/crontabs/wxa-scanner-active.crontab
