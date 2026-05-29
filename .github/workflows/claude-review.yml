@@ -76,9 +76,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL https://claude.ai/install.sh | bash
+          # install.sh intermittently exits 0 WITHOUT placing the binary (#1290),
+          # which used to fail the whole review job on a coin-flip. Retry up to
+          # 3 times, then fall back to npm, before giving up.
+          for attempt in 1 2 3; do
+            curl -fsSL https://claude.ai/install.sh | bash || true
+            [ -x "$HOME/.local/bin/claude" ] && break
+            echo "::warning::Claude install attempt ${attempt}/3 produced no binary; retrying..."
+            sleep $((attempt * 5))
+          done
           if [ ! -x "$HOME/.local/bin/claude" ]; then
-            echo "::error::Claude Code binary not at $HOME/.local/bin/claude after install — workaround failed; check upstream issue #1290"
+            echo "::warning::install.sh failed 3× — falling back to npm (@anthropic-ai/claude-code)"
+            npm install -g @anthropic-ai/claude-code || true
+            if command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
+              ln -sf "$(command -v claude)" "$HOME/.local/bin/claude"
+            fi
+          fi
+          if [ ! -x "$HOME/.local/bin/claude" ]; then
+            echo "::error::Claude Code binary not at $HOME/.local/bin/claude after 3 install attempts + npm fallback — check upstream issue #1290"
             exit 1
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
