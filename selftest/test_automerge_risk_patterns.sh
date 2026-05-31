@@ -92,6 +92,53 @@ for p in "${SAFE[@]}"; do
   fi
 done
 
+# --- main.go opt-out (risk_main_go=false) ---
+# Mirrors the runtime filter in claude-author-automerge.yml: when a Go-monorepo
+# caller sets risk_main_go=false, the main.go pattern is dropped so dev-tool
+# entrypoints (cmd/<tool>/main.go) auto-merge, while every OTHER risk-tier
+# pattern still fires. The caller gates its real deployed service entrypoint via
+# .github/risk-paths.yml instead.
+patterns_no_maingo="$(printf '%s\n' "$patterns" | grep -vF 'main\.go')"
+
+matches_no_maingo() {
+  local f=$1 pat
+  while IFS= read -r pat; do
+    pat="${pat#"${pat%%[![:space:]]*}"}"
+    [ -z "$pat" ] && continue
+    echo "$f" | grep -Eq "$pat" && return 0
+  done <<< "$patterns_no_maingo"
+  return 1
+}
+
+# Sanity: the filter actually removed exactly the main.go line and nothing else.
+if [ "$(printf '%s\n' "$patterns" | grep -cF 'main\.go')" != "1" ] || \
+   [ -n "$(printf '%s\n' "$patterns_no_maingo" | grep -F 'main\.go' || true)" ]; then
+  echo "  ✗ filter did not remove exactly the main.go pattern (FAILED)"
+  failed=$((failed + 1))
+fi
+
+echo ""
+echo "main.go opt-out (risk_main_go=false) — these main.go paths must NOT match:"
+for p in "main.go" "cmd/techrecon-regress/main.go" "cmd/wxa-mcp-server/main.go" "internal/foo/main.go"; do
+  if matches_no_maingo "$p"; then
+    echo "  ✗ $p (FAILED — should NOT match when risk_main_go=false)"
+    failed=$((failed + 1))
+  else
+    echo "  ✓ $p"
+  fi
+done
+
+echo ""
+echo "main.go opt-out — other risk-tier paths must STILL match (filter is main.go-only):"
+for p in "internal/auth/security.go" "Dockerfile" "db/migrations/001.sql" "internal/oauth2/server.go"; do
+  if matches_no_maingo "$p"; then
+    echo "  ✓ $p"
+  else
+    echo "  ✗ $p (FAILED — should STILL match when only main.go is opted out)"
+    failed=$((failed + 1))
+  fi
+done
+
 echo ""
 if [ "$failed" -gt 0 ]; then
   echo "FAIL: $failed case(s) regressed."

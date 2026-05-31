@@ -28,7 +28,11 @@ name: Claude-author Auto-merge (reusable)
 #       whois-api-llc/wxa-mcp-server#193 + #197 where Claude PRs
 #       modifying main.go + internal/oauth2/ auto-merged because the
 #       `oauth` alternation didn't catch `oauth2` and main.go had no
-#       pattern at all.)
+#       pattern at all.) OPT-OUT: Go monorepos with many cmd/*/main.go
+#       dev tools (not deployed services) can set `risk_main_go: false`
+#       — the bare main.go pattern can't tell cmd/<service>/main.go from
+#       cmd/<tool>/main.go, so it false-flags every tool. Such callers
+#       gate their real deployed entrypoint via .github/risk-paths.yml.
 #     - production infra: Dockerfile, docker-compose, .github/workflows,
 #       .github/risk-paths.yml, .github/CODEOWNERS, infra/iam/, infra
 #       subdirs (deploy/terraform/pulumi/k8s/cloudformation/ansible/
@@ -72,6 +76,11 @@ on:
         required: false
         type: string
         default: "review / Codex Review"
+      risk_main_go:
+        description: "Treat ANY main.go change as risk-tier (manual merge). Default true. Set false in Go monorepos where most cmd/*/main.go are dev tools rather than the deployed service — the bare main.go pattern can't tell cmd/<service>/main.go from cmd/<tool>/main.go. When false, gate the real service entrypoint via the caller's .github/risk-paths.yml instead."
+        required: false
+        type: boolean
+        default: true
     secrets:
       automerge_pat:
         description: >-
@@ -262,6 +271,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          RISK_MAIN_GO: ${{ inputs.risk_main_go }}
         run: |
           set -euo pipefail
           changed=$(gh pr diff "$PR" --name-only)
@@ -293,6 +303,16 @@ jobs:
           ^fly\.toml$
           ^deploy/.*
           (^|/)deploy.*\.(sh|ya?ml)$'
+
+          # main.go opt-out: in Go monorepos most cmd/*/main.go are dev tools,
+          # not the deployed service, and the bare (^|/)main\.go$ pattern can't
+          # distinguish them. When risk_main_go=false, drop the main.go pattern
+          # so tool entrypoints auto-merge; the caller gates its real service
+          # entrypoint via .github/risk-paths.yml instead. Default true keeps
+          # the fleet-wide behavior unchanged.
+          if [ "${RISK_MAIN_GO:-true}" != "true" ]; then
+            patterns="$(printf '%s\n' "$patterns" | grep -vF 'main\.go')"
+          fi
 
           matched=""
           while IFS= read -r f; do
