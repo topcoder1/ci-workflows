@@ -4,9 +4,16 @@ name: Claude-author Auto-merge (reusable)
 # (detected via branch prefix `claude/*`, `Co-Authored-By: Claude` trailer in
 # any PR commit, or the `auto-merge` label), provided the PR is neither:
 #
-#  1. Labeled `risk:blocked` by pr-classify.yml (canonical signal — the
-#     caller's risk-paths.yml `blocked:` list determines this; covers any
-#     repo-specific block path without us having to keep a parallel regex).
+#  1. Labeled `risk:blocked` OR `risk:sensitive` by pr-classify.yml (canonical
+#     signals — the caller's risk-paths.yml `blocked:` / `sensitive:` lists
+#     determine these; covers any repo-specific path without us having to keep a
+#     parallel regex). Both mean manual click-merge: `blocked` is a hard
+#     privilege-escalation block, `sensitive` is a high-impact path the caller
+#     flags for human review (agent runtime, schema, migrations, etc.) — the
+#     reusable's global risk-tier regex (item 2) does NOT know a caller's
+#     repo-specific `sensitive:` paths, so honoring the label is the only way
+#     these get gated. `risk:sensitive` is a no-op for callers without a
+#     `sensitive:` list (label never applied).
 #
 #  2. Touching any risk-tier path category from the global CLAUDE.md policy:
 #     - auth / login / signin / signup / logout / session(s) / oauth /
@@ -194,9 +201,21 @@ jobs:
           # may have applied `risk:blocked` after the event fired.
           labels=$(gh api "/repos/${{ github.repository }}/issues/$PR/labels" \
             --jq '.[].name' 2>/dev/null || echo "")
+          # Canonical "manual merge" signals from pr-classify.yml. risk:blocked
+          # = hard privilege-escalation block (no bypass). risk:sensitive =
+          # high-impact caller-specific path (agent runtime, schema, migrations)
+          # the global risk-tier regex below can't see, so the label is the only
+          # gate. Both refuse auto-merge here; the human click-merges after
+          # review. risk:sensitive is a no-op for callers without a `sensitive:`
+          # list (label never applied).
           if echo "$labels" | grep -qx 'risk:blocked'; then
             echo "blocked=1" >> "$GITHUB_OUTPUT"
+            echo "verdict_label=risk:blocked" >> "$GITHUB_OUTPUT"
             echo "::warning::PR labeled risk:blocked by pr-classify — auto-merge refused (no bypass applies)"
+          elif echo "$labels" | grep -qx 'risk:sensitive'; then
+            echo "blocked=1" >> "$GITHUB_OUTPUT"
+            echo "verdict_label=risk:sensitive" >> "$GITHUB_OUTPUT"
+            echo "::warning::PR labeled risk:sensitive by pr-classify — auto-merge refused (manual review-and-merge required)"
           else
             echo "blocked=0" >> "$GITHUB_OUTPUT"
           fi
@@ -454,6 +473,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          VERDICT: ${{ steps.classifier_verdict.outputs.verdict_label }}
         run: |
           set -euo pipefail
           marker="<!-- claude-author-automerge:classifier-blocked -->"
@@ -461,14 +481,25 @@ jobs:
             --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
           {
             echo "$marker"
-            echo "**Auto-merge refused — \`risk:blocked\` label set by pr-classify.**"
+            echo "**Auto-merge refused — \`${VERDICT:-risk:blocked}\` label set by pr-classify.**"
             echo ""
-            echo "This PR touches a path category in \`.github/risk-paths.yml\`'s \`blocked:\`"
-            echo "list (workflows, classifier config, CODEOWNERS, secrets, infra). Per the"
-            echo "global CLAUDE.md policy, blocked-class PRs require admin click-merge — no"
-            echo "label or status-check bypass applies."
-            echo ""
-            echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
+            if [ "$VERDICT" = "risk:sensitive" ]; then
+              echo "This PR touches a path in \`.github/risk-paths.yml\`'s \`sensitive:\` list"
+              echo "(e.g. agent runtime, schema, migrations). Per the risk taxonomy,"
+              echo "sensitive-class PRs are reviewed (Claude + Adversarial + Codex) and then"
+              echo "**human click-merged** — auto-merge does not apply. The reusable's global"
+              echo "risk-tier regex can't see a caller's repo-specific \`sensitive:\` paths, so"
+              echo "the \`risk:sensitive\` label is what gates these."
+              echo ""
+              echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
+            else
+              echo "This PR touches a path category in \`.github/risk-paths.yml\`'s \`blocked:\`"
+              echo "list (workflows, classifier config, CODEOWNERS, secrets, infra). Per the"
+              echo "global CLAUDE.md policy, blocked-class PRs require admin click-merge — no"
+              echo "label or status-check bypass applies."
+              echo ""
+              echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
+            fi
           } > /tmp/automerge-blocked.md
           if [ -n "$existing" ]; then
             gh api -X PATCH "/repos/${{ github.repository }}/issues/comments/$existing" \
