@@ -46,6 +46,10 @@ name: Claude-author Auto-merge (reusable)
 #       digitalocean/scanner-id/nginx), systemd units + Terraform files
 #       anywhere under infra/, top-level terraform/, pulumi/, k8s/,
 #       fly.toml, deploy/, deploy*.{sh,yaml}.
+#     - ML serving/model-promotion: ml/predictor.py (live scoring path),
+#       ml/retrain.py (model-promotion gate). Lesson 2026-06-02: a serving-path
+#       fix auto-merged because ml/ had no risk glob; now explicitly matched.
+#
 #       Specifically NOT risky under infra/: cron schedule files
 #       (infra/crontabs/*.crontab), runbook .md files, example configs.
 #       The earlier broad `^infra/.*` rule over-classified cron-only
@@ -321,7 +325,9 @@ jobs:
           ^k8s/.*
           ^fly\.toml$
           ^deploy/.*
-          (^|/)deploy.*\.(sh|ya?ml)$'
+          (^|/)deploy.*\.(sh|ya?ml)$
+          (^|/)ml/predictor\.(py|go|ts|js)$
+          (^|/)ml/retrain\.(py|go|ts|js)$'
 
           # main.go opt-out: in Go monorepos most cmd/*/main.go are dev tools,
           # not the deployed service, and the bare (^|/)main\.go$ pattern can't
