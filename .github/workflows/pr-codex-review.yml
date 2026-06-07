@@ -7,7 +7,7 @@ name: PR Codex Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
     # Skip the entire Codex track on bootstrap-paths. The classifier flags
     # these as risk:blocked and exits 1, which would surface as a failing
     # `PR Codex Review / classify` check + a cascading-skipped review job.
