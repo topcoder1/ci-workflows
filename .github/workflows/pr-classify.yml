@@ -9,9 +9,27 @@ name: PR Risk Classifier (reusable)
 #
 # Caller wires this in via `uses:` and consumes `outputs.risk_class`.
 # See impl plan §4 for the design rationale.
+#
+# Resilience: every gh call that gates the job is wrapped in `retry` (3
+# attempts, 5s/10s backoff). GitHub's API sporadically rejects valid tokens —
+# the 2026-06-10 "erroneous 401 responses" incident hit ~15% of API traffic
+# and turned this check red fleet-wide. Retries turn a 15% per-call blip
+# into ~0.3%.
+#
+# skip_label: when one repo wires this reusable into two workflows (the
+# standalone PR Classify caller AND the embedded classify job in
+# pr-codex-review.yml), both race to write the same label and sticky
+# comment. The embedded copy only needs the risk_class OUTPUT — it should
+# pass `skip_label: true` and leave the writes to the standalone caller.
 
 on:
   workflow_call:
+    inputs:
+      skip_label:
+        description: "Compute and output risk_class only — skip the risk:* label write and the blocked-PR sticky comment. Set when another workflow in the repo (the standalone PR Classify caller) already owns those writes."
+        type: boolean
+        required: false
+        default: false
     outputs:
       risk_class:
         description: "Highest risk class for this PR (blocked|sensitive|standard|safe_test|safe_deps|safe_config|trivial)"
@@ -46,12 +64,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           # The caller checked out THEIR repo. We need our classify.mjs script,
           # which lives in topcoder1/ci-workflows. Pull it via the GitHub API
           # so we don't pollute the caller's working tree.
           mkdir -p .github/scripts
-          gh api repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs \
-            --jq '.content' | base64 -d > .github/scripts/classify.mjs
+          fetch() {
+            gh api repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs \
+              --jq '.content' | base64 -d > .github/scripts/classify.mjs
+          }
+          retry fetch
 
       - name: Install classifier deps
         run: npm install --no-save yaml@2 minimatch@10
@@ -63,7 +86,8 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          changed=$(gh pr diff "$PR" --name-only)
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
+          changed=$(retry gh pr diff "$PR" --name-only)
           class=$(echo "$changed" | node .github/scripts/classify.mjs)
           echo "class=$class" >> "$GITHUB_OUTPUT"
           echo "Computed risk class: $class"
@@ -72,13 +96,15 @@ jobs:
           echo "$changed" | sed 's/^/  /'
 
       - name: Set risk label on PR
+        if: ${{ !inputs.skip_label }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           CLASS: ${{ steps.compute.outputs.class }}
         run: |
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           # Remove any existing risk:* labels, add the current one.
-          existing=$(gh pr view "$PR" --json labels --jq '.labels[].name' | grep '^risk:' || true)
+          existing=$(retry gh pr view "$PR" --json labels --jq '.labels[].name' | grep '^risk:' || true)
           for L in $existing; do
             if [ "$L" != "risk:$CLASS" ]; then
               gh pr edit "$PR" --remove-label "$L" 2>/dev/null || true
@@ -86,15 +112,19 @@ jobs:
           done
           # Create the label if it doesn't exist (idempotent — gh ignores conflict).
           gh label create "risk:$CLASS" --color "ededed" --description "Risk class: $CLASS" 2>/dev/null || true
-          gh pr edit "$PR" --add-label "risk:$CLASS"
+          # The label IS load-bearing (claude-author-automerge.yml reads it as
+          # its canonical manual-merge signal), so a persistent failure here
+          # must stay red — but transient API blips get retried first.
+          retry gh pr edit "$PR" --add-label "risk:$CLASS"
 
       - name: Annotate `blocked` class (manual-merge required)
-        if: steps.compute.outputs.class == 'blocked'
+        if: ${{ !inputs.skip_label && steps.compute.outputs.class == 'blocked' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           # IMPORTANT: this step does NOT exit non-zero. The reusable's job
           # is to *classify*, not to gate. Auto-merge gating happens in
           # claude-author-automerge.yml which reads the `risk:blocked` label
@@ -103,13 +133,16 @@ jobs:
           # blocking merge (since required-status-checks rulesets in caller
           # repos typically don't list this check), and (b) confuse "code
           # is broken" with "policy says manual merge". Keep them separate.
+          # For the same reason, gh failures below are downgraded to
+          # ::warning:: — a lost sticky comment must not redden the check
+          # (it did on 2026-06-10 when GitHub served erroneous 401s).
           echo "::warning::PR touches blocked paths (Dockerfile, compose, workflows, secrets, classifier itself). Manual merge by a maintainer is expected; auto-merge will be refused by claude-author-automerge.yml."
 
           # Sticky comment so the reason is visible inline on the PR (the
           # ::warning:: only shows in the Actions log).
           marker="<!-- pr-classify:blocked -->"
-          existing=$(gh api "/repos/$REPO/issues/$PR/comments" \
-            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1 || true)
+          existing=$(retry gh api "/repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | contains(\"$marker\")) | .id] | first // empty" || true)
           body=$(printf '%s\n' \
             "$marker" \
             "**Risk class: \`blocked\` — manual merge required.**" \
@@ -120,7 +153,9 @@ jobs:
             "" \
             "(This is a policy notice, not a code-quality failure. The classify job itself does not fail — required CI checks remain authoritative for \"is the code green.\")")
           if [ -n "$existing" ]; then
-            gh api -X PATCH "/repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null
+            retry gh api -X PATCH "/repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null \
+              || echo "::warning::could not update the blocked-class sticky comment (API failure; non-fatal — label and automerge gating are unaffected)"
           else
-            gh pr comment "$PR" --body "$body"
+            retry gh pr comment "$PR" --body "$body" \
+              || echo "::warning::could not post the blocked-class sticky comment (API failure; non-fatal — label and automerge gating are unaffected)"
           fi
