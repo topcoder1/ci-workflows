@@ -8,11 +8,11 @@ name: PR Codex Review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    # Skip the entire Codex track on bootstrap-paths. The classifier flags
-    # these as risk:blocked and exits 1, which would surface as a failing
-    # `PR Codex Review / classify` check + a cascading-skipped review job.
-    # Both are noise — bootstrap-path PRs always require admin merge by
-    # design, so a secondary review adds no signal.
+    # Skip the entire Codex track on bootstrap-paths. The classifier labels
+    # these risk:blocked, and this caller only reviews risk:sensitive — so
+    # running it would burn a classify job just to produce a skipped review.
+    # Bootstrap-path PRs always require admin merge by design, so a
+    # secondary review adds no signal.
     #
     # SAFETY: Codex review is NOT in the required-checks ruleset on
     # ci-workflows main (verified: only `review / Claude Review` is
