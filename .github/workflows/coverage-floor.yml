@@ -297,7 +297,7 @@ jobs:
       # install + test steps below.
       - name: Download pre-measured coverage artifact
         if: inputs.pre_measured_coverage_artifact != ''
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.pre_measured_coverage_artifact }}
           path: ${{ inputs.working_directory || '.' }}
