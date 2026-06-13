@@ -297,14 +297,14 @@ jobs:
       # install + test steps below.
       - name: Download pre-measured coverage artifact
         if: inputs.pre_measured_coverage_artifact != ''
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: ${{ inputs.pre_measured_coverage_artifact }}
           path: ${{ inputs.working_directory || '.' }}
 
       # Language + tooling setup. Skipped when consuming a pre-measured artifact
       # (no tests to run → no toolchain needed).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         with:
           python-version: ${{ inputs.python_version || '3.13' }}
@@ -313,7 +313,7 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         if: steps.detect.outputs.language == 'go' && inputs.pre_measured_coverage_artifact == ''
         with:
           go-version: ${{ steps.detect.outputs.go_version }}
@@ -686,7 +686,7 @@ jobs:
 
       - name: Post sticky PR comment
         if: github.event_name == 'pull_request' && always()
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage-floor
           message: |
