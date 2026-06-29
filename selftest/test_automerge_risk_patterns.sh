@@ -12,14 +12,14 @@ set -euo pipefail
 
 # Mirror the patterns block from .github/workflows/claude-author-automerge.yml.
 # Keep these in lock-step — if you edit one, edit the other.
-patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|jwt|mfa|totp|webauthn|passkey)(/|$)
-^(.*/)?secret[s]?(/|$)
+patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|jwt|mfa|totp|webauthn|passkey)(/|\.(py|go|ts|tsx|js|jsx)$|$)
+^(.*/)?secret[s]?(/|\.(py|go|ts|tsx|js|jsx)$|$)
 ^(.*/)?\.env($|\..*)
 ^(.*/)?keychain.*
 ^(.*/)?credentials.*
 ^(.*/)?migrations(/|$)
 .*\.sql$
-^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|$)
+^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
 (^|/)naf(/|\.(py|go|ts|js)$)
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
