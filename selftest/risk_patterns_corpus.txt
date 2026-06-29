@@ -152,25 +152,33 @@ SAFE: mainview.go
 # oauth2 substring but not a path segment
 SAFE: src/oauth2helper.go
 SAFE: oauth2helper.go
-# Intentional parity-not-coverage tradeoffs (Wave 4.4 — match GH workflow):
-# Filenames like `auth.ts`, `login.go`, `billing.py`, `secret.py`,
-# `secret_key.py` are intentionally SAFE (NOT matched globally because the
-# `(/|$)` segment anchor doesn't match leaf filenames). BB repos that need
-# filename coverage either add an explicit HIGH_RISK_PATTERNS entry (and a
-# RISKY: line here) or rely on Claude Review / Codex Review as the gate.
-# Stripe paths likewise — only the BB-only HIGH_RISK_PATTERNS would have
-# caught `stripe/webhooks.ts`; dropped for GH parity.
-SAFE: src/auth.ts
-SAFE: api/login.go
-SAFE: billing.py
-SAFE: secret.py
+# Leaf SOURCE-FILE coverage for auth/secrets/billing (2026-06-29 policy update,
+# wxa_webcat#557). A leaf source file whose stem IS a risk keyword now matches:
+# the anchor is `(/|\.(py|go|ts|tsx|js|jsx)$|$)`, so `auth.ts`, `login.go`,
+# `billing.py`, `secret.py`, `secrets.ts` are RISKY (closes the gap where
+# `src/webcat/api/middleware/auth.py` auto-merged because `auth` wasn't a path
+# segment). Still SAFE (deliberately NOT over-blocked): doc/config formats
+# (.md/.json/.yml/.yaml — config secrets stay covered by .env/keychain/credentials
+# patterns), stem-PREFIXED variants where the keyword isn't the whole stem
+# (secret_key.py, secret_manager.py), and substrings (secretly.go, author/,
+# sessionsutil.go). Stripe stays un-gated (not a keyword); BB repos add an explicit
+# HIGH_RISK_PATTERNS entry if they need it.
+RISKY: src/auth.ts
+RISKY: api/login.go
+RISKY: billing.py
+RISKY: secret.py
+RISKY: src/secrets.py
+RISKY: src/secrets.ts
+# The exact wxa_webcat leaf file that auto-merged before this fix (#557).
+RISKY: src/webcat/api/middleware/auth.py
+# Still SAFE — stem-prefixed, config-format, or substring (must NOT over-block):
 SAFE: config/secret_key.py
-SAFE: src/secrets.py
 SAFE: config/secret_keys.yml
 SAFE: config/secret.json
-SAFE: src/secrets.ts
 SAFE: secrets.yaml
 SAFE: secret_manager.py
+SAFE: src/author/profile.py
+SAFE: docs/auth.md
 # Nested docker-compose paths — partial parity gap:
 #   - `deploy/local/docker-compose.yml` IS still gated (matches `^deploy/.*`).
 #   - `services/api/docker-compose.yaml` is NOT gated globally. Repos that
