@@ -82,6 +82,8 @@ RISKY: Dockerfile
 RISKY: deploy/Dockerfile.api
 RISKY: docker-compose.yml
 RISKY: docker-compose.staging.yml
+RISKY: docker/docker-compose.la.yml
+RISKY: docker/docker-compose.prod.yml
 
 # ── RISKY: CI/CD ───────────────────────────────────────────────────────────
 RISKY: .github/workflows/ci.yml
@@ -179,13 +181,19 @@ SAFE: secrets.yaml
 SAFE: secret_manager.py
 SAFE: src/author/profile.py
 SAFE: docs/auth.md
-# Nested docker-compose paths — partial parity gap:
-#   - `deploy/local/docker-compose.yml` IS still gated (matches `^deploy/.*`).
-#   - `services/api/docker-compose.yaml` is NOT gated globally. Repos that
-#     nest compose files outside `deploy/`, `infra/`, etc. should add an
-#     explicit HIGH_RISK_PATTERNS entry + RISKY: line here.
+# Nested docker-compose paths:
+#   - `docker/docker-compose*.yml` IS gated (the common top-level `docker/`
+#     convention; added 2026-06-30 after wxa_webcat's prod compose at
+#     `docker/docker-compose.la.yml` auto-armed a Claude PR — the old
+#     `^docker-compose` anchor missed the `docker/` prefix).
+#   - `deploy/local/docker-compose.yml` IS gated (matches `^deploy/.*`).
+#   - `services/api/docker-compose.yaml` is NOT gated globally (arbitrary
+#     nesting outside `docker/`/`deploy/`/`infra/`). Repos that nest compose
+#     files elsewhere should add an explicit HIGH_RISK_PATTERNS entry + RISKY: here.
+#   - A non-compose file under `docker/` (e.g. docker/README.md) stays SAFE.
 RISKY: deploy/local/docker-compose.yml
 SAFE: services/api/docker-compose.yaml
+SAFE: docker/README.md
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
 # Substrings that look auth/billing-ish but aren't path segments
