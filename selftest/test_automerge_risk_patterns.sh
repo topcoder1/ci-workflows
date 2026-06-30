@@ -24,6 +24,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
 ^docker-compose.*\.ya?ml$
+(^|/)docker/docker-compose.*\.ya?ml$
 ^\.github/workflows/.*
 ^\.github/risk-paths\.yml$
 ^\.github/CODEOWNERS$

@@ -313,6 +313,7 @@ jobs:
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
           ^docker-compose.*\.ya?ml$
+          (^|/)docker/docker-compose.*\.ya?ml$
           ^\.github/workflows/.*
           ^\.github/risk-paths\.yml$
           ^\.github/CODEOWNERS$
