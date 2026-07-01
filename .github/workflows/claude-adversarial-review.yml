@@ -39,7 +39,7 @@ jobs:
       - name: Adversarial pass
         # Pinned to v1.0.112 (2026-05-04) — see claude-review.yml for context
         # (ci-workflows#37: v1.0.113/.114 regression breaks the setup step).
-        uses: anthropics/claude-code-action@2cc1ac1331eac7a6a96d716dd204dd2888d0fcd2 # v1.0.112
+        uses: anthropics/claude-code-action@806af32823ef69c8ef357086c573a902af641307 # v1.0.151
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
