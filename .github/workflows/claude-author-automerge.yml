@@ -263,20 +263,41 @@ jobs:
       #     from the PR list page; also revokes an already-armed auto-merge
       #     (next step). Outranks Option A/B bypasses and the override
       #     label: contradictory signals resolve to manual.
-      #  2. Timeline ordering — if the most recent auto-merge timeline event
-      #     is `auto_merge_disabled`, someone turned auto-merge OFF after it
-      #     was last turned on: do not re-arm. Actor identity is useless
-      #     here (enables via automerge_pat and manual disables both show
-      #     the PAT user — verified on #405 where all three events show the
-      #     same login), so ordering is the only reliable signal. GitHub
-      #     emits method-specific enable events (auto_squash_enabled /
-      #     auto_merge_enabled / auto_rebase_enabled — verified on
-      #     techrecon#404/#405) but a single auto_merge_disabled for every
-      #     disable. The only automated disabler is our classifier-revoke
-      #     step above, whose intent is also "stay off". To resume
-      #     auto-merge after a manual disable, re-enable manually
-      #     (`gh pr merge --auto --<method>`) — labels do NOT clear this
-      #     hold.
+      #  2. Timeline — a HUMAN turned auto-merge OFF after it was last on:
+      #     do not re-arm. Two subtleties this logic must get right, both
+      #     found by adversarial review of the first cut of this step:
+      #
+      #     (a) Chronology, not lexicography. We take the MAX created_at
+      #         among auto-merge events and, on a same-second tie, resolve
+      #         toward "disabled" (fail-safe). The earlier cut sorted the
+      #         string "<ts> <event>" and let the event NAME break ties —
+      #         and `auto_merge_disabled` sorts before every enable event
+      #         (auto_merge_enabled / auto_squash_enabled /
+      #         auto_rebase_enabled: 'd' < 'e'/'m'/'r'/'s'), so a human
+      #         disable colliding in the same wall-clock second as an
+      #         in-flight re-arm was silently dropped and auto-merge
+      #         re-armed against the human — the exact #405 defeat this step
+      #         exists to prevent. GitHub timeline created_at is
+      #         whole-second precision, so same-second collisions are real.
+      #
+      #     (b) Actor: exclude OUR OWN revokes. The classifier-revoke and
+      #         hold-label-revoke steps also emit auto_merge_disabled, via
+      #         GITHUB_TOKEN, so they show actor `github-actions[bot]`.
+      #         A human `gh pr merge --disable-auto` shows the human's login
+      #         (verified live: #405 disable = "topcoder1"; fleet
+      #         classifier-revokes = "github-actions[bot]"). If we treated a
+      #         bot revoke as a durable hold, a PR that was armed→revoked on
+      #         the arm-before-classify race and later de-risked (sensitive
+      #         path removed → reclassified non-blocked) would be stranded
+      #         forever even though no human ever disabled it. So Signal 2
+      #         holds only on a HUMAN disable (actor != github-actions[bot]).
+      #         Note: actor cannot distinguish enable-from-disable (both the
+      #         PAT user), which is why chronology+event-type carries that;
+      #         actor is used ONLY to filter self-revokes out of disables.
+      #
+      #     To resume auto-merge after a human disable, re-enable manually
+      #     (`gh pr merge --auto --<method>`) — labels do NOT clear a
+      #     timeline hold.
       #
       # Both reads go through the issues API namespace the classifier-verdict
       # step already uses in production, and both degrade gracefully
@@ -307,24 +328,34 @@ jobs:
             fi
           fi
 
-          # Signal 2: newest auto-merge timeline event is a disable.
-          # Timeline pages are chronological; sort by ISO timestamp anyway as
-          # a belt (lexicographic == chronological for ISO-8601 UTC).
+          # Signal 2: the chronologically-last auto-merge state event is a
+          # HUMAN disable. jq does all the ordering (no shell sort of a mixed
+          # "<ts> <event>" key): filter to auto-merge state events, find the
+          # max created_at, and among events at that max timestamp, hold iff
+          # any is a disable NOT emitted by github-actions[bot] (i.e. a human
+          # --disable-auto, not our own classifier/hold revoke). Ties resolve
+          # toward the human disable — fail-safe. See the step's header
+          # comment for why (a) chronology and (b) actor both matter.
           if [ "$hold" -eq 0 ]; then
-            last_event=$(
+            human_disable=$(
               (gh api "/repos/${{ github.repository }}/issues/$PR/timeline" \
                  --paginate 2>/dev/null || echo '[]') \
-              | jq -r 'try (.[]
-                  | select(.event == "auto_merge_disabled"
+              | jq -r 'try (
+                  [ .[] | select(.event == "auto_merge_disabled"
                         or .event == "auto_merge_enabled"
                         or .event == "auto_squash_enabled"
-                        or .event == "auto_rebase_enabled")
-                  | "\(.created_at) \(.event)") // empty' \
-              | sort | tail -1 | awk '{print $2}'
+                        or .event == "auto_rebase_enabled") ]
+                  | (map(.created_at) | max) as $t
+                  | if $t == null then "no"
+                    elif any(.[]; .created_at == $t
+                          and .event == "auto_merge_disabled"
+                          and ((.actor.login // "") != "github-actions[bot]"))
+                    then "yes" else "no" end
+                ) // "no"'
             )
-            if [ "$last_event" = "auto_merge_disabled" ]; then
+            if [ "$human_disable" = "yes" ]; then
               hold=1
-              reason="timeline:disabled-after-last-enable"
+              reason="timeline:human-disable-newest"
             fi
           fi
 
