@@ -82,6 +82,11 @@ on:
         required: false
         type: string
         default: "auto-merge-approved"
+      hold_label:
+        description: "Label that durably refuses auto-merge on a Claude-authored PR and revokes it if already armed. Outranks the override/bypass labels and the Codex bypass. To lift the hold: remove the label, then re-enable manually if desired (label removal does not re-trigger this workflow). Set empty to disable."
+        required: false
+        type: string
+        default: "manual-merge"
       codex_check_name:
         description: "Status-check name for Codex Review. When this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Set empty to disable Codex-trusted bypass."
         required: false
@@ -242,6 +247,113 @@ jobs:
           state=$(gh pr view "$PR_URL" --json autoMergeRequest \
             --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
           echo "Auto-merge state after revoke: $state"
+          if [ "$state" = "ON" ]; then
+            echo "::error::auto-merge still ON after --disable-auto — investigate"
+            exit 1
+          fi
+
+      # Durable manual hold (lesson 2026-07-02, whois-api-llc/techrecon#405):
+      # a human ran `gh pr merge --disable-auto` (timeline 17:16:40Z) and an
+      # in-flight run of this workflow re-armed auto-merge 11 seconds later
+      # (17:16:51Z); the PR then merged with no human click. `--disable-auto`
+      # is the documented escape hatch in the fleet policy, so it must
+      # survive workflow re-runs. Two hold signals, checked at enable time:
+      #
+      #  1. hold_label (default 'manual-merge') — explicit one-click hold
+      #     from the PR list page; also revokes an already-armed auto-merge
+      #     (next step). Outranks Option A/B bypasses and the override
+      #     label: contradictory signals resolve to manual.
+      #  2. Timeline ordering — if the most recent auto-merge timeline event
+      #     is `auto_merge_disabled`, someone turned auto-merge OFF after it
+      #     was last turned on: do not re-arm. Actor identity is useless
+      #     here (enables via automerge_pat and manual disables both show
+      #     the PAT user — verified on #405 where all three events show the
+      #     same login), so ordering is the only reliable signal. GitHub
+      #     emits method-specific enable events (auto_squash_enabled /
+      #     auto_merge_enabled / auto_rebase_enabled — verified on
+      #     techrecon#404/#405) but a single auto_merge_disabled for every
+      #     disable. The only automated disabler is our classifier-revoke
+      #     step above, whose intent is also "stay off". To resume
+      #     auto-merge after a manual disable, re-enable manually
+      #     (`gh pr merge --auto --<method>`) — labels do NOT clear this
+      #     hold.
+      #
+      # Both reads go through the issues API namespace the classifier-verdict
+      # step already uses in production, and both degrade gracefully
+      # (unreadable → that signal reports no hold) so this can never crash
+      # the run or strand a PR.
+      - name: Check manual hold
+        id: hold
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HOLD_LABEL: ${{ inputs.hold_label }}
+        run: |
+          set -euo pipefail
+          hold=0
+          reason=""
+
+          # Signal 1: hold label. Query live labels, not the event snapshot —
+          # the label may have been applied after the triggering event fired.
+          if [ -n "$HOLD_LABEL" ]; then
+            labels=$(gh api "/repos/${{ github.repository }}/issues/$PR/labels" \
+              --jq '.[].name' 2>/dev/null || echo "")
+            if echo "$labels" | grep -qxF "$HOLD_LABEL"; then
+              hold=1
+              reason="label:$HOLD_LABEL"
+            fi
+          fi
+
+          # Signal 2: newest auto-merge timeline event is a disable.
+          # Timeline pages are chronological; sort by ISO timestamp anyway as
+          # a belt (lexicographic == chronological for ISO-8601 UTC).
+          if [ "$hold" -eq 0 ]; then
+            last_event=$(
+              (gh api "/repos/${{ github.repository }}/issues/$PR/timeline" \
+                 --paginate 2>/dev/null || echo '[]') \
+              | jq -r 'try (.[]
+                  | select(.event == "auto_merge_disabled"
+                        or .event == "auto_merge_enabled"
+                        or .event == "auto_squash_enabled"
+                        or .event == "auto_rebase_enabled")
+                  | "\(.created_at) \(.event)") // empty' \
+              | sort | tail -1 | awk '{print $2}'
+            )
+            if [ "$last_event" = "auto_merge_disabled" ]; then
+              hold=1
+              reason="timeline:disabled-after-last-enable"
+            fi
+          fi
+
+          echo "hold=$hold" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          if [ "$hold" -eq 1 ]; then
+            echo "::notice::Manual hold respected ($reason) — auto-merge will not be (re-)enabled. Re-enable manually to lift a timeline hold; remove the '$HOLD_LABEL' label to lift a label hold."
+          else
+            echo "No manual hold detected."
+          fi
+
+      # A label hold also revokes an auto-merge that was armed before the
+      # label landed (same idempotent pattern as the classifier revoke).
+      # Timeline holds need no revoke — by definition auto-merge is already
+      # off when the newest event is a disable.
+      - name: Revoke auto-merge on hold label
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          startsWith(steps.hold.outputs.reason, 'label:')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
+          echo "Auto-merge state after hold-label revoke: $state"
           if [ "$state" = "ON" ]; then
             echo "::error::auto-merge still ON after --disable-auto — investigate"
             exit 1
@@ -434,7 +546,8 @@ jobs:
       - name: Enable auto-merge
         if: |
           steps.detect.outputs.claude_authored == '1' &&
-          steps.classifier_verdict.outputs.blocked != '1' && (
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.hold.outputs.hold != '1' && (
             steps.risk.outputs.risky != '1' ||
             steps.bypass_label.outputs.bypass == '1' ||
             steps.bypass_codex.outputs.bypass == '1'
@@ -519,6 +632,7 @@ jobs:
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.hold.outputs.hold != '1' &&
           steps.risk.outputs.risky == '1' &&
           steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1'
         env:
