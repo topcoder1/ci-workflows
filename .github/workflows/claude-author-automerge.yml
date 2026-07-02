@@ -56,9 +56,17 @@ name: Claude-author Auto-merge (reusable)
 #       changes (lesson 2026-05-04, wxa_vpn#250) and was narrowed
 #       2026-05-20.
 #
-# Customer-copy diffs (legal / marketing wording) are NOT mechanically
-# detected — Claude Review handles that semantically and blocks via the
-# required check.
+# Customer-copy diffs (legal / marketing / pricing wording) are NOT
+# detected by the global regex here — repo layouts differ (techrecon:
+# site/src/**; wxa-astro: src/content/** Tina JSON), so a central glob
+# would over-block some repos and miss others. The enforcement for this
+# policy category is the caller's .github/risk-paths.yml `sensitive:`
+# list (item 1 above): marketing-site repos MUST list their
+# wording-bearing trees there. Lesson 2026-07-02 from
+# whois-api-llc/techrecon#405: a marketing-copy PR auto-merge-armed
+# because techrecon's sensitive: list had no site/ entries; fixed in
+# techrecon#410 + wxa-astro#63. Claude Review still reviews copy
+# semantically, but it is not the merge gate for this category.
 #
 # This workflow does NOT bypass branch protection. It only enables GitHub's
 # "auto-merge" toggle, which still waits for required checks (Claude Review)
