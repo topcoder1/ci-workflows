@@ -309,6 +309,33 @@ jobs:
             exit 0
           fi
 
+          # Prettier hard-errors on explicitly specified symlinks
+          # ("Explicitly specified pattern '<path>' is a symbolic link") —
+          # some repos track symlinked files by convention (dotclaude's
+          # skills/*/SKILL.md). Drop them: the link target gets formatted
+          # whenever it appears in the diff itself. Glob mode is unaffected
+          # (prettier skips symlinks it expands from a glob on its own).
+          # Mirrors prettier-autofix.yml — keep both filters in sync.
+          SYMLINKS=()
+          KEPT=()
+          for f in "${TARGETS[@]}"; do
+            if [ -L "$f" ]; then SYMLINKS+=("$f"); else KEPT+=("$f"); fi
+          done
+          if [ "${#SYMLINKS[@]}" -gt 0 ]; then
+            echo "Skipping ${#SYMLINKS[@]} symlink(s) (prettier rejects explicit symlink targets):"
+            printf '  %s\n' "${SYMLINKS[@]}"
+          fi
+          # Guarded assignment: expanding an EMPTY array under `set -u`
+          # is an unbound-variable error on bash <4.4 (macOS ships 3.2 —
+          # the selftest runs this block locally).
+          TARGETS=()
+          if [ "${#KEPT[@]}" -gt 0 ]; then TARGETS=("${KEPT[@]}"); fi
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "All PR-changed glob matches are symlinks — nothing to check."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           echo "Mode: files (${#TARGETS[@]} target(s) after glob ∩ changed-files):"
           printf '  %s\n' "${TARGETS[@]}"
           {

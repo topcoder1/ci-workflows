@@ -399,21 +399,21 @@ jobs:
           fi
 
       # Option A: explicit human approval via label.
-      # Run BEFORE the risk-tier path-scan so an oversized PR (>20k diff
-      # lines, GitHub's `gh pr diff` HTTP 406 cap) can still bypass-merge.
-      # Without this ordering, the path-scan dies on the diff fetch BEFORE
-      # ever consulting the bypass label, leaving the workflow exit-1
-      # with no way for the human to override. Verified against
-      # topcoder1/attaxion_dev#71 (2026-05-04, 261k-line data drop) where
-      # `auto-merge-approved` was applied but the workflow died at the
-      # diff-fetch step regardless.
+      # Run BEFORE the risk-tier path-scan so a PR the scan can't
+      # classify can still bypass-merge. Historically that meant any
+      # >20k-line diff: the scan fetched names via `gh pr diff`, which
+      # HTTP-406s past 20k lines (topcoder1/attaxion_dev#71, 2026-05-04,
+      # 261k-line data drop, died before consulting this label — hence
+      # the ordering). The scan now lists names via the paginated files
+      # API (dotclaude#121, 2026-07-02), so diff size no longer kills it;
+      # the remaining can't-run case is the REST 3000-file listing cap,
+      # where the scan fails closed.
       #
       # When a Claude PR matches the risk-tier classifier (or the
       # path-scan can't run), you can apply the `auto-merge-approved`
       # label from the PR list page (one click, no PR detail navigation)
-      # to bypass both the risk gate AND the size-cap failure mode.
-      # Confirms "yes I read it, auto-merge it" without requiring the
-      # actual click-merge round-trip.
+      # to bypass the risk gate. Confirms "yes I read it, auto-merge it"
+      # without requiring the actual click-merge round-trip.
       - name: Check risk bypass label (Option A)
         id: bypass_label
         if: |
@@ -446,9 +446,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           RISK_MAIN_GO: ${{ inputs.risk_main_go }}
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
         run: |
           set -euo pipefail
-          changed=$(gh pr diff "$PR" --name-only)
+          # Changed-file names via the paginated files API — `gh pr diff
+          # --name-only` HTTP-406s on diffs >20k lines (dotclaude#121).
+          # The listing endpoint caps at 3000 files; past that the scan
+          # can't see every path, so fail closed (the bypass label above
+          # stays the human override).
+          changed=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[].filename')
+          if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
+            echo "::error::PR changes 3000+ files — file listing is truncated and the risk scan cannot classify every path. Apply the '${BYPASS_LABEL:-auto-merge-approved}' label or merge manually."
+            exit 1
+          fi
           # Risk-tier glob patterns (kept in sync with global CLAUDE.md policy).
           # If you add a category, also update install-automerge-policy.sh and
           # the CLAUDE.md policy block.

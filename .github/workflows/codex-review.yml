@@ -61,15 +61,15 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          files=$(gh pr diff "$PR" --name-only)
-          # Count + and - lines from the unified diff, excluding the file
-          # markers (+++/---). This is the actual change volume the
-          # reviewer would read.
-          lines=$(gh pr diff "$PR" | awk '
-            /^(\+\+\+|---)/ { next }
-            /^[+-]/ { n++ }
-            END { print n+0 }
-          ')
+          # Changed-file names via the paginated files API — `gh pr diff`
+          # HTTP-406s on diffs >20k lines (dotclaude#121), which are
+          # exactly the oversized PRs the size gate must still classify.
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[].filename')
+          # additions+deletions equals the +/- line count (sans +++/---
+          # file markers) the old `gh pr diff | awk` pass computed, without
+          # fetching a diff body subject to the same 20k-line cap.
+          lines=$(gh pr view "$PR" --json additions,deletions --jq '.additions + .deletions')
           {
             echo "files<<__FILES_EOF__"
             echo "$files"

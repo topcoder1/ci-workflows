@@ -87,7 +87,17 @@ jobs:
         run: |
           set -euo pipefail
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
-          changed=$(retry gh pr diff "$PR" --name-only)
+          # Changed-file names via the paginated files API — `gh pr diff
+          # --name-only` HTTP-406s on diffs >20k lines (dotclaude#121).
+          changed=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[].filename')
+          # The listing endpoint caps at 3000 files. A truncated list can
+          # compute a falsely benign class, and the risk:* label is
+          # load-bearing for claude-author-automerge.yml — so stay red.
+          if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
+            echo "::error::PR changes 3000+ files — file listing is truncated, cannot classify. Merge manually."
+            exit 1
+          fi
           class=$(echo "$changed" | node .github/scripts/classify.mjs)
           echo "class=$class" >> "$GITHUB_OUTPUT"
           echo "Computed risk class: $class"
