@@ -66,6 +66,13 @@ jobs:
           # exactly the oversized PRs the size gate must still classify.
           files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[].filename')
+          # The listing endpoint caps at 3000 files. A truncated list could
+          # hide an always_review path from codex-gate.mjs and silently
+          # skip a required review — stay red like the other gates do.
+          if [ "$(printf '%s\n' "$files" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
+            echo "::error::PR changes 3000+ files — file listing is truncated, cost gate cannot classify. Review manually."
+            exit 1
+          fi
           # additions+deletions equals the +/- line count (sans +++/---
           # file markers) the old `gh pr diff | awk` pass computed, without
           # fetching a diff body subject to the same 20k-line cap.
