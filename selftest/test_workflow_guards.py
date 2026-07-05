@@ -21,6 +21,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
     "script",
     [
         "selftest/test_automerge_risk_patterns.sh",
+        "selftest/test_classify_bracket_guard.sh",
         "selftest/test_pr_files_listing.sh",
         "selftest/test_prettier_symlink_filter.sh",
     ],
