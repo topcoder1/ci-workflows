@@ -168,9 +168,15 @@ jobs:
         # checkout step authenticated git with `github.token`, which is
         # scoped to the calling repo only — cross-org clones return 404.
         # When the caller forwards `AUTOMERGE_PAT` (already deployed fleet-
-        # wide), use it as a read credential for the topcoder1 org. Only
-        # `topcoder1/*` URLs are rewritten so the PAT never leaks to clones
-        # of other orgs. Mirrors coverage-floor.yml's same step.
+        # wide), use it as a read credential. Rewrites are limited to the
+        # two fleet orgs, topcoder1 and whois-api-llc, so the PAT never
+        # leaks to clones of third-party orgs. Mirrors coverage-floor.yml's
+        # same step.
+        #
+        # Burn 2026-05-13 -> 2026-07-06: wxa_sanctions' tests/coverage-floor
+        # lanes were red since install because github.token is repo-scoped,
+        # so even a same-org private git dep (whois-api-llc/wxa_sanctions ->
+        # whois-api-llc/wxa-secrets) 404s without this rewrite.
         env:
           CROSS_ORG_PAT: ${{ secrets.AUTOMERGE_PAT }}
         run: |
@@ -179,7 +185,10 @@ jobs:
             git config --global \
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/topcoder1/".insteadOf \
               "https://github.com/topcoder1/"
-            echo "==> Configured git insteadOf for topcoder1/* using AUTOMERGE_PAT"
+            git config --global \
+              url."https://x-access-token:${CROSS_ORG_PAT}@github.com/whois-api-llc/".insteadOf \
+              "https://github.com/whois-api-llc/"
+            echo "==> Configured git insteadOf for topcoder1/* and whois-api-llc/* using AUTOMERGE_PAT"
           else
             echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies will fail with 404 on uv sync."
           fi
