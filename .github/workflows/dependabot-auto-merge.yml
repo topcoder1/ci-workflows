@@ -13,6 +13,16 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      automerge_pat:
+        description: >-
+          Optional PAT used to enable auto-merge. When set, the eventual
+          server-side merge commit is attributed to the PAT owner, so the
+          caller repo's push workflows (CI, deploys) fire on bot merges —
+          GITHUB_TOKEN-attributed merges trigger nothing (GitHub recursion
+          guard). Cross-org callers MUST map this explicitly; `secrets:
+          inherit` is a silent no-op across orgs.
+        required: false
     # GITHUB_TOKEN is automatically passed to reusable workflows; no need to declare.
 
 jobs:
@@ -42,4 +52,4 @@ jobs:
         run: gh pr merge --auto --${{ inputs.merge_method }} "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.automerge_pat || secrets.GITHUB_TOKEN }}
