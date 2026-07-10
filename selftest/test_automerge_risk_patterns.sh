@@ -26,6 +26,10 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 ^docker-compose.*\.ya?ml$
 (^|/)docker/docker-compose.*\.ya?ml$
 ^\.github/workflows/.*
+^\.github/actions?/.*
+^\.github/scripts/.*
+(^|/)action\.ya?ml$
+^\.github/dependabot\.ya?ml$
 ^\.github/risk-paths\.yml$
 ^\.github/CODEOWNERS$
 ^infra/iam/.*

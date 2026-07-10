@@ -218,3 +218,49 @@ SAFE: infra/crontabs/README.md
 SAFE: infra/aws-scanner-setup.md
 SAFE: infra/crontab.example
 SAFE: infra/README.md
+# ── Non-workflow .github CI config/code (2026-07-10 gap) ───────────────────
+# Six fleet PRs whose ONLY change was .github/dependabot.yml auto-merged on
+# 2026-07-10 ~15:13 UTC (attaxion_marketing#18, basecamp-mcp#32, hr-center#20,
+# wxa-secrets#23, wxa_marketing#41, wxa_sanctions#27): the CI/CD patterns
+# covered .github/workflows/** but not the sibling non-workflow surfaces.
+# Deliberately enumerated, NOT `.github/**` wholesale — ISSUE_TEMPLATE/,
+# PULL_REQUEST_TEMPLATE.md, FUNDING.yml are README-ish and stay auto-mergeable:
+#   - dependabot.ya?ml — dependency-automation config (feeds dependabot-auto-merge;
+#     can set insecure-external-code-execution)
+#   - .github/action(s)/** — repo-local composite actions, singular OR plural
+#     (a `uses: ./.github/action/foo` is valid; `action.yml` is GitHub's reserved
+#     action-def filename). `actions?` covers both forms.
+#   - .github/scripts/** — scripts invoked by workflows (executed CI code)
+RISKY: .github/dependabot.yml
+RISKY: .github/dependabot.yaml
+RISKY: .github/actions/setup-env/action.yml
+RISKY: .github/actions/extract-high-risk-globs/action.yml
+# singular `action/` (unconventional but valid) must match too — closes the
+# false-negative adversarial review flagged 2026-07-10
+RISKY: .github/action/setup-env/action.yml
+RISKY: .github/scripts/classify.mjs
+# action DEFINITIONS are gated by their reserved filename at ANY depth (like
+# Dockerfile/main.go/.sql), so a `uses: ./.github/ci` or a repo-published action
+# outside .github/action(s)/ is still caught. Adversarial-review gap, 2026-07-10.
+RISKY: .github/ci/action.yml
+RISKY: ci/my-action/action.yaml
+RISKY: action.yml
+# Accepted gap (house style, cf. the arbitrary-nested compose-file SAFE entries
+# above): a HELPER file (index.js, run.sh) beside an action in an arbitrary
+# NON-.github dir is not gated globally — repos that place actions there add an
+# explicit pattern. The action.yml/.yaml itself IS gated everywhere; only the
+# loose siblings in exotic locations are the residual. A plain index.js is
+# normal app code, correctly non-risk.
+SAFE: ci/my-action/index.js
+# Lookalikes that must NOT match the action-def filename rule (anchored on (^|/)):
+SAFE: src/redux/reaction.yaml
+SAFE: config/transaction.yml
+# Still SAFE — README-ish .github files and lookalikes must NOT be swept in:
+SAFE: .github/ISSUE_TEMPLATE/bug_report.md
+SAFE: .github/PULL_REQUEST_TEMPLATE.md
+SAFE: .github/FUNDING.yml
+# `actions` must be a directory segment — actionlint config is tooling config
+SAFE: .github/actionlint.yml
+# GitHub only reads dependabot config under .github/ — a root copy is inert
+SAFE: dependabot.yml
+SAFE: docs/dependabot-setup.md

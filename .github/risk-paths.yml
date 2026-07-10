@@ -40,6 +40,11 @@ blocked:
   - '.github/workflows/**'
   - '.github/risk-paths.yml'
   - '.github/CODEOWNERS'
+  # Dependency-automation config: controls what Dependabot opens/auto-merges and
+  # can set insecure-external-code-execution. Enumerated (not blanket .github/**)
+  # so README-ish .github files stay mergeable. Lesson 2026-07-10.
+  - '.github/dependabot.yml'
+  - '.github/dependabot.yaml'
   - 'infra/**'
   - 'terraform/**'
   - 'k8s/**'
@@ -51,6 +56,11 @@ sensitive:
   # `blocked:` class above so this is mostly belt-and-suspenders, but if
   # someone moves a file out of .github/workflows/ this catches it.)
   - '.github/scripts/**'
+  # Repo-local composite actions — executed CI code, same blast radius as
+  # .github/scripts/**. Singular `action/` is valid too (matches the global
+  # regex's `^\.github/actions?/.*`). Lesson 2026-07-10.
+  - '.github/actions/**'
+  - '.github/action/**'
   # Installer scripts — same fleet-wide blast radius as classify.mjs
   - 'scripts/**'
 

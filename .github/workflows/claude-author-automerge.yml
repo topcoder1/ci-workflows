@@ -41,11 +41,24 @@ name: Claude-author Auto-merge (reusable)
 #       cmd/<tool>/main.go, so it false-flags every tool. Such callers
 #       gate their real deployed entrypoint via .github/risk-paths.yml.
 #     - production infra: Dockerfile, docker-compose, .github/workflows,
+#       .github/action(s)/ (repo-local composite actions, singular or plural —
+#       executed CI code), .github/scripts/ (workflow-invoked scripts — executed
+#       CI code), any action.yml|action.yaml at ANY depth (GitHub's reserved
+#       action-definition filename, gated by filename like Dockerfile/main.go so
+#       actions outside .github/action(s)/ are still caught),
+#       .github/dependabot.yml|yaml (dependency-automation config — controls
+#       what gets auto-merged and can set insecure-external-code-execution),
 #       .github/risk-paths.yml, .github/CODEOWNERS, infra/iam/, infra
 #       subdirs (deploy/terraform/pulumi/k8s/cloudformation/ansible/
 #       digitalocean/scanner-id/nginx), systemd units + Terraform files
 #       anywhere under infra/, top-level terraform/, pulumi/, k8s/,
-#       fly.toml, deploy/, deploy*.{sh,yaml}.
+#       fly.toml, deploy/, deploy*.{sh,yaml}. The non-workflow .github/
+#       surfaces are ENUMERATED, not a blanket .github/** — README-ish
+#       files (ISSUE_TEMPLATE/, PULL_REQUEST_TEMPLATE.md, FUNDING.yml,
+#       actionlint.yml) stay auto-mergeable. Lesson 2026-07-10: six Claude
+#       PRs whose only change was .github/dependabot.yml auto-merged because
+#       the .github/ globs covered workflows/ but not the sibling
+#       automation-config and composite-action/script surfaces.
 #     - ML serving/model-promotion: ml/predictor.py (live scoring path),
 #       ml/retrain.py (model-promotion gate). Lesson 2026-06-02: a serving-path
 #       fix auto-merged because ml/ had no risk glob; now explicitly matched.
@@ -477,6 +490,10 @@ jobs:
           ^docker-compose.*\.ya?ml$
           (^|/)docker/docker-compose.*\.ya?ml$
           ^\.github/workflows/.*
+          ^\.github/actions?/.*
+          ^\.github/scripts/.*
+          (^|/)action\.ya?ml$
+          ^\.github/dependabot\.ya?ml$
           ^\.github/risk-paths\.yml$
           ^\.github/CODEOWNERS$
           ^infra/iam/.*
