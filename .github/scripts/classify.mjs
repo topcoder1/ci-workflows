@@ -36,6 +36,10 @@ const PRIORITY = [
 // Classes we test patterns against. `standard` is not in this list — it's
 // the fallback for any file that matches NO pattern in any class.
 const PATTERN_CLASSES = ['blocked', 'sensitive', 'safe_test', 'safe_deps', 'safe_config', 'trivial'];
+// Classes matched case-insensitively. See the invariant on classify() below:
+// folding case may only ever ADD gating, never remove it — which is exactly
+// why the safe/trivial classes are absent here.
+const NOCASE_CLASSES = new Set(['blocked', 'sensitive']);
 
 function fail(msg) {
 	process.stderr.write(`classify.mjs: ${msg}\n`);
@@ -83,6 +87,32 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	}
 }
 
+// Glob negation is incompatible with the case-fold applied to the gating
+// classes, and breaks its one invariant. '!' inverts the match, so folding
+// case REMOVES gating rather than adding it: minimatch('FOO', '!foo') is true
+// (gated) but false under {nocase:true} (ungated) — a downgrade. Segment
+// extglobs have the same shape: 'src/!(*.md)' matches 'src/A.MD' today and
+// stops matching once case is folded. Fail closed rather than quietly violate
+// the invariant classify() documents. Zero of the 45 repos carrying a
+// risk-paths.yml use negation in a gating class (fleet audit 2026-07-14), so
+// — as with the bracket guard above — strictness costs nothing today and
+// stops the footgun from ever being introduced. (Codex round-2 P2 on the
+// change that introduced the fold.)
+for (const cls of NOCASE_CLASSES) {
+	for (const p of rules[cls] || []) {
+		if (typeof p === 'string' && (p.trimStart().startsWith('!') || p.includes('!('))) {
+			fail(
+				`${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
+					`'${cls}' is matched case-insensitively so that a lowercase pattern still ` +
+					`catches real-world case variants, and negation inverts that: folding case ` +
+					`REMOVES gating instead of adding it (minimatch('FOO','!foo') is true, but ` +
+					`false with nocase). Express the rule positively — list the paths you want ` +
+					`gated rather than the ones you don't. Context: wxa-jake-ai#877.`
+			);
+		}
+	}
+}
+
 const changedFiles = readFileSync(0, 'utf8')
 	.split('\n')
 	.map((s) => s.trim())
@@ -95,11 +125,53 @@ if (changedFiles.length === 0) {
 	process.exit(0);
 }
 
+// Case-folding is applied to the GATING classes only. The invariant:
+//
+//     folding case may only ever ADD gating, never remove it.
+//
+// Why fold at all: minimatch defaults to case-SENSITIVE, so a lowercase
+// pattern silently misses real-world case variants. '**/secrets*' matched
+// 'docs/secrets.md' but NOT 'docs/SECRETS.md', so wxa-jake-ai's production
+// secrets ROTATION RUNBOOK fell through to 'docs/**' and classified
+// risk:trivial — auto-merge-eligible (wxa-jake-ai#875 had to be held as a
+// draft to dodge it; fixed repo-side in wxa-jake-ai#877). The same latent gap
+// exists for 'Dockerfile' (a committed 'dockerfile'/'DOCKERFILE') and the
+// '.env' family, in every repo in the fleet.
+//
+// Why NOT fold the safe/trivial classes: doing so is a fail-OPEN. A path that
+// matches nothing today gets the deliberately-strict 'standard' fallback;
+// folding case can hand it to an auto-merge-eligible class instead. With
+// `safe_test: ['tests/**']`, a PR adding 'Tests/release.py' would classify
+// safe_test rather than standard — and on GitHub's case-sensitive filesystem
+// that is a genuinely DISTINCT path, not the same file recased, so a
+// lowercase pattern has no business claiming it. Class precedence cannot
+// prevent this: it only breaks ties when a blocked/sensitive pattern also
+// matches, and here none does. Folding the safe classes has no upside either
+// — its only effect is to make them more lenient, which is precisely the
+// direction we don't want. (Caught by codex pre-review on this change; the
+// fleet audit below could not have found it, since it scanned files that
+// already exist and this vector is about files a future PR introduces.)
+//
+// So the asymmetry is the point, not an oversight: blocked/sensitive can only
+// grow, safe/trivial can only shrink-or-stay. selftest/test_classify_nocase.sh
+// pins both halves.
+//
+// Fleet audit before shipping, 2026-07-14 — every blob in all 45 repos
+// carrying a risk-paths.yml (18,604 files) classified twice, fold off vs on:
+// ZERO downgrades, exactly 2 upgrades, both real secrets docs (wxa-jake-ai
+// 'docs/SECRETS.md', inbox_superpilot 'docs/SECRETS_ROTATION.md'). Both are
+// blocked:-class hits, so both still land under this narrower fold.
+//
+// NOTE: this does NOT fix .github/CODEOWNERS, which GitHub matches itself and
+// also case-sensitively ("CODEOWNERS paths are case sensitive, because GitHub
+// uses a case sensitive file system"). A repo relying on a lowercase glob to
+// own an uppercase path still needs an exact-case CODEOWNERS line.
 function classify(file) {
 	for (const cls of PATTERN_CLASSES) {
 		const patterns = rules[cls] || [];
 		for (const p of patterns) {
-			if (minimatch(file, p, { dot: true, matchBase: false })) return cls;
+			const opts = { dot: true, matchBase: false, nocase: NOCASE_CLASSES.has(cls) };
+			if (minimatch(file, p, opts)) return cls;
 		}
 	}
 	return 'standard';
