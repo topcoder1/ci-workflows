@@ -21,6 +21,15 @@ arbitrary helper scripts; that's a different kind of repo.
 - `test_automerge_risk_patterns.sh` / `test_bb_automerge_risk_patterns.sh`
   — risk-tier regex behavior, driven by the shared corpus in
   `risk_patterns_corpus.txt`.
+- `test_classify_nocase.sh` — `classify.mjs` case-folds pattern matching for
+  `blocked`/`sensitive` **only**. minimatch defaults to case-sensitive, so a
+  lowercase `**/secrets*` missed `docs/SECRETS.md` and a production secrets
+  rotation runbook classified `risk:trivial` (wxa-jake-ai#875 / #877). Pins
+  the fix _and_ the asymmetry that makes it safe — folding may only ever add
+  gating, never remove it — so folding the safe/trivial classes is rejected:
+  it would demote an unmatched path from the strict `standard` fallback into
+  an auto-merge-eligible class (a PR adding `Tests/release.py` under
+  `safe_test: ['tests/**']`).
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
