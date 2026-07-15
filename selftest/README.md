@@ -25,7 +25,7 @@ arbitrary helper scripts; that's a different kind of repo.
   `blocked`/`sensitive` **only**. minimatch defaults to case-sensitive, so a
   lowercase `**/secrets*` missed `docs/SECRETS.md` and a production secrets
   rotation runbook classified `risk:trivial` (wxa-jake-ai#875 / #877). Pins
-  the fix *and* the asymmetry that makes it safe — folding may only ever add
+  the fix _and_ the asymmetry that makes it safe — folding may only ever add
   gating, never remove it — so folding the safe/trivial classes is rejected:
   it would demote an unmatched path from the strict `standard` fallback into
   an auto-merge-eligible class (a PR adding `Tests/release.py` under
