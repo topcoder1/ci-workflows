@@ -490,6 +490,7 @@ jobs:
           ^docker-compose.*\.ya?ml$
           (^|/)docker/docker-compose.*\.ya?ml$
           ^\.github/workflows/.*
+          ^templates/ci-workflows/.*
           ^\.github/actions?/.*
           ^\.github/scripts/.*
           (^|/)action\.ya?ml$
