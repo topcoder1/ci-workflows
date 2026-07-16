@@ -91,6 +91,19 @@ RISKY: .github/workflows/deploy.yml
 RISKY: .github/workflows/lint.yml
 RISKY: .github/risk-paths.yml
 RISKY: .github/CODEOWNERS
+
+# ── RISKY: fleet CI templates (2026-07-16 gap — dotclaude#157) ─────────────
+# The caller templates + fleet automation under templates/ci-workflows/ are the
+# SOURCE of every repo's .github/workflows/*.yml. A Claude PR editing them
+# self-merged in ~90s (dotclaude#157) because the regex only knew the rendered
+# artifact, not its source — inverted blast radius: the rendered copy was gated
+# on 45 repos while the template that feeds all 45 was not. dotclaude has no
+# pr-classify, so risk-paths.yml can't gate it there; this is the only lever.
+# scripts/ matters most: merge-workflow-only-pr.sh drops branch protection.
+RISKY: templates/ci-workflows/callers/pr-review.yml
+RISKY: templates/ci-workflows/callers/claude-author-automerge.yml
+RISKY: templates/ci-workflows/scripts/merge-workflow-only-pr.sh
+RISKY: templates/ci-workflows/scripts/rotate-anthropic-key.sh
 # BB-only: GH workflow doesn't include bitbucket-pipelines pattern (irrelevant to GH repos)
 RISKY_BB: bitbucket-pipelines.yml
 
@@ -264,3 +277,8 @@ SAFE: .github/actionlint.yml
 # GitHub only reads dependabot config under .github/ — a root copy is inert
 SAFE: dependabot.yml
 SAFE: docs/dependabot-setup.md
+
+# ── SAFE: templates/ near-misses (the ci-workflows glob must not over-block) ──
+SAFE: templates/email/welcome.html
+SAFE: templates/ci-workflows-notes.md
+SAFE: docs/ci-workflows/overview.md
