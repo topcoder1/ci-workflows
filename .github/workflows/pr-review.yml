@@ -2,7 +2,15 @@ name: PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # `ready_for_review` is load-bearing: the reusable
+    # (ci-workflows/claude-review.yml) gates its job on `draft == false`, so a
+    # PR opened as a draft skips the review at `opened`. Without this trigger,
+    # `gh pr ready` fires nothing this workflow listens for and the review NEVER
+    # runs — `review / Claude Review` sits at `skipped`, which GitHub counts as
+    # SATISFIED, so the PR merges green and unreviewed. An explicit `types:` list
+    # is a denylist by omission. Fleet audit 2026-07-15; template root cause
+    # fixed in dotclaude#156. See wxa-jake-ai#879, wxa_vpn#983.
+    types: [opened, synchronize, reopened, ready_for_review]
     # No paths-ignore by default. Claude self-skips docs/config-only diffs
     # via the reusable workflow's prompt and posts a "Skipped: ..." summary,
     # which keeps the review/Claude Review check green. Adding paths-ignore
