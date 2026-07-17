@@ -978,8 +978,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          # Ownership guard (codex round-6 P2): if the head moved since
+          # this run's event, the newer head's own run owns the arm
+          # decision — an unconditional revoke here could land AFTER that
+          # run validly armed, disarming a clean PR with no event left to
+          # re-arm it. Skip only on a POSITIVE head-moved read; if the
+          # read itself fails, revoke anyway (fail toward safety — the
+          # rare stale disarm self-heals on the next event).
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+          if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns gating; skipping stale revoke."
+            exit 0
+          fi
           echo "A gating step errored — revoking any existing auto-merge arm (fail closed for already-armed PRs)."
           gh pr merge --disable-auto "$PR_URL" 2>&1 || true
           state=$(gh pr view "$PR_URL" --json autoMergeRequest \

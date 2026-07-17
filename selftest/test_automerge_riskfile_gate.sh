@@ -106,10 +106,11 @@ if grep -q 'name: Revoke auto-merge if gates errored' "$WF" \
   && grep -q "steps.classifier_verdict.outcome == 'failure'" "$WF" \
   && grep -q "steps.risk.outcome == 'failure'" "$WF" \
   && grep -q "steps.setup_node.outcome == 'failure'" "$WF" \
-  && grep -q "steps.checkout.outcome == 'failure'" "$WF"; then
-  echo "✓ $WF revokes an existing arm under always() when a gating or prerequisite step errors"
+  && grep -q "steps.checkout.outcome == 'failure'" "$WF" \
+  && grep -A40 'name: Revoke auto-merge if gates errored' "$WF" | grep -q 'skipping stale revoke'; then
+  echo "✓ $WF revokes an existing arm under always() when a gating or prerequisite step errors (head-ownership-guarded)"
 else
-  echo "✗ $WF error-revoke step missing or not covering gate + prerequisite (checkout/setup-node) failures"
+  echo "✗ $WF error-revoke step missing, not covering gate + prerequisite failures, or lacking the head-ownership guard"
   failed=1
 fi
 
