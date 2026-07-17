@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from check_draft_gate_triggers import (
+from selftest.check_draft_gate_triggers import (
     DRAFT_GATE_EXPR,
     DRAFT_GATED_REUSABLES,
     GITHUB_DEFAULT_PR_TYPES,
@@ -186,6 +186,50 @@ def test_unparseable_yaml_is_left_to_actionlint(tmp_path):
 
 def test_pr_types_defaults_when_types_absent():
     assert pr_types(yaml.safe_load(NO_TYPES_AT_ALL)) == GITHUB_DEFAULT_PR_TYPES
+
+
+# --- every `on:` shape must be readable, or the checker silently stops checking -----
+
+
+def test_triggers_handles_string_form():
+    """`on: pull_request` is valid and used in the wild."""
+    assert "pull_request" in triggers(yaml.safe_load("on: pull_request\njobs: {}\n"))
+
+
+def test_triggers_handles_list_form():
+    """`on: [pull_request, push]` is valid and used in the wild."""
+    assert "pull_request" in triggers(yaml.safe_load("on: [pull_request, push]\njobs: {}\n"))
+
+
+def test_triggers_returns_empty_when_no_on_key():
+    assert triggers({"jobs": {}}) == {}
+
+
+def test_string_form_caller_is_still_checked(tmp_path):
+    """A draft-gated caller using the string form must not slip through unchecked."""
+    body = (
+        "on: pull_request\n"
+        "jobs:\n"
+        "  review:\n"
+        "    uses: topcoder1/ci-workflows/.github/workflows/claude-review.yml@main\n"
+    )
+    d = write(tmp_path, "stringform.yml", body)
+    assert len(check_dir(d, DRAFT_GATED_REUSABLES)) == 1
+
+
+def test_pr_types_defaults_when_types_is_empty_list():
+    wf = yaml.safe_load("on:\n  pull_request:\n    types: []\njobs: {}\n")
+    assert pr_types(wf) == GITHUB_DEFAULT_PR_TYPES
+
+
+def test_pr_types_defaults_when_pull_request_is_not_a_mapping():
+    assert pr_types(yaml.safe_load("on: pull_request\njobs: {}\n")) == GITHUB_DEFAULT_PR_TYPES
+
+
+def test_draft_gate_reason_tolerates_malformed_jobs():
+    # A workflow mid-edit (or a template with a null job) must not crash the whole check.
+    assert draft_gate_reason({"jobs": None}, DRAFT_GATED_REUSABLES) is None
+    assert draft_gate_reason({"jobs": {"a": None}}, DRAFT_GATED_REUSABLES) is None
 
 
 # --- exit codes: the check must actually fail the job ------------------------------

@@ -166,17 +166,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # The checker lives here, in ci-workflows, so consumers get fixes without a
-      # re-install — the exact gap that made this bug survive two central fixes
-      # (ci-workflows#115, dotclaude#156 both landed 2026-07-15; a sweep on 2026-07-16
-      # still found 21 installed repos vulnerable, because neither was retroactive).
-      # ci-workflows is public, so the caller's default GITHUB_TOKEN can check it out.
+      # The checker lives in ci-workflows so consumers get fixes without a re-install --
+      # the exact gap that made this bug survive two central fixes (ci-workflows#115 and
+      # dotclaude#156 both landed 2026-07-15; a sweep on 2026-07-16 still found 21
+      # installed repos vulnerable, because neither was retroactive).
       #
-      # Pinned to @main deliberately: on ci-workflows' OWN pull_request self-test run,
-      # this fetches main's checker rather than the PR's. That is intended — the PR's
-      # checker is exercised by selftest.yml, and using main here keeps consumers and
-      # the self-test on identical logic.
+      # Self-reference: in a reusable, `github.repository` is the CALLER's repo. When the
+      # caller IS ci-workflows (this workflow's own pull_request self-test), the checker is
+      # already in the checkout above, and fetching it from @main would be wrong twice
+      # over: it would miss the PR's changes, and on the PR that first adds the checker
+      # @main does not have the file at all -- the job died with "No such file or
+      # directory". So: use the local copy here, fetch @main everywhere else.
+      # ci-workflows is public, so a consumer's default GITHUB_TOKEN can check it out.
       - name: Check out the checker
+        if: ${{ github.repository != 'topcoder1/ci-workflows' }}
         uses: actions/checkout@v6
         with:
           repository: topcoder1/ci-workflows
@@ -189,9 +192,15 @@ jobs:
         shell: bash
 
       - name: Check draft-gate triggers
+        env:
+          IS_SELF: ${{ github.repository == 'topcoder1/ci-workflows' }}
         run: |
-          python3 .ci-workflows-checker/selftest/check_draft_gate_triggers.py \
-            .github/workflows
+          if [ "$IS_SELF" = "true" ]; then
+            checker=selftest/check_draft_gate_triggers.py
+          else
+            checker=.ci-workflows-checker/selftest/check_draft_gate_triggers.py
+          fi
+          python3 "$checker" .github/workflows
         shell: bash
 
   prettier:
