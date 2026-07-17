@@ -39,9 +39,12 @@
 #      blocked glob ⇒ blocked=1 — proves the gate inherits classify.mjs
 #      semantics (minimatch, dot:true, nocase on gating classes) instead
 #      of reimplementing them.
-#  10. a FAILED label read degrades to "no label" but the direct
-#      risk-paths verdict still gates (label is fail-open only because
-#      Signal 2 is authoritative and fail-closed).
+#  10. FAIL CLOSED on an unreadable label set — with blocked files AND
+#      with clean files. A hand-applied risk label is an independent
+#      signal the file classification cannot reconstruct, so a failed
+#      label read must never degrade to "no label" (codex round-3 P1:
+#      the clean-files variant is the one a blocked-path-only case
+#      masks).
 #  11. DEFAULT-BRANCH FALLBACK (codex round-2 P1): base ref lacks the
 #      file (release branch predating the policy) ⇒ the default
 #      branch's policy is applied — a legacy base must not dodge it.
@@ -342,13 +345,23 @@ printf '%s\n' "docs/SECRETS.md" > "$STUB_FILES"
 run_gate
 expect_verdict "docs/SECRETS.md hits lowercase '**/secrets*' (classify.mjs nocase inherited)" 1 "risk:blocked" "risk-paths"
 
-# 10. label read failure degrades to no-label, direct verdict still gates.
+# 10. FAIL CLOSED on an unreadable label set — a hand-applied risk label
+#     is an independent signal the file check cannot reconstruct. The
+#     clean-files variant is the load-bearing one: with blocked files,
+#     Signal 2 would mask a fail-open here (codex round-3 P1).
 reset_case
 STUB_LABELS_RC=1
 STUB_RISK_FILE="$T/risk-fixture.yml"
 printf '%s\n' "src/wxa_secrets/store.py" > "$STUB_FILES"
 run_gate
-expect_verdict "failed label read + blocked path ⇒ still blocked (risk-paths)" 1 "risk:blocked" "risk-paths"
+expect_fail_closed "unreadable label set (blocked path) fails closed" "could not read PR labels"
+
+reset_case
+STUB_LABELS_RC=1
+STUB_RISK_FILE="$T/risk-fixture.yml"
+printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+run_gate
+expect_fail_closed "unreadable label set (clean files) fails closed — hand-applied label can't be silently lost" "could not read PR labels"
 
 # 11. DEFAULT-BRANCH FALLBACK: base ref (legacy release branch) lacks the
 #     file; the default branch's policy must be applied — a legacy base

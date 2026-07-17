@@ -285,11 +285,19 @@ jobs:
 
           # Signal 1 (belt-and-suspenders): a risk:* label that already
           # landed. Query the API, not the event payload — labels in the
-          # event snapshot are frozen at event time. A failed read
-          # degrades to "no label": Signal 2 below is the authoritative
-          # gate and fails closed on its own errors.
-          labels=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/labels" \
-            --jq '.[].name' 2>/dev/null || echo "")
+          # event snapshot are frozen at event time. A HAND-APPLIED risk
+          # label is an independent signal the file classification below
+          # cannot reconstruct (a human may know context no path glob
+          # carries), so an unreadable label set FAILS CLOSED after
+          # retries rather than degrading to "no label" (codex round-3
+          # P1 — the earlier fail-open here was masked by Signal 2 in
+          # the blocked-path case but lost hand-applied labels on
+          # benign-path PRs).
+          labels=$(retry gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/labels" \
+            --jq '.[].name') || {
+            echo "::error::could not read PR labels after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+            exit 1
+          }
           if echo "$labels" | grep -qx 'risk:blocked'; then
             blocked=1; verdict_label="risk:blocked"; verdict_source="label"
           elif echo "$labels" | grep -qx 'risk:sensitive'; then
