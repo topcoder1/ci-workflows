@@ -9,7 +9,8 @@ name: Claude-author Auto-merge (reusable)
 #     without us having to keep a parallel regex). This verdict is computed BY
 #     THIS WORKFLOW at decision time: it runs the same classify.mjs that
 #     pr-classify.yml runs, against the rules file read from the PR's BASE
-#     branch. The pr-classify `risk:*` label is still honored as a
+#     branch (falling back to the default branch's file when the base ref
+#     predates it). The pr-classify `risk:*` label is still honored as a
 #     belt-and-suspenders second signal (covers hand-applied labels), but it
 #     is no longer the only carrier — pr-classify labels via GITHUB_TOKEN,
 #     whose events never trigger workflows, so label-only gating was a TOCTOU
@@ -241,12 +242,25 @@ jobs:
       #
       # Fail-closed rules: risk-paths.yml unreadable for any reason other
       # than a definitive 404 ⇒ fail the run (auto-merge never armed);
-      # classify.mjs guard/parse errors ⇒ fail; changed-file listing
-      # truncated at the REST 3000-file cap ⇒ fail. A 404 means the repo
-      # carries no repo-specific policy — the global risk-tier regex
-      # below still gates, which matches pre-classifier behavior. No
-      # `checks: read` is needed for any of this (deliberate: e.g. the
-      # wxa-secrets caller omits it to keep the Codex bypass disabled).
+      # classify.mjs guard/parse errors OR output outside the known class
+      # enum ⇒ fail; changed-file listing truncated at the REST 3000-file
+      # cap ⇒ fail. A 404 on the BASE ref falls back to the DEFAULT
+      # branch's risk-paths.yml (a release/legacy base that predates the
+      # policy file must not dodge the repo's policy — codex round-2 P1);
+      # only when the file is absent there too does the repo count as
+      # policy-free, and then the global risk-tier regex below still
+      # gates, which matches pre-classifier behavior (automerge-only
+      # repos without pr-classify stay supported). No `checks: read` is
+      # needed for any of this (deliberate: e.g. the wxa-secrets caller
+      # omits it to keep the Codex bypass disabled).
+      #
+      # Deliberately NOT pinned: classify.mjs is fetched from this repo's
+      # default branch and deps are pinned to majors (yaml@2 minimatch@10)
+      # — the SAME source and pins pr-classify.yml uses. Pinning only this
+      # side to an immutable ref would reintroduce matcher drift between
+      # the two workflows, which is the exact bug class this gate exists
+      # to close; callers reference the reusable @main anyway, so a pin
+      # here adds no supply-chain isolation in practice.
       - name: Setup Node (risk-paths classification)
         if: steps.detect.outputs.claude_authored == '1'
         uses: actions/setup-node@v6
@@ -260,12 +274,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           blocked=0
           verdict_label=""
           verdict_source=""
+          rules_ref="$BASE_REF"
 
           # Signal 1 (belt-and-suspenders): a risk:* label that already
           # landed. Query the API, not the event payload — labels in the
@@ -281,30 +297,43 @@ jobs:
           fi
 
           # Signal 2 (authoritative, race-free): classify the changed
-          # files ourselves against the BASE branch's risk-paths.yml.
+          # files ourselves against the base branch's risk-paths.yml.
           if [ "$blocked" -eq 0 ]; then
-            # Base-branch rules file. A 404 is definitive (no repo-specific
-            # policy → the global regex step still gates); anything else
-            # retries, then FAILS CLOSED — never arm auto-merge under an
-            # unreadable policy.
+            # Rules file for a given ref. A 404 is definitive (file absent
+            # at that ref); anything else retries, then FAILS CLOSED —
+            # never arm auto-merge under an unreadable policy. Sets
+            # rp_state=present|absent and rp_b64 via globals.
             rp_state=""
             rp_b64=""
-            for i in 1 2 3; do
-              rp_err=$(mktemp)
-              if rp_b64=$(gh api -X GET \
-                    "repos/${GITHUB_REPOSITORY}/contents/.github/risk-paths.yml" \
-                    -f ref="$BASE_REF" --jq '.content' 2>"$rp_err"); then
-                rp_state="present"; rm -f "$rp_err"; break
-              fi
-              if grep -q 'HTTP 404' "$rp_err"; then
-                rp_state="absent"; rm -f "$rp_err"; break
-              fi
-              cat "$rp_err" >&2; rm -f "$rp_err"
-              [ "$i" -lt 3 ] && sleep $((i * 5))
-            done
-            if [ -z "$rp_state" ]; then
-              echo "::error::could not read .github/risk-paths.yml@${BASE_REF} after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+            read_rules() {
+              local ref="$1" i rp_err
+              rp_state=""
+              for i in 1 2 3; do
+                rp_err=$(mktemp)
+                if rp_b64=$(gh api -X GET \
+                      "repos/${GITHUB_REPOSITORY}/contents/.github/risk-paths.yml" \
+                      -f ref="$ref" --jq '.content' 2>"$rp_err"); then
+                  rp_state="present"; rm -f "$rp_err"; return 0
+                fi
+                if grep -q 'HTTP 404' "$rp_err"; then
+                  rp_state="absent"; rm -f "$rp_err"; return 0
+                fi
+                cat "$rp_err" >&2; rm -f "$rp_err"
+                [ "$i" -lt 3 ] && sleep $((i * 5))
+              done
+              echo "::error::could not read .github/risk-paths.yml@${ref} after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
               exit 1
+            }
+            read_rules "$rules_ref"
+            # Absent on the base ref ⇒ fall back to the DEFAULT branch's
+            # policy. A PR targeting a release/legacy branch created before
+            # risk-paths.yml existed must not dodge the repo's policy
+            # (codex round-2 P1). Only when the default branch lacks the
+            # file too is the repo genuinely policy-free.
+            if [ "$rp_state" = "absent" ] && [ -n "$DEFAULT_BRANCH" ] && [ "$rules_ref" != "$DEFAULT_BRANCH" ]; then
+              echo "No .github/risk-paths.yml on ${rules_ref} — falling back to the default branch's policy (${DEFAULT_BRANCH})."
+              rules_ref="$DEFAULT_BRANCH"
+              read_rules "$rules_ref"
             fi
 
             if [ "$rp_state" = "present" ]; then
@@ -336,14 +365,24 @@ jobs:
               retry fetch_mjs | base64 -d > "$work/classify.mjs"
               (cd "$work" && npm install --no-save --silent yaml@2 minimatch@10 >/dev/null)
               class=$(cd "$work/repo" && printf '%s\n' "$changed" | node "$work/classify.mjs")
-              echo "risk-paths.yml@${BASE_REF} verdict: $class"
+              echo "risk-paths.yml@${rules_ref} verdict: $class"
+              # Closed enum: anything outside the classifier's documented
+              # classes (a garbled/partial line, an empty string, a future
+              # class this workflow doesn't know) must FAIL CLOSED, not
+              # fall through as benign (codex round-2 P2).
               case "$class" in
                 blocked|sensitive)
                   blocked=1; verdict_label="risk:$class"; verdict_source="risk-paths"
                   ;;
+                standard|safe_test|safe_deps|safe_config|trivial)
+                  ;;
+                *)
+                  echo "::error::classify.mjs printed unexpected class '$class' — refusing to arm auto-merge (fail closed)."
+                  exit 1
+                  ;;
               esac
             else
-              echo "No .github/risk-paths.yml on ${BASE_REF} — no repo-specific policy; the global risk-tier regex still applies."
+              echo "No .github/risk-paths.yml on ${BASE_REF} or the default branch — no repo-specific policy; the global risk-tier regex still applies."
             fi
           fi
 
@@ -355,7 +394,7 @@ jobs:
           if [ "$blocked" -eq 1 ]; then
             case "$verdict_source" in
               label) why="labeled $verdict_label by pr-classify" ;;
-              *) why="classified $verdict_label against risk-paths.yml@${BASE_REF}" ;;
+              *) why="classified $verdict_label against risk-paths.yml@${rules_ref}" ;;
             esac
             echo "::warning::PR $why — auto-merge refused (manual click-merge required; no label or status-check bypass applies)"
           fi
@@ -740,6 +779,8 @@ jobs:
           # `automerge_pat` secret docstring above for the full rationale.
           GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           METHOD: ${{ inputs.merge_method }}
           REASON: ${{ steps.detect.outputs.reason }}
           RISKY: ${{ steps.risk.outputs.risky }}
@@ -760,7 +801,25 @@ jobs:
           else
             echo "::warning::Auth: GITHUB_TOKEN fallback — downstream push workflows (e.g. deploy) will be SILENCED on merge. Wire secrets.automerge_pat in the caller to fix."
           fi
-          gh pr merge --auto --"$METHOD" "$PR_URL"
+          # Bind the arm to the exact revision this run's gates evaluated
+          # (codex round-2 P1). --match-head-commit maps to GraphQL
+          # enablePullRequestAutoMerge.expectedHeadOid: GitHub rejects the
+          # arm atomically if the head moved between this event and now, so
+          # a push that lands mid-run can never inherit an arm decided on
+          # older files — its own synchronize run re-classifies and arms.
+          # (Residual, unchanged by this workflow: once armed, GitHub keeps
+          # auto-merge across later pushes; a post-arm push is handled by
+          # the synchronize re-run's classify+revoke, which wins while
+          # required checks are still running on the new head.)
+          if ! gh pr merge --auto --"$METHOD" --match-head-commit "$HEAD_SHA" "$PR_URL"; then
+            now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+            if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+              echo "::notice::head moved (${HEAD_SHA} → ${now}) between this event and arming — not arming from this run; the newer push's own run re-classifies and (re)arms."
+              exit 0
+            fi
+            echo "::error::enable auto-merge failed and the head still matches ${HEAD_SHA} — investigate."
+            exit 1
+          fi
 
       # Sticky comment when classifier marked the PR risk:blocked. Distinct
       # from the regex-based comment below — classifier-blocked has no

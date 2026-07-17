@@ -28,9 +28,9 @@
 #   5. BASE-REF PINNING: every rules read must carry ref=<base> (the gh
 #      stub hard-fails otherwise), and a non-default base ref works — a
 #      PR must never be able to consult its own (head) risk file.
-#   6. no risk-paths.yml on base (404) ⇒ blocked=0; the global regex
-#      step still gates downstream (that regex has its own selftest,
-#      test_automerge_risk_patterns.sh).
+#   6. no risk-paths.yml on base OR default branch (404 twice) ⇒
+#      blocked=0; the global regex step still gates downstream (that
+#      regex has its own selftest, test_automerge_risk_patterns.sh).
 #   7. FAIL CLOSED: rules file unreadable (non-404 API failure) ⇒ the
 #      step exits nonzero — auto-merge is never armed under an
 #      unreadable policy.
@@ -42,6 +42,15 @@
 #  10. a FAILED label read degrades to "no label" but the direct
 #      risk-paths verdict still gates (label is fail-open only because
 #      Signal 2 is authoritative and fail-closed).
+#  11. DEFAULT-BRANCH FALLBACK (codex round-2 P1): base ref lacks the
+#      file (release branch predating the policy) ⇒ the default
+#      branch's policy is applied — a legacy base must not dodge it.
+#  12. FAIL CLOSED on classifier-output enum violation (codex round-2
+#      P2): classify.mjs printing anything outside the documented class
+#      set ⇒ nonzero, never silently benign.
+#
+# The enable-side companion (codex round-2 P1): the arm is bound to the
+# event head SHA via `--match-head-commit`, asserted structurally below.
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_riskfile_gate.sh
@@ -72,10 +81,16 @@ for wf in .github/workflows/pr-classify.yml "$WF"; do
     failed=1
   fi
 done
-if grep -q -- '-f ref="\$BASE_REF"' "$WF"; then
-  echo "✓ $WF reads risk-paths.yml pinned to the PR base ref"
+if grep -q -- '-f ref="\$ref"' "$WF" && grep -q 'read_rules "\$rules_ref"' "$WF"; then
+  echo "✓ $WF reads risk-paths.yml pinned to an explicit ref (base, then default-branch fallback)"
 else
-  echo "✗ $WF does not pin the risk-paths.yml read to \$BASE_REF"
+  echo "✗ $WF does not pin the risk-paths.yml read to an explicit ref"
+  failed=1
+fi
+if grep -q -- '--match-head-commit "\$HEAD_SHA"' "$WF"; then
+  echo "✓ $WF binds the auto-merge arm to the event head SHA (--match-head-commit)"
+else
+  echo "✗ $WF does not bind the arm to the classified head SHA — a mid-run push could inherit the arm"
   failed=1
 fi
 
@@ -103,13 +118,17 @@ echo "✓ extracted classifier-verdict step ($(wc -l < "$T/gate.sh" | tr -d ' ')
 #     backoffs; `npm` links a prebuilt node_modules so each gate run is
 #     offline and fast while the shipped `npm install` line still executes.
 #     Knobs (env):
-#       STUB_LABELS     — newline-separated label names ('' = none)
-#       STUB_LABELS_RC  — nonzero: the labels call fails (API blip)
-#       STUB_RISK_FILE  — path to the BASE-branch risk-paths.yml fixture;
-#                         empty = 404 (file absent on base)
-#       STUB_RISK_RC    — nonzero: contents call fails with a NON-404 error
-#       STUB_FILES      — path to the newline-separated changed-file list
-#       REAL_CLASSIFY   — path to the real classify.mjs served to the gate
+#       STUB_LABELS            — newline-separated label names ('' = none)
+#       STUB_LABELS_RC         — nonzero: the labels call fails (API blip)
+#       STUB_RISK_FILE         — BASE-ref risk-paths.yml fixture; '' = 404
+#       STUB_RISK_DEFAULT_FILE — DEFAULT-branch fixture; '' = 404
+#       STUB_RISK_RC           — nonzero: base-ref read fails NON-404
+#       STUB_FILES             — newline-separated changed-file list (path)
+#       STUB_CLASSIFY_FILE     — classifier served to the gate (defaults to
+#                                the real classify.mjs via REAL_CLASSIFY)
+#
+#     Any rules read whose ref is neither the base ref nor the default
+#     branch exits 64 — pinning is asserted on EVERY case, not just one.
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
@@ -121,16 +140,29 @@ case "$args" in
     printf '%s\n' "${STUB_LABELS:-}"
     ;;
   *contents/.github/scripts/classify.mjs*)
-    base64 < "$REAL_CLASSIFY"
+    base64 < "${STUB_CLASSIFY_FILE:-$REAL_CLASSIFY}"
     ;;
   *contents/.github/risk-paths.yml*)
-    case "$args" in
-      *"ref=${BASE_REF}"*) ;;
-      *) echo "gh-stub: risk-paths read did not pin ref=${BASE_REF} (head/default-branch read?): $args" >&2; exit 64 ;;
+    _ref=""
+    case "$args" in *"ref=${BASE_REF}"*) _ref=base ;; esac
+    if [ -z "$_ref" ]; then
+      case "$args" in *"ref=${DEFAULT_BRANCH}"*) _ref=default ;; esac
+    fi
+    case "$_ref" in
+      base)
+        [ "${STUB_RISK_RC:-0}" != "0" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
+        [ -z "${STUB_RISK_FILE:-}" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        base64 < "$STUB_RISK_FILE"
+        ;;
+      default)
+        [ -z "${STUB_RISK_DEFAULT_FILE:-}" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        base64 < "$STUB_RISK_DEFAULT_FILE"
+        ;;
+      *)
+        echo "gh-stub: risk-paths read with an unexpected ref (head read?): $args" >&2
+        exit 64
+        ;;
     esac
-    [ "${STUB_RISK_RC:-0}" != "0" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
-    [ -z "${STUB_RISK_FILE:-}" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-    base64 < "$STUB_RISK_FILE"
     ;;
   *pulls/*/files*)
     cat "$STUB_FILES"
@@ -159,12 +191,14 @@ REAL_CLASSIFY="$PWD/$CLASSIFY"
 # ---------------------------------------------------------------------------
 # Runner + assertions.
 # ---------------------------------------------------------------------------
-STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_RC=0
-STUB_FILES="$T/files.txt"; CASE_BASE_REF="main"
+STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
+STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""
+STUB_FILES="$T/files.txt"; CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
 
 reset_case() {
-  STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_RC=0
-  CASE_BASE_REF="main"
+  STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
+  STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""
+  CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
   : > "$STUB_FILES"
 }
 
@@ -175,9 +209,11 @@ run_gate() {
   GATE_LOG=$(cd "$T" && \
     PATH="$T/bin:$PATH" \
     GITHUB_REPOSITORY="acme/fixture" PR=123 BASE_REF="$CASE_BASE_REF" \
+    DEFAULT_BRANCH="$CASE_DEFAULT_BRANCH" \
     GITHUB_OUTPUT="$OUT_FILE" GH_TOKEN=stub \
     STUB_LABELS="$STUB_LABELS" STUB_LABELS_RC="$STUB_LABELS_RC" \
-    STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_RC="$STUB_RISK_RC" \
+    STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_DEFAULT_FILE="$STUB_RISK_DEFAULT_FILE" \
+    STUB_RISK_RC="$STUB_RISK_RC" STUB_CLASSIFY_FILE="$STUB_CLASSIFY_FILE" \
     STUB_FILES="$STUB_FILES" REAL_CLASSIFY="$REAL_CLASSIFY" \
     bash gate.sh 2>&1)
   GATE_RC=$?
@@ -275,12 +311,13 @@ printf '%s\n' "src/wxa_secrets/store.py" > "$STUB_FILES"
 run_gate
 expect_verdict "rules read pinned to non-default base ref (release/1.2)" 1 "risk:blocked" "risk-paths"
 
-# 6. no risk-paths.yml on base (404) ⇒ not blocked here; global regex
-#    still gates downstream.
+# 6. no risk-paths.yml on base OR default branch ⇒ not blocked here;
+#    global regex still gates downstream.
 reset_case
+CASE_BASE_REF="release/0.9"
 printf '%s\n' "src/anything.py" > "$STUB_FILES"
 run_gate
-expect_verdict "risk-paths.yml absent on base (404) ⇒ falls through to regex" 0 "" ""
+expect_verdict "risk-paths.yml absent on base AND default (404×2) ⇒ falls through to regex" 0 "" ""
 
 # 7. FAIL CLOSED: rules unreadable (non-404).
 reset_case
@@ -312,6 +349,27 @@ STUB_RISK_FILE="$T/risk-fixture.yml"
 printf '%s\n' "src/wxa_secrets/store.py" > "$STUB_FILES"
 run_gate
 expect_verdict "failed label read + blocked path ⇒ still blocked (risk-paths)" 1 "risk:blocked" "risk-paths"
+
+# 11. DEFAULT-BRANCH FALLBACK: base ref (legacy release branch) lacks the
+#     file; the default branch's policy must be applied — a legacy base
+#     must not dodge the repo's policy (codex round-2 P1).
+reset_case
+CASE_BASE_REF="release/0.9"
+STUB_RISK_DEFAULT_FILE="$T/risk-fixture.yml"
+printf '%s\n' "src/wxa_secrets/store.py" > "$STUB_FILES"
+run_gate
+expect_verdict "base 404 ⇒ default branch policy applied (legacy base can't dodge)" 1 "risk:blocked" "risk-paths"
+
+# 12. FAIL CLOSED on classifier-output enum violation: a classifier that
+#     prints something outside the documented class set must never be
+#     read as benign (codex round-2 P2).
+reset_case
+printf '%s\n' "console.log('bogus');" > "$T/bogus-classify.mjs"
+STUB_CLASSIFY_FILE="$T/bogus-classify.mjs"
+STUB_RISK_FILE="$T/risk-fixture.yml"
+printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+run_gate
+expect_fail_closed "classifier output outside the class enum fails closed" "unexpected class"
 
 echo ""
 if [ "$failed" -gt 0 ]; then
