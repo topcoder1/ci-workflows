@@ -4,16 +4,22 @@ name: Claude-author Auto-merge (reusable)
 # (detected via branch prefix `claude/*`, `Co-Authored-By: Claude` trailer in
 # any PR commit, or the `auto-merge` label), provided the PR is neither:
 #
-#  1. Labeled `risk:blocked` OR `risk:sensitive` by pr-classify.yml (canonical
-#     signals — the caller's risk-paths.yml `blocked:` / `sensitive:` lists
-#     determine these; covers any repo-specific path without us having to keep a
-#     parallel regex). Both mean manual click-merge: `blocked` is a hard
-#     privilege-escalation block, `sensitive` is a high-impact path the caller
-#     flags for human review (agent runtime, schema, migrations, etc.) — the
-#     reusable's global risk-tier regex (item 2) does NOT know a caller's
-#     repo-specific `sensitive:` paths, so honoring the label is the only way
-#     these get gated. `risk:sensitive` is a no-op for callers without a
-#     `sensitive:` list (label never applied).
+#  1. Classified `blocked` OR `sensitive` by the caller's .github/risk-paths.yml
+#     (the `blocked:` / `sensitive:` lists — covers any repo-specific path
+#     without us having to keep a parallel regex). This verdict is computed BY
+#     THIS WORKFLOW at decision time: it runs the same classify.mjs that
+#     pr-classify.yml runs, against the rules file read from the PR's BASE
+#     branch. The pr-classify `risk:*` label is still honored as a
+#     belt-and-suspenders second signal (covers hand-applied labels), but it
+#     is no longer the only carrier — pr-classify labels via GITHUB_TOKEN,
+#     whose events never trigger workflows, so label-only gating was a TOCTOU
+#     race (see the classifier-verdict step below). Both classes mean manual
+#     click-merge: `blocked` is a hard privilege-escalation block, `sensitive`
+#     is a high-impact path the caller flags for human review (agent runtime,
+#     schema, migrations, etc.) — the reusable's global risk-tier regex
+#     (item 2) does NOT know a caller's repo-specific `sensitive:` paths, so
+#     the direct risk-paths read is the only way these get gated. `sensitive`
+#     is a no-op for callers without a `sensitive:` list.
 #
 #  2. Touching any risk-tier path category from the global CLAUDE.md policy:
 #     - auth / login / signin / signup / logout / session(s) / oauth /
@@ -201,57 +207,163 @@ jobs:
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
           echo "Detection: claude_authored=$claude reason=$reason"
 
-      # Honor the pr-classify.yml verdict before doing per-path regex
-      # matching of our own. If the classifier labeled this PR
-      # `risk:blocked`, the policy is unambiguous: manual click-merge
-      # required, no bypass. This is the canonical signal — covers any
-      # future blocked path a caller's risk-paths.yml adds without us
-      # having to keep a parallel regex in sync. (Belt-and-suspenders
-      # with the regex below for the race window described next.)
+      # Classifier verdict, computed race-free at decision time.
       #
-      # Race window: pr-classify and this workflow both fire on
-      # `pull_request` opened. If we run faster than the classifier, we
-      # read `blocked=0` and fall through to the regex check below. The
-      # caller wires `labeled` into trigger types, so once the
-      # classifier applies the label this workflow re-runs and the
-      # revoke step below disables any auto-merge enabled on the first
-      # pass. The regex still catches the two paths we observed
-      # slipping through (.github/risk-paths.yml + CODEOWNERS) on the
-      # first run for that race window.
+      # HISTORY — why this step no longer trusts the label alone.
+      # pr-classify and this workflow both fire on the same pull_request
+      # event. The old design read the live risk:* labels and documented
+      # this mitigation: "the caller wires `labeled` into trigger types,
+      # so once the classifier applies the label this workflow re-runs
+      # and the revoke step disables any auto-merge enabled on the first
+      # pass." That re-run is structurally unreachable: pr-classify
+      # labels with GITHUB_TOKEN, and GITHUB_TOKEN-attributed events
+      # NEVER trigger workflows (GitHub's recursion prevention). So when
+      # this workflow won the race, nothing revoked the arm. Evidence,
+      # whois-api-llc/wxa-secrets#27 (2026-07-17 UTC): both workflows
+      # fired on ready_for_review at 00:40:37; this one read live labels
+      # at 00:40:43 (none yet), armed at 00:40:46; pr-classify applied
+      # risk:blocked at 00:40:50 — 4s late — and the PR merged at
+      # 00:42:30 when required checks went green. Every repo-specific
+      # blocked:/sensitive: path not covered by the global regex below
+      # had this race.
+      #
+      # FIX — compute the verdict ourselves, synchronously:
+      #
+      #  1. Belt-and-suspenders: honor a live risk:blocked/risk:sensitive
+      #     label if one already landed (covers hand-applied labels; a
+      #     label can only ADD gating here, never remove it).
+      #  2. Authoritative: read .github/risk-paths.yml from the PR's
+      #     BASE branch — NOT the PR head, so a PR cannot edit its own
+      #     risk file to escape — and classify the PR's changed files
+      #     with the same classify.mjs pr-classify fetches (both pull it
+      #     from topcoder1/ci-workflows@default-branch: one matcher,
+      #     zero glob-semantics drift). blocked/sensitive ⇒ refuse.
+      #
+      # Fail-closed rules: risk-paths.yml unreadable for any reason other
+      # than a definitive 404 ⇒ fail the run (auto-merge never armed);
+      # classify.mjs guard/parse errors ⇒ fail; changed-file listing
+      # truncated at the REST 3000-file cap ⇒ fail. A 404 means the repo
+      # carries no repo-specific policy — the global risk-tier regex
+      # below still gates, which matches pre-classifier behavior. No
+      # `checks: read` is needed for any of this (deliberate: e.g. the
+      # wxa-secrets caller omits it to keep the Codex bypass disabled).
+      - name: Setup Node (risk-paths classification)
+        if: steps.detect.outputs.claude_authored == '1'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
       - name: Check classifier verdict
         id: classifier_verdict
         if: steps.detect.outputs.claude_authored == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          # Query the API instead of the event payload — labels in the
-          # event snapshot are frozen at event time, but the classifier
-          # may have applied `risk:blocked` after the event fired.
-          labels=$(gh api "/repos/${{ github.repository }}/issues/$PR/labels" \
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
+          blocked=0
+          verdict_label=""
+          verdict_source=""
+
+          # Signal 1 (belt-and-suspenders): a risk:* label that already
+          # landed. Query the API, not the event payload — labels in the
+          # event snapshot are frozen at event time. A failed read
+          # degrades to "no label": Signal 2 below is the authoritative
+          # gate and fails closed on its own errors.
+          labels=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/labels" \
             --jq '.[].name' 2>/dev/null || echo "")
-          # Canonical "manual merge" signals from pr-classify.yml. risk:blocked
-          # = hard privilege-escalation block (no bypass). risk:sensitive =
-          # high-impact caller-specific path (agent runtime, schema, migrations)
-          # the global risk-tier regex below can't see, so the label is the only
-          # gate. Both refuse auto-merge here; the human click-merges after
-          # review. risk:sensitive is a no-op for callers without a `sensitive:`
-          # list (label never applied).
           if echo "$labels" | grep -qx 'risk:blocked'; then
-            echo "blocked=1" >> "$GITHUB_OUTPUT"
-            echo "verdict_label=risk:blocked" >> "$GITHUB_OUTPUT"
-            echo "::warning::PR labeled risk:blocked by pr-classify — auto-merge refused (no bypass applies)"
+            blocked=1; verdict_label="risk:blocked"; verdict_source="label"
           elif echo "$labels" | grep -qx 'risk:sensitive'; then
-            echo "blocked=1" >> "$GITHUB_OUTPUT"
-            echo "verdict_label=risk:sensitive" >> "$GITHUB_OUTPUT"
-            echo "::warning::PR labeled risk:sensitive by pr-classify — auto-merge refused (manual review-and-merge required)"
-          else
-            echo "blocked=0" >> "$GITHUB_OUTPUT"
+            blocked=1; verdict_label="risk:sensitive"; verdict_source="label"
+          fi
+
+          # Signal 2 (authoritative, race-free): classify the changed
+          # files ourselves against the BASE branch's risk-paths.yml.
+          if [ "$blocked" -eq 0 ]; then
+            # Base-branch rules file. A 404 is definitive (no repo-specific
+            # policy → the global regex step still gates); anything else
+            # retries, then FAILS CLOSED — never arm auto-merge under an
+            # unreadable policy.
+            rp_state=""
+            rp_b64=""
+            for i in 1 2 3; do
+              rp_err=$(mktemp)
+              if rp_b64=$(gh api -X GET \
+                    "repos/${GITHUB_REPOSITORY}/contents/.github/risk-paths.yml" \
+                    -f ref="$BASE_REF" --jq '.content' 2>"$rp_err"); then
+                rp_state="present"; rm -f "$rp_err"; break
+              fi
+              if grep -q 'HTTP 404' "$rp_err"; then
+                rp_state="absent"; rm -f "$rp_err"; break
+              fi
+              cat "$rp_err" >&2; rm -f "$rp_err"
+              [ "$i" -lt 3 ] && sleep $((i * 5))
+            done
+            if [ -z "$rp_state" ]; then
+              echo "::error::could not read .github/risk-paths.yml@${BASE_REF} after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+              exit 1
+            fi
+
+            if [ "$rp_state" = "present" ]; then
+              # Changed-file names via the paginated files API (same call
+              # and same 3000-file fail-closed cap as pr-classify.yml).
+              changed=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+                --paginate --jq '.[].filename') || {
+                echo "::error::could not list PR changed files after 3 attempts — refusing to arm auto-merge (fail closed)."
+                exit 1
+              }
+              if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
+                echo "::error::PR changes 3000+ files — file listing is truncated, cannot classify. Merge manually."
+                exit 1
+              fi
+
+              # Same classifier pr-classify.yml runs, fetched from the same
+              # place, run in a scratch dir so the PR checkout's own (head)
+              # risk-paths.yml is never consulted. classify.mjs failures
+              # (bracket/negation guards, YAML parse) exit nonzero ⇒ this
+              # step fails ⇒ fail closed, identical to pr-classify staying
+              # red on the same repo.
+              work=$(mktemp -d)
+              mkdir -p "$work/repo/.github"
+              printf '%s' "$rp_b64" | base64 -d > "$work/repo/.github/risk-paths.yml"
+              fetch_mjs() {
+                gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs" \
+                  --jq '.content'
+              }
+              retry fetch_mjs | base64 -d > "$work/classify.mjs"
+              (cd "$work" && npm install --no-save --silent yaml@2 minimatch@10 >/dev/null)
+              class=$(cd "$work/repo" && printf '%s\n' "$changed" | node "$work/classify.mjs")
+              echo "risk-paths.yml@${BASE_REF} verdict: $class"
+              case "$class" in
+                blocked|sensitive)
+                  blocked=1; verdict_label="risk:$class"; verdict_source="risk-paths"
+                  ;;
+              esac
+            else
+              echo "No .github/risk-paths.yml on ${BASE_REF} — no repo-specific policy; the global risk-tier regex still applies."
+            fi
+          fi
+
+          {
+            echo "blocked=$blocked"
+            echo "verdict_label=$verdict_label"
+            echo "verdict_source=$verdict_source"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$blocked" -eq 1 ]; then
+            case "$verdict_source" in
+              label) why="labeled $verdict_label by pr-classify" ;;
+              *) why="classified $verdict_label against risk-paths.yml@${BASE_REF}" ;;
+            esac
+            echo "::warning::PR $why — auto-merge refused (manual click-merge required; no label or status-check bypass applies)"
           fi
 
       # Revoke auto-merge if a previous run of this workflow enabled it
-      # before the classifier finished labeling. Idempotent — `gh pr
+      # before this gate could see the verdict (armed before the direct
+      # risk-paths read existed, base risk policy expanded since, or a
+      # risk label hand-applied later). Idempotent — `gh pr
       # merge --disable-auto` returns non-zero when auto-merge wasn't
       # on; we tolerate that with `|| true` and verify state via the
       # follow-up gh pr view.
@@ -662,6 +774,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           VERDICT: ${{ steps.classifier_verdict.outputs.verdict_label }}
+          VERDICT_SOURCE: ${{ steps.classifier_verdict.outputs.verdict_source }}
         run: |
           set -euo pipefail
           marker="<!-- claude-author-automerge:classifier-blocked -->"
@@ -669,7 +782,11 @@ jobs:
             --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
           {
             echo "$marker"
-            echo "**Auto-merge refused — \`${VERDICT:-risk:blocked}\` label set by pr-classify.**"
+            if [ "$VERDICT_SOURCE" = "risk-paths" ]; then
+              echo "**Auto-merge refused — \`${VERDICT:-risk:blocked}\`: changed files match the base branch's \`.github/risk-paths.yml\` (evaluated directly by the auto-merge gate — no label round-trip).**"
+            else
+              echo "**Auto-merge refused — \`${VERDICT:-risk:blocked}\` label set by pr-classify.**"
+            fi
             echo ""
             if [ "$VERDICT" = "risk:sensitive" ]; then
               echo "This PR touches a path in \`.github/risk-paths.yml\`'s \`sensitive:\` list"
@@ -677,7 +794,8 @@ jobs:
               echo "sensitive-class PRs are reviewed (Claude + Adversarial + Codex) and then"
               echo "**human click-merged** — auto-merge does not apply. The reusable's global"
               echo "risk-tier regex can't see a caller's repo-specific \`sensitive:\` paths, so"
-              echo "the \`risk:sensitive\` label is what gates these."
+              echo "the \`risk:sensitive\` verdict (computed from the base branch's risk file,"
+              echo "with the pr-classify label as a second signal) is what gates these."
               echo ""
               echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
             else
