@@ -293,8 +293,8 @@ jobs:
           # P1 — the earlier fail-open here was masked by Signal 2 in
           # the blocked-path case but lost hand-applied labels on
           # benign-path PRs).
-          labels=$(retry gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/labels" \
-            --jq '.[].name') || {
+          labels=$(retry gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/labels?per_page=100" \
+            --paginate --jq '.[].name') || {
             echo "::error::could not read PR labels after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
             exit 1
           }
@@ -815,10 +815,16 @@ jobs:
           # arm atomically if the head moved between this event and now, so
           # a push that lands mid-run can never inherit an arm decided on
           # older files — its own synchronize run re-classifies and arms.
-          # (Residual, unchanged by this workflow: once armed, GitHub keeps
-          # auto-merge across later pushes; a post-arm push is handled by
-          # the synchronize re-run's classify+revoke, which wins while
-          # required checks are still running on the new head.)
+          # Deliberately NO revoke in the head-moved path below: this run's
+          # knowledge is stale, and a revoke here can land AFTER the newer
+          # head's own run validly armed — disarming a clean PR and
+          # stranding it until the next event (rapid fixup pushes make that
+          # ordering common). Residual, unchanged by this workflow: once
+          # armed, GitHub keeps auto-merge across later pushes; a blocked
+          # post-arm push is revoked by its own synchronize run (~1 min
+          # from push), which loses only if EVERY required check on the new
+          # head completes faster — not a real shape in this fleet, where
+          # Claude Review (minutes) is the universal required check.
           if ! gh pr merge --auto --"$METHOD" --match-head-commit "$HEAD_SHA" "$PR_URL"; then
             now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
             if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
@@ -933,4 +939,36 @@ jobs:
               -f body="$(cat /tmp/automerge-comment.md)" >/dev/null
           else
             gh pr comment "$PR" --body-file /tmp/automerge-comment.md
+          fi
+
+      # FAIL CLOSED for already-armed PRs (codex round-4 P1): "refusing
+      # to arm" is not enough when a previous run already armed. If a
+      # gating step ERRORED (rules unreadable after retries, label read
+      # failed, classifier enum violation, 3000-file listing cap), this
+      # run cannot know the PR is safe — and without this step the job
+      # would just go red while the stale arm survives and merges once
+      # checks pass. Runs last, under always(), because a failed step
+      # otherwise skips everything after it; outcome == 'failure'
+      # distinguishes a genuine error from skipped (non-Claude PRs,
+      # blocked short-circuits). The job still ends red from the failed
+      # gate step — this only guarantees the arm is gone.
+      - name: Revoke auto-merge if gates errored
+        if: |
+          always() &&
+          steps.detect.outputs.claude_authored == '1' &&
+          (steps.classifier_verdict.outcome == 'failure' ||
+           steps.risk.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          echo "A gating step errored — revoking any existing auto-merge arm (fail closed for already-armed PRs)."
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
+          echo "Auto-merge state after error revoke: $state"
+          if [ "$state" = "ON" ]; then
+            echo "::error::auto-merge still ON after --disable-auto — investigate"
+            exit 1
           fi

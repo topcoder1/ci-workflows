@@ -52,8 +52,13 @@
 #      P2): classify.mjs printing anything outside the documented class
 #      set ⇒ nonzero, never silently benign.
 #
-# The enable-side companion (codex round-2 P1): the arm is bound to the
-# event head SHA via `--match-head-commit`, asserted structurally below.
+# Structural pins on the surrounding job (codex rounds 2 & 4): the arm
+# is bound to the event head SHA via `--match-head-commit`; an always()
+# cleanup step revokes any existing arm when a gating step ERRORS (a red
+# run must not leave a stale arm alive — "refusing to arm" is not fail
+# closed for a PR a previous run already armed); and the label read
+# paginates (a hand-applied risk label past the 30-label default page
+# must not read as absent).
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_riskfile_gate.sh
@@ -96,6 +101,15 @@ else
   echo "✗ $WF does not bind the arm to the classified head SHA — a mid-run push could inherit the arm"
   failed=1
 fi
+if grep -q 'name: Revoke auto-merge if gates errored' "$WF" \
+  && grep -A5 'name: Revoke auto-merge if gates errored' "$WF" | grep -q 'always()' \
+  && grep -q "steps.classifier_verdict.outcome == 'failure'" "$WF" \
+  && grep -q "steps.risk.outcome == 'failure'" "$WF"; then
+  echo "✓ $WF revokes an existing arm under always() when a gating step errors"
+else
+  echo "✗ $WF lacks the always() error-revoke step — a red run would leave a stale arm alive"
+  failed=1
+fi
 
 # ---------------------------------------------------------------------------
 # 0b. Extract the classifier-verdict step's run block — the shipped bash,
@@ -115,6 +129,13 @@ if ! grep -q 'risk-paths.yml' "$T/gate.sh" || ! grep -q 'GITHUB_OUTPUT' "$T/gate
   exit 1
 fi
 echo "✓ extracted classifier-verdict step ($(wc -l < "$T/gate.sh" | tr -d ' ') lines)"
+
+if grep -q 'labels?per_page=100' "$T/gate.sh" && grep -B1 -A1 'labels?per_page=100' "$T/gate.sh" | grep -q -- '--paginate'; then
+  echo "✓ label read paginates (a hand-applied label past page 1 cannot read as absent)"
+else
+  echo "✗ label read does not paginate — a risk label past the 30-label default page reads as absent"
+  failed=1
+fi
 
 # ---------------------------------------------------------------------------
 # 0c. Stubs. `gh` dispatches on the requested URL; `sleep` no-ops the retry
