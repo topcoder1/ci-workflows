@@ -70,8 +70,11 @@ def test_scoped_git_credential_gated_and_scrubbed(workflow):
     assert "inputs.use_pat_for_git_deps" in text, workflow
     assert "github.event_name != 'pull_request'" in text, workflow
 
-    # (b) The credential lives in a scoped throwaway file, not ~/.gitconfig.
+    # (b) The credential lives in a scoped throwaway file, not ~/.gitconfig,
+    # and a least-privilege GIT_DEPS_PAT (fine-grained read-only) wins over
+    # the fleet-wide AUTOMERGE_PAT when forwarded.
     assert 'CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"' in text, workflow
+    assert "secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT" in text, workflow
 
     # (c) Every install branch (test_command / uv / pip fallback) scrubs the
     # credential, and the scrub precedes the credential-free test invocation.

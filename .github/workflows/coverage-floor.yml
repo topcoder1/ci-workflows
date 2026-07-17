@@ -88,7 +88,7 @@ on:
         type: string
         default: ""
       use_pat_for_git_deps:
-        description: "Materialize AUTOMERGE_PAT as a git credential on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). push:main runs (already-reviewed code) always materialize the credential when the secret is forwarded, without this input. Either way the credential lives in a scoped throwaway config file that is deleted before the test invocation, never in global git config. Unrelated to the seed-PR flow, which uses the secret only on push:main."
+        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). push:main runs (already-reviewed code) always materialize the credential when a secret is forwarded, without this input. NOTE the honest boundary: this input is NOT a defense against actors with push access — they can edit the caller or add a workflow on their branch and read any repo-visible secret (GitHub's same-repo pull_request baseline). It defends the no-workflow-change surface: poisoned lockfiles / dependency build hooks and test-code changes riding otherwise-legitimate PRs. Unrelated to the seed-PR flow, which uses AUTOMERGE_PAT only on push:main."
         required: false
         type: boolean
         default: false
@@ -186,8 +186,11 @@ on:
         type: string
         default: ""
     secrets:
+      GIT_DEPS_PAT:
+        description: "Preferred, least-privilege git-deps credential: a fine-grained READ-ONLY PAT scoped to just the dependency repos (e.g. whois-api-llc/wxa-secrets, topcoder1/webcrawl). When forwarded, it is used for the insteadOf rewrite INSTEAD of AUTOMERGE_PAT, so theft during the residual dependency-resolution window yields read access to those few repos — not the fleet-wide automerge credential. Same materialization rules as AUTOMERGE_PAT (push:main whenever forwarded; pull_request only with use_pat_for_git_deps: true). NOT used by the seed-PR flow — that needs AUTOMERGE_PAT's write scope."
+        required: false
       AUTOMERGE_PAT:
-        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock — keep forwarding it for that flow regardless of git-dep needs. Also usable as a scoped git credential for git-URL dependency clones during install: on push:main whenever forwarded, on pull_request only when the caller sets `use_pat_for_git_deps: true` (PR runs execute PR-controlled code, so materializing the credential there is an explicit opt-in)."
+        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock — keep forwarding it for that flow regardless of git-dep needs. Also the fallback git credential for git-URL dependency clones during install (GIT_DEPS_PAT wins when forwarded): on push:main whenever forwarded, on pull_request only when the caller sets `use_pat_for_git_deps: true` (PR runs execute PR-controlled code, so materializing the credential there is an explicit opt-in)."
         required: false  # absence falls back to GITHUB_TOKEN + warning
 
 permissions:
@@ -367,14 +370,25 @@ jobs:
         #     measure step via GIT_CONFIG_GLOBAL, deleted before the test
         #     invocation runs.
         #   - On pull_request runs it is materialized ONLY when the caller
-        #     sets `use_pat_for_git_deps: true` — repos that actually have
-        #     private git-URL deps and accept that a same-repo PR can still
-        #     read the credential during dependency resolution (build hooks
-        #     run arbitrary code).
+        #     sets `use_pat_for_git_deps: true`. Honest boundary (codex P1,
+        #     2026-07-16): an actor with PUSH access can edit the caller —
+        #     or add any workflow — on their branch and read any repo-
+        #     visible secret; that is GitHub's baseline for same-repo
+        #     pull_request runs and no workflow input can prevent it. The
+        #     gate defends the no-workflow-change surface instead: poisoned
+        #     lockfiles / dependency build hooks and test-code changes
+        #     riding otherwise-legitimate PRs (dependabot bumps, generated
+        #     PRs), which execute during install/tests without touching
+        #     workflow files.
         #   - push:main runs main's already-reviewed code, so the credential
         #     materializes whenever the secret is forwarded (no input
         #     needed). The seed-PR flow below is unaffected: it runs on
-        #     push:main only and reads the secret directly.
+        #     push:main only and reads AUTOMERGE_PAT directly.
+        #   - Least privilege: when the caller forwards GIT_DEPS_PAT (fine-
+        #     grained read-only PAT scoped to just the dep repos), it wins
+        #     over AUTOMERGE_PAT for the rewrite, so theft in the residual
+        #     window yields read-only access to a couple of repos rather
+        #     than the fleet automerge credential.
         # Rewrites are limited to the two fleet orgs, topcoder1 and
         # whois-api-llc — so the PAT never applies to clones of third-party
         # orgs. If the credential isn't materialized, uv sync uses the
@@ -395,8 +409,8 @@ jobs:
         # whois-api-llc/wxa-secrets) 404s without this rewrite.
         if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         env:
-          CROSS_ORG_PAT: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || inputs.use_pat_for_git_deps) && secrets.AUTOMERGE_PAT || '' }}
-          PAT_FORWARDED: ${{ secrets.AUTOMERGE_PAT != '' }}
+          CROSS_ORG_PAT: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT) || '' }}
+          PAT_FORWARDED: ${{ secrets.GIT_DEPS_PAT != '' || secrets.AUTOMERGE_PAT != '' }}
         run: |
           set -euo pipefail
           CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"

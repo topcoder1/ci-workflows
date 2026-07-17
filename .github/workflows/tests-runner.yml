@@ -79,13 +79,16 @@ on:
         type: string
         default: ""
       use_pat_for_git_deps:
-        description: "Materialize AUTOMERGE_PAT as a git credential on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets) — and forward AUTOMERGE_PAT alongside it. push:main runs (already-reviewed code) always materialize the credential when the secret is forwarded, without this input. Either way the credential lives in a scoped throwaway config file that is deleted before the test invocation, never in global git config."
+        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). push:main runs (already-reviewed code) always materialize the credential when a secret is forwarded, without this input. NOTE the honest boundary: this input is NOT a defense against actors with push access — they can edit the caller or add a workflow on their branch and read any repo-visible secret (GitHub's same-repo pull_request baseline). It defends the no-workflow-change surface: poisoned lockfiles / dependency build hooks and test-code changes riding otherwise-legitimate PRs."
         required: false
         type: boolean
         default: false
     secrets:
+      GIT_DEPS_PAT:
+        description: "Preferred, least-privilege git-deps credential: a fine-grained READ-ONLY PAT scoped to just the dependency repos (e.g. whois-api-llc/wxa-secrets, topcoder1/webcrawl). When forwarded, it is used for the insteadOf rewrite INSTEAD of AUTOMERGE_PAT, so theft during the residual dependency-resolution window yields read access to those few repos — not the fleet-wide automerge credential. Same materialization rules as AUTOMERGE_PAT (push:main whenever forwarded; pull_request only with use_pat_for_git_deps: true)."
+        required: false
       AUTOMERGE_PAT:
-        description: "PAT with cross-org `repo` read scope, used ONLY as a git credential for git-URL dependency clones during install. Forward it ONLY when the repo has private/cross-org git-URL deps, and pair it with `use_pat_for_git_deps: true` so pull_request runs can use it (push:main runs use it whenever forwarded). Repos without git-URL deps must not forward this secret — every forwarded copy is readable by PR-controlled code during dependency resolution. Absence falls back to GITHUB_TOKEN with a warning."
+        description: "Fallback git-deps credential (cross-org `repo` scope, deployed fleet-wide). Used for git-URL dependency clones during install only when GIT_DEPS_PAT is not forwarded. Forward it ONLY when the repo has private/cross-org git-URL deps, and pair it with `use_pat_for_git_deps: true` so pull_request runs can use it (push:main runs use it whenever forwarded). Repos without git-URL deps must not forward this secret. Prefer provisioning GIT_DEPS_PAT instead. Absence falls back to GITHUB_TOKEN with a warning."
         required: false
 
 permissions:
@@ -187,13 +190,24 @@ jobs:
         #     install step via GIT_CONFIG_GLOBAL, deleted before the test
         #     invocation runs.
         #   - On pull_request runs it is materialized ONLY when the caller
-        #     sets `use_pat_for_git_deps: true` — repos that actually have
-        #     private git-URL deps and accept that a same-repo PR can still
-        #     read the credential during dependency resolution (build hooks
-        #     run arbitrary code). Repos without git-URL deps should not
-        #     forward the secret at all.
+        #     sets `use_pat_for_git_deps: true`. Honest boundary (codex P1,
+        #     2026-07-16): an actor with PUSH access can edit the caller —
+        #     or add any workflow — on their branch and read any repo-
+        #     visible secret; that is GitHub's baseline for same-repo
+        #     pull_request runs and no workflow input can prevent it. The
+        #     gate defends the no-workflow-change surface instead: poisoned
+        #     lockfiles / dependency build hooks and test-code changes
+        #     riding otherwise-legitimate PRs (dependabot bumps, generated
+        #     PRs), which execute during install/tests without touching
+        #     workflow files. Repos without git-URL deps should not forward
+        #     the secret at all.
         #   - push:main runs main's already-reviewed code, so the credential
         #     materializes whenever the secret is forwarded (no input needed).
+        #   - Least privilege: when the caller forwards GIT_DEPS_PAT (fine-
+        #     grained read-only PAT scoped to just the dep repos), it wins
+        #     over AUTOMERGE_PAT, so theft in the residual window yields
+        #     read-only access to a couple of repos rather than the fleet
+        #     automerge credential.
         # Rewrites are limited to the two fleet orgs, topcoder1 and
         # whois-api-llc, so the PAT never applies to clones of third-party
         # orgs.
@@ -203,8 +217,8 @@ jobs:
         # so even a same-org private git dep (whois-api-llc/wxa_sanctions ->
         # whois-api-llc/wxa-secrets) 404s without this rewrite.
         env:
-          CROSS_ORG_PAT: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || inputs.use_pat_for_git_deps) && secrets.AUTOMERGE_PAT || '' }}
-          PAT_FORWARDED: ${{ secrets.AUTOMERGE_PAT != '' }}
+          CROSS_ORG_PAT: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT) || '' }}
+          PAT_FORWARDED: ${{ secrets.GIT_DEPS_PAT != '' || secrets.AUTOMERGE_PAT != '' }}
         run: |
           set -euo pipefail
           CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
