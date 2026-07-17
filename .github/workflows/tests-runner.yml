@@ -103,7 +103,7 @@ jobs:
       runner: ${{ steps.d.outputs.runner }}
       go_version: ${{ steps.d.outputs.go_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: d
         env:
           # `inputs.X` is empty on pull_request/push triggers (only populated
@@ -164,7 +164,7 @@ jobs:
     if: needs.detect.outputs.language == 'python'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python_version || '3.13' }}
@@ -304,7 +304,7 @@ jobs:
     if: needs.detect.outputs.language == 'go'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ needs.detect.outputs.go_version }}
@@ -327,7 +327,7 @@ jobs:
     if: needs.detect.outputs.language == 'js'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node_version || '20' }}
