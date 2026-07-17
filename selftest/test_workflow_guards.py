@@ -45,7 +45,9 @@ def test_no_global_git_config_writes_in_workflows():
     pull_request events — any same-repo PR could read the cross-org PAT
     via `git config --global --get-regexp url` and exfiltrate it.
     Credentials must go into a scoped throwaway file (GIT_CONFIG_GLOBAL
-    pointed at $RUNNER_TEMP) that is deleted before test code runs.
+    pointed at $RUNNER_TEMP) that is deleted before the default test
+    invocation (the test_command override path scrubs afterward and accepts
+    the wider window).
     """
     offenders = [
         wf.name
@@ -54,16 +56,19 @@ def test_no_global_git_config_writes_in_workflows():
     ]
     assert not offenders, (
         f"global git config writes in {offenders} — use a scoped "
-        "GIT_CONFIG_GLOBAL temp file deleted before PR-controlled code runs"
+        "GIT_CONFIG_GLOBAL temp file scrubbed before the default test run"
     )
 
 
 @pytest.mark.parametrize("workflow", ["tests-runner.yml", "coverage-floor.yml"])
 def test_scoped_git_credential_gated_and_scrubbed(workflow):
     """The cross-org git credential must be (a) opt-in on pull_request
-    events, (b) written to a scoped file, and (c) deleted before the test
-    invocation, which executes PR-controlled code and must not be able to
-    re-resolve dependencies."""
+    events, (b) written to a scoped file, and (c) deleted before the DEFAULT
+    test invocation, which executes PR-controlled code and must not be able
+    to re-resolve dependencies. (A caller `test_command` runs install+tests
+    as one command and is scrubbed only afterward — the wider window is
+    accepted for that path, so this guard only checks the default
+    invocations.)"""
     text = (WORKFLOWS_DIR / workflow).read_text()
 
     # (a) The credential is ALLOWLIST-gated: auto-materialized only on a
@@ -92,7 +97,7 @@ def test_scoped_git_credential_gated_and_scrubbed(workflow):
     scrub = 'rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL'
     assert text.count(scrub) >= 3, (
         f"{workflow}: every install branch must scrub the scoped credential "
-        "before test code runs"
+        "(before the default test invocation; test_command scrubs afterward)"
     )
     invocations = {
         "tests-runner.yml": ["uv run --no-sync pytest -q", ".venv/bin/pytest -q"],

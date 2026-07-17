@@ -431,7 +431,7 @@ jobs:
             git config --file "$CROSS_ORG_GITCONFIG" \
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/whois-api-llc/".insteadOf \
               "https://github.com/whois-api-llc/"
-            echo "==> Wrote scoped insteadOf config for topcoder1/* and whois-api-llc/* (deleted before tests run)"
+            echo "==> Wrote scoped insteadOf config for topcoder1/* and whois-api-llc/* (scrubbed before the default test run)"
           elif [[ "$PAT_FORWARDED" == "true" ]]; then
             echo "::notice::AUTOMERGE_PAT is forwarded but not materialized on pull_request runs unless the caller sets use_pat_for_git_deps: true. Repos with private git-URL deps need that input (keep forwarding the secret either way — the seed-PR flow uses it on push:main)."
           else
@@ -470,8 +470,10 @@ jobs:
           set -euo pipefail
           # Scoped git credential (written by the configure step for python
           # repos when allowed) is exposed to dependency installation ONLY,
-          # then deleted before the test invocation — tests execute
-          # PR-controlled code and must not be able to read it.
+          # then deleted before the DEFAULT test invocation — which executes
+          # PR-controlled code and must not be able to read it. (A caller
+          # test_command runs install+tests as one command, so it is scrubbed
+          # only afterward; that branch accepts the wider window.)
           CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
           if [[ -f "$CROSS_ORG_GITCONFIG" ]]; then
             export GIT_CONFIG_GLOBAL="$CROSS_ORG_GITCONFIG"
