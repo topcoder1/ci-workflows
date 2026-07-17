@@ -165,6 +165,7 @@ jobs:
       # path still work.
     steps:
       - name: Checkout PR head
+        id: checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -262,6 +263,7 @@ jobs:
       # to close; callers reference the reusable @main anyway, so a pin
       # here adds no supply-chain isolation in practice.
       - name: Setup Node (risk-paths classification)
+        id: setup_node
         if: steps.detect.outputs.claude_authored == '1'
         uses: actions/setup-node@v6
         with:
@@ -952,12 +954,27 @@ jobs:
       # distinguishes a genuine error from skipped (non-Claude PRs,
       # blocked short-circuits). The job still ends red from the failed
       # gate step — this only guarantees the arm is gone.
+      #
+      # PREREQUISITE failures count too (codex round-5 P1): if checkout,
+      # detect, or setup-node errors, the gate steps end 'skipped' — not
+      # 'failure' — and the arm would survive on the outcome checks
+      # alone. Checkout/detect failure also means authorship was never
+      # detected, so the guard falls back to the payload-level claude/*
+      # branch prefix (the fleet's dominant Claude-PR shape; a
+      # trailer-only Claude PR with a failed checkout stays uncovered —
+      # accepted residual). This step needs no workspace, so it runs
+      # fine even when checkout itself failed.
       - name: Revoke auto-merge if gates errored
         if: |
           always() &&
-          steps.detect.outputs.claude_authored == '1' &&
+          (steps.detect.outputs.claude_authored == '1' ||
+           (steps.detect.outcome != 'success' &&
+            startsWith(github.event.pull_request.head.ref, 'claude/'))) &&
           (steps.classifier_verdict.outcome == 'failure' ||
-           steps.risk.outcome == 'failure')
+           steps.risk.outcome == 'failure' ||
+           steps.setup_node.outcome == 'failure' ||
+           steps.checkout.outcome == 'failure' ||
+           steps.detect.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
