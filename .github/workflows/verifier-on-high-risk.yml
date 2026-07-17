@@ -82,7 +82,7 @@ jobs:
           fi
 
       - name: Checkout caller code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -116,7 +116,7 @@ jobs:
           echo "Changed paths:"; cat changed-paths.txt
 
       - name: Checkout ci-workflows at pinned SHA (composite action source)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: topcoder1/ci-workflows
           ref: ${{ inputs.ci_workflows_sha }}

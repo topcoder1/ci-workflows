@@ -46,7 +46,7 @@ jobs:
       class: ${{ steps.compute.outputs.class }}
     steps:
       - name: Checkout caller repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Verify risk-paths.yml exists
         run: |

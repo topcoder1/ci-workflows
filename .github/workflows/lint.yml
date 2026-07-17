@@ -131,7 +131,7 @@ jobs:
     if: ${{ format('{0}', inputs.run_actionlint) != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download actionlint
         id: get_actionlint
@@ -164,7 +164,7 @@ jobs:
     if: ${{ format('{0}', inputs.run_draft_gate_check) != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The checker lives in ci-workflows so consumers get fixes without a re-install --
       # the exact gap that made this bug survive two central fixes (ci-workflows#115 and
@@ -180,7 +180,7 @@ jobs:
       # ci-workflows is public, so a consumer's default GITHUB_TOKEN can check it out.
       - name: Check out the checker
         if: ${{ github.repository != 'topcoder1/ci-workflows' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: topcoder1/ci-workflows
           ref: main
@@ -226,7 +226,7 @@ jobs:
       # startup_failure if exceeded by the caller's grant.
       pull-requests: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -473,7 +473,7 @@ jobs:
     if: ${{ format('{0}', inputs.run_shellcheck_scripts) == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Run shellcheck
         # Ubuntu runners ship with shellcheck preinstalled, so no install
