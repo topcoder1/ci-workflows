@@ -16,6 +16,11 @@ dev = [
     "pexpect>=4.9.0",
     "pytest",
     "pytest-cov",
+    # check_draft_gate_triggers.py parses workflow YAML rather than grepping it:
+    # the transitive draft gate lives in a called reusable, so the caller has no
+    # `draft` text to grep for. Without this declared, `uv run pytest` dies at
+    # COLLECTION with ModuleNotFoundError and takes the whole selftest suite with it.
+    "pyyaml",
 ]
 
 [tool.pytest.ini_options]
