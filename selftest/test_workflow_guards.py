@@ -6,6 +6,7 @@ CI-enforced rather than run-manually-only documentation.
 """
 
 import pathlib
+import re
 import subprocess
 
 import pytest
@@ -84,16 +85,42 @@ def test_scoped_git_credential_gated_and_scrubbed(workflow):
     assert "secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT" in text, workflow
 
     # (c) Every install branch (test_command / uv / pip fallback) scrubs the
-    # credential, and the scrub precedes the credential-free test invocation.
+    # credential, and each test invocation is LOCALLY preceded by a scrub
+    # with no install command in between. A global first-scrub-vs-last-
+    # invocation comparison would still pass if one branch's scrub moved
+    # below its own pytest (codex round-4 P2), so check per invocation.
     scrub = 'rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL'
     assert text.count(scrub) >= 3, (
         f"{workflow}: every install branch must scrub the scoped credential "
         "before test code runs"
     )
-    assert "uv run --no-sync pytest" in text, workflow
-    # rindex: the actual invocation is the last occurrence — header comments
-    # may mention the command earlier.
-    assert text.index(scrub) < text.rindex("uv run --no-sync pytest"), workflow
+    invocations = {
+        "tests-runner.yml": ["uv run --no-sync pytest -q", ".venv/bin/pytest -q"],
+        "coverage-floor.yml": [
+            "uv run --no-sync pytest --cov",
+            ".venv/bin/pytest --cov",
+        ],
+    }[workflow]
+    install_markers = ("uv sync", "pip install", 'eval "$INPUT_TEST_COMMAND"')
+    for marker in invocations:
+        # Line-anchored so header/comment mentions of the command don't
+        # count as invocations.
+        sites = [
+            m.start()
+            for m in re.finditer(rf"^\s*{re.escape(marker)}", text, flags=re.M)
+        ]
+        assert sites, f"{workflow}: expected test invocation {marker!r} not found"
+        for pos in sites:
+            last_scrub = text.rfind(scrub, 0, pos)
+            assert last_scrub != -1, (
+                f"{workflow}: no credential scrub precedes {marker!r}"
+            )
+            last_install = max(text.rfind(i, 0, pos) for i in install_markers)
+            assert last_scrub > last_install, (
+                f"{workflow}: an install command sits between the scrub and "
+                f"{marker!r} — credential would be reachable by PR-controlled "
+                "test code"
+            )
 
     # Regression trip-wire: a plain `uv run pytest` implicitly re-syncs the
     # environment, which would re-fetch git deps mid-test-invocation.
