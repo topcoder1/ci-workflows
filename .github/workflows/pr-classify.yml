@@ -92,8 +92,9 @@ jobs:
           changed=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[].filename')
           # The listing endpoint caps at 3000 files. A truncated list can
-          # compute a falsely benign class, and the risk:* label is
-          # load-bearing for claude-author-automerge.yml — so stay red.
+          # compute a falsely benign class, and the risk:* label is still a
+          # gating input for claude-author-automerge.yml (belt-and-suspenders
+          # beside its own direct risk-paths read) — so stay red.
           if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
             echo "::error::PR changes 3000+ files — file listing is truncated, cannot classify. Merge manually."
             exit 1
@@ -122,9 +123,12 @@ jobs:
           done
           # Create the label if it doesn't exist (idempotent — gh ignores conflict).
           gh label create "risk:$CLASS" --color "ededed" --description "Risk class: $CLASS" 2>/dev/null || true
-          # The label IS load-bearing (claude-author-automerge.yml reads it as
-          # its canonical manual-merge signal), so a persistent failure here
-          # must stay red — but transient API blips get retried first.
+          # The label still gates: claude-author-automerge.yml honors it as a
+          # belt-and-suspenders signal beside the direct risk-paths.yml read
+          # it performs itself (the label alone was a TOCTOU race — GITHUB_TOKEN
+          # label writes never retrigger workflows; wxa-secrets#27). It is also
+          # the primary signal for humans and BB-side tooling, so a persistent
+          # failure here must stay red — transient API blips get retried first.
           retry gh pr edit "$PR" --add-label "risk:$CLASS"
 
       - name: Annotate `blocked` class (manual-merge required)
@@ -137,8 +141,9 @@ jobs:
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           # IMPORTANT: this step does NOT exit non-zero. The reusable's job
           # is to *classify*, not to gate. Auto-merge gating happens in
-          # claude-author-automerge.yml which reads the `risk:blocked` label
-          # / risk-tier path regex and refuses to enable auto-merge. Failing
+          # claude-author-automerge.yml, which classifies the PR against the
+          # base branch's risk-paths.yml itself (plus the `risk:*` label and
+          # its global risk-tier regex) and refuses to enable auto-merge. Failing
           # the classify check here would (a) only add visual red without
           # blocking merge (since required-status-checks rulesets in caller
           # repos typically don't list this check), and (b) confuse "code
