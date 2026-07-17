@@ -14,6 +14,10 @@ name: Lint
 #
 # What it checks:
 #   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs)
+#   - draft-gate triggers: any workflow gated on `draft == false` (in its own jobs
+#     OR in a reusable it calls) must listen for `ready_for_review`, else its
+#     required check reports `skipped` — which GitHub counts as SATISFIED — and the
+#     PR merges green and UNREVIEWED. See selftest/check_draft_gate_triggers.py.
 #   - prettier --check on the markdown glob (default **/*.md)
 #   - shellcheck on standalone shell scripts (opt-in, default OFF)
 #
@@ -67,6 +71,11 @@ on:
         default: true
       prettier_changed_only:
         description: "On PR events, check only files added/modified/renamed in the PR diff (intersected with markdown_glob). Push events always scan the full glob. Default true. Requires `pull-requests: read` on the caller's GITHUB_TOKEN; gracefully falls back to full-glob mode if the API call fails."
+        required: false
+        type: boolean
+        default: true
+      run_draft_gate_check:
+        description: "Fail if a workflow gates on draft == false but does not listen for ready_for_review. Default true. This one defaults ON, unlike the other opt-in checks, because the failure it catches is silent and fails OPEN — a skipped required check counts as satisfied, so the PR merges unreviewed."
         required: false
         type: boolean
         default: true
@@ -142,6 +151,47 @@ jobs:
           else
             ${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=
           fi
+        shell: bash
+
+  draft-gate-triggers:
+    name: draft-gate triggers
+    # Defaults ON (unlike run_shellcheck etc.). Those default off to avoid style noise on
+    # first install; this one catches a silent FAIL-OPEN — a draft-gated workflow that
+    # never hears `ready_for_review`, so its required check reports `skipped`, which
+    # GitHub counts as SATISFIED, and the PR merges unreviewed. The fleet was swept clean
+    # on 2026-07-16 before this landed, so ON is not expected to redden any caller.
+    # Same format()/loose-coercion dodge as the actionlint job above.
+    if: ${{ format('{0}', inputs.run_draft_gate_check) != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The checker lives here, in ci-workflows, so consumers get fixes without a
+      # re-install — the exact gap that made this bug survive two central fixes
+      # (ci-workflows#115, dotclaude#156 both landed 2026-07-15; a sweep on 2026-07-16
+      # still found 21 installed repos vulnerable, because neither was retroactive).
+      # ci-workflows is public, so the caller's default GITHUB_TOKEN can check it out.
+      #
+      # Pinned to @main deliberately: on ci-workflows' OWN pull_request self-test run,
+      # this fetches main's checker rather than the PR's. That is intended — the PR's
+      # checker is exercised by selftest.yml, and using main here keeps consumers and
+      # the self-test on identical logic.
+      - name: Check out the checker
+        uses: actions/checkout@v6
+        with:
+          repository: topcoder1/ci-workflows
+          ref: main
+          path: .ci-workflows-checker
+          persist-credentials: false
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+        shell: bash
+
+      - name: Check draft-gate triggers
+        run: |
+          python3 .ci-workflows-checker/selftest/check_draft_gate_triggers.py \
+            .github/workflows
         shell: bash
 
   prettier:

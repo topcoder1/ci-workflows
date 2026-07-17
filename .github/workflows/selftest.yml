@@ -1,0 +1,55 @@
+name: Selftest
+
+# Runs this repo's own selftest suite (selftest/) on its PRs and on push to main.
+#
+# NOT a reusable: consumers get the enforcement itself via the `draft-gate-triggers` job
+# in lint.yml, which runs the checker against THEIR workflows. This workflow exists to
+# test the checker, using the PR's version of it — lint.yml's job deliberately pins the
+# checker to @main, so without this a change to the checker would ship untested.
+#
+# Why the repo needs a selftest at all: the rule it enforces has been dropped twice
+# (`reopened` first, then `ready_for_review` directly below the comment warning about
+# `reopened`), and both central fixes were non-retroactive. Comments did not prevent the
+# recurrence, so the rule is pinned to the runtime.
+
+on:
+  pull_request:
+    # This workflow has no `draft == false` gate anywhere, so `ready_for_review` is not
+    # strictly required by the rule it tests. It is listed anyway: a PR opened as a draft
+    # and later readied should re-report this check rather than leave a stale result, and
+    # a caller listing it costs nothing. (Do NOT read this as the rule being optional —
+    # see selftest/check_draft_gate_triggers.py.)
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "selftest/**"
+      - ".github/workflows/**"
+      - ".github/workflows/selftest.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    name: selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: python3 -m pip install --quiet pytest pyyaml
+        shell: bash
+
+      - name: Run selftest
+        # rootdir is selftest/ so the checker module is importable without packaging.
+        run: python3 -m pytest selftest -q
+        shell: bash
