@@ -30,6 +30,14 @@ name: Prettier Autofix
 #     token" — a permanent red X on every dependabot PR. Mirrors the
 #     bot-skip in claude-review.yml. Dependency bumps don't need autofix.
 #   - PRs that touched zero markdown files: skipped (no-op).
+#   - Changed-file listing failures (transient API errors): skipped after
+#     3 attempts — a scoping failure is never widened to a full-tree run
+#     (wxa-secrets#27: the old full-tree fallback reformatted pre-existing
+#     drift in files the PR never touched and the push died on workflow
+#     scope).
+#   - Writes under .github/workflows/ are always reverted before commit:
+#     automerge_pat deliberately lacks workflow scope (fleet policy), so
+#     GitHub rejects any push containing them.
 #   - PRs already cleanly formatted: skipped (no commit pushed).
 
 on:
@@ -149,14 +157,33 @@ jobs:
             exit 0
           fi
 
+          # List the PR's changed files, with retries — the API can hiccup
+          # (an HTML 5xx body makes gh's --jq die with "invalid character
+          # '<' looking for beginning of value"; observed on
+          # whois-api-llc/wxa-secrets#27). On persistent failure SKIP this
+          # run instead of falling open to the full-tree glob: a full-tree
+          # pass drags in pre-existing drift from files the PR never
+          # touched, and those writes can be unpushable anyway
+          # (.github/workflows/** needs a workflow-scoped token that
+          # automerge_pat deliberately lacks). Block below is byte-identical
+          # in lint.yml — the selftest drift-checks it; keep both in sync.
           PR_FILES_LOG="$(mktemp)"
-          if ! gh api --paginate \
-                "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-                --jq '.[] | select(.status != "removed") | .filename' \
-                > "$PR_FILES_LOG" 2>/tmp/gh_err; then
-            echo "::warning::Could not list PR files (caller's GITHUB_TOKEN may lack 'pull-requests: read'). Falling back to full-glob mode."
+          LISTED=0
+          for attempt in 1 2 3; do
+            if gh api --paginate \
+                 "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                 --jq '.[] | select(.status != "removed") | .filename' \
+                 > "$PR_FILES_LOG" 2>/tmp/gh_err; then
+              LISTED=1
+              break
+            fi
+            echo "Changed-file listing attempt ${attempt}/3 failed:"
             sed 's/^/  /' /tmp/gh_err || true
-            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            if [ "$attempt" -lt 3 ]; then sleep "$(( attempt * 2 ))"; fi
+          done
+          if [ "$LISTED" -ne 1 ]; then
+            echo "::warning::Could not list PR files after 3 attempts (transient API error, or the caller's GITHUB_TOKEN lacks 'pull-requests: read'). Skipping prettier for this run — refusing to widen scope to the full tree."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           mapfile -t CHANGED < "$PR_FILES_LOG"
@@ -292,6 +319,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Never ship prettier writes under .github/workflows/: pushes
+          # touching workflow files need a workflow-scoped token, and
+          # automerge_pat deliberately lacks that scope (fleet policy) —
+          # GitHub rejects the whole push ("refusing to allow a Personal
+          # Access Token to create or update workflow ... without
+          # `workflow` scope"; whois-api-llc/wxa-secrets#27). Revert them:
+          # workflow-file formatting belongs in a human-pushed commit.
+          if ! git diff --quiet -- .github/workflows; then
+            echo "::notice::Reverting prettier write(s) under .github/workflows/ — automerge_pat has no workflow scope by design. Format workflow files in a human-pushed commit."
+            git diff --stat -- .github/workflows
+            git checkout -- .github/workflows
+          fi
           if git diff --quiet; then
             echo "::notice::No formatting changes — autofix is a no-op."
             exit 0

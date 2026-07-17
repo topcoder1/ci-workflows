@@ -36,6 +36,13 @@ arbitrary helper scripts; that's a different kind of repo.
 - `test_prettier_symlink_filter.sh` — extracts the symlink filter from
   `lint.yml` / `prettier-autofix.yml`, runs it against a fixture tree,
   and asserts the two copies haven't drifted.
+- `test_prettier_scope_failsafe.sh` — a failed changed-file listing must
+  SKIP the prettier run (mode=none), never fall open to the full-tree
+  glob; and prettier-autofix must revert writes under
+  `.github/workflows/` before committing (automerge_pat has no workflow
+  scope, so such pushes are always rejected — wxa-secrets#27). Extracts
+  and executes the shipped bash; drift-checks the listing block between
+  the two workflows.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.
