@@ -21,25 +21,25 @@ name: Audit required checks
 on:
   schedule:
     # Mondays at 10:00 UTC.
-    - cron: '0 10 * * 1'
+    - cron: "0 10 * * 1"
   workflow_dispatch:
     inputs:
       repos_topcoder1:
         description: "Override topcoder1/* repo list (space-separated). Empty = use hardcoded fleet."
         required: false
-        default: ''
+        default: ""
       repos_whois_api_llc:
         description: "Override whois-api-llc/* repo list (space-separated). Empty = use hardcoded fleet."
         required: false
-        default: ''
+        default: ""
 
 permissions:
   contents: read
-  issues: write    # to create / update the digest issue
+  issues: write # to create / update the digest issue
 
 concurrency:
   group: audit-required-checks
-  cancel-in-progress: false   # don't kill an in-flight audit if a manual dispatch fires
+  cancel-in-progress: false # don't kill an in-flight audit if a manual dispatch fires
 
 jobs:
   audit-topcoder1:
@@ -122,14 +122,14 @@ jobs:
 
   digest:
     needs: [audit-topcoder1, audit-whois-api-llc]
-    if: always()    # run even if a per-org job failed, so we get a digest
+    if: always() # run even if a per-org job failed, so we get a digest
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
-        continue-on-error: true   # tolerate jobs that failed before uploading
+        continue-on-error: true # tolerate jobs that failed before uploading
         with:
           pattern: per-org-digest-*
           merge-multiple: true

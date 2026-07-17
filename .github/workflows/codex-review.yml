@@ -36,7 +36,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: "22"
 
       # Cost gate: skip the (paid) Codex run on PRs unlikely to surface
       # regressions — small diffs and docs/test-only diffs. `always_review:`
@@ -90,7 +90,7 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.diff.outputs.files }}
           DIFF_LINES: ${{ steps.diff.outputs.lines }}
-          SIZE_THRESHOLD: '30'
+          SIZE_THRESHOLD: "30"
         run: node .github/scripts/codex-gate.mjs
 
       - name: Install Codex CLI

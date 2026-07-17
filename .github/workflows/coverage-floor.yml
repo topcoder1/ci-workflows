@@ -191,11 +191,11 @@ on:
         required: false
       AUTOMERGE_PAT:
         description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock — keep forwarding it for that flow regardless of git-dep needs. Also the fallback git credential for git-URL dependency clones during install (GIT_DEPS_PAT wins when forwarded): on push:main whenever forwarded, on pull_request only when the caller sets `use_pat_for_git_deps: true` (PR runs execute PR-controlled code, so materializing the credential there is an explicit opt-in)."
-        required: false  # absence falls back to GITHUB_TOKEN + warning
+        required: false # absence falls back to GITHUB_TOKEN + warning
 
 permissions:
-  contents: write       # post-merge seed branch + push
-  pull-requests: write  # sticky PR comment + open seed PR
+  contents: write # post-merge seed branch + push
+  pull-requests: write # sticky PR comment + open seed PR
 
 jobs:
   measure:

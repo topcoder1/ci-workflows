@@ -61,7 +61,7 @@ permissions:
 jobs:
   tty:
     name: TTY behavioral tests
-    runs-on: ubuntu-latest  # pty plumbing is unreliable on macos-latest
+    runs-on: ubuntu-latest # pty plumbing is unreliable on macos-latest
     env:
       TERM: xterm-256color
     steps:

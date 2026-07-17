@@ -13,7 +13,7 @@ on:
   workflow_call:
     inputs:
       checkout_depth:
-        description: 'git fetch-depth. 0 = full history (needed for diff against base).'
+        description: "git fetch-depth. 0 = full history (needed for diff against base)."
         required: false
         type: number
         default: 0

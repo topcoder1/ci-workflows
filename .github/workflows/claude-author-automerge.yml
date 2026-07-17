@@ -267,7 +267,7 @@ jobs:
         if: steps.detect.outputs.claude_authored == '1'
         uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: "22"
 
       - name: Check classifier verdict
         id: classifier_verdict

@@ -46,20 +46,21 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  checks: write   # post the verifier / evidence-bound check-run
-  id-token: write # required by claude-code-action@v1 for OIDC token fetch.
-                  # IMPORTANT: callers ALSO need `id-token: write` at their
-                  # workflow-level `permissions:` block — the caller's
-                  # workflow-level permissions are the CEILING for the entire
-                  # run including this reusable, and a callee declaration
-                  # cannot exceed what the caller granted. Without the
-                  # caller-side declaration, the run comes back as
-                  # `startup_failure` (zero jobs scheduled). claude-review.yml
-                  # has the same perm for the same reason. Smoke history:
-                  # ci-workflows#48 added the perm here but the caller
-                  # (attaxion_dev/.github/workflows/verifier-on-high-risk.yml)
-                  # had to be patched separately before the gate would even
-                  # start a job — see MEMORY.md lesson 2026-05-12.
+  checks: write # post the verifier / evidence-bound check-run
+  id-token:
+    write # required by claude-code-action@v1 for OIDC token fetch.
+    # IMPORTANT: callers ALSO need `id-token: write` at their
+    # workflow-level `permissions:` block — the caller's
+    # workflow-level permissions are the CEILING for the entire
+    # run including this reusable, and a callee declaration
+    # cannot exceed what the caller granted. Without the
+    # caller-side declaration, the run comes back as
+    # `startup_failure` (zero jobs scheduled). claude-review.yml
+    # has the same perm for the same reason. Smoke history:
+    # ci-workflows#48 added the perm here but the caller
+    # (attaxion_dev/.github/workflows/verifier-on-high-risk.yml)
+    # had to be patched separately before the gate would even
+    # start a job — see MEMORY.md lesson 2026-05-12.
 
 concurrency:
   group: verifier-on-high-risk-${{ github.event.pull_request.number }}
