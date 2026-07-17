@@ -79,7 +79,7 @@ on:
         type: string
         default: ""
       use_pat_for_git_deps:
-        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). push:main runs (already-reviewed code) always materialize the credential when a secret is forwarded, without this input. NOTE the honest boundary: this input is NOT a defense against actors with push access — they can edit the caller or add a workflow on their branch and read any repo-visible secret (GitHub's same-repo pull_request baseline). It defends the no-workflow-change surface: poisoned lockfiles / dependency build hooks and test-code changes riding otherwise-legitimate PRs."
+        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). Only a push to the default branch (already-reviewed code) materializes the credential without this input; schedule / workflow_dispatch / branch-push runs need it too. NOTE the honest boundary: this input is NOT a defense against actors with push access — they can edit the caller or add a workflow on their branch and read any repo-visible secret (GitHub's same-repo pull_request baseline). It defends the no-workflow-change surface: poisoned lockfiles / dependency build hooks and test-code changes riding otherwise-legitimate PRs."
         required: false
         type: boolean
         default: false
@@ -201,8 +201,10 @@ jobs:
         #     PRs), which execute during install/tests without touching
         #     workflow files. Repos without git-URL deps should not forward
         #     the secret at all.
-        #   - push:main runs main's already-reviewed code, so the credential
-        #     materializes whenever the secret is forwarded (no input needed).
+        #   - Only a push to the default branch runs already-reviewed code,
+        #     so only that event materializes the credential without the
+        #     input. Every other event — branch pushes, schedule,
+        #     workflow_dispatch — is treated like a PR and needs the input.
         #   - Least privilege: when the caller forwards GIT_DEPS_PAT (fine-
         #     grained read-only PAT scoped to just the dep repos), it wins
         #     over AUTOMERGE_PAT, so theft in the residual window yields
@@ -217,7 +219,11 @@ jobs:
         # so even a same-org private git dep (whois-api-llc/wxa_sanctions ->
         # whois-api-llc/wxa-secrets) 404s without this rewrite.
         env:
-          CROSS_ORG_PAT: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT) || '' }}
+          # Allowlist, not denylist (codex round-2 P1): auto-trust ONLY a
+          # push to the default branch — schedule / workflow_dispatch /
+          # feature-branch pushes run unreviewed code and need the explicit
+          # input just like PRs. "Not a PR" is not the same as "trusted".
+          CROSS_ORG_PAT: ${{ ((github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT) || '' }}
           PAT_FORWARDED: ${{ secrets.GIT_DEPS_PAT != '' || secrets.AUTOMERGE_PAT != '' }}
         run: |
           set -euo pipefail

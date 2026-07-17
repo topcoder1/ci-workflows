@@ -65,10 +65,17 @@ def test_scoped_git_credential_gated_and_scrubbed(workflow):
     re-resolve dependencies."""
     text = (WORKFLOWS_DIR / workflow).read_text()
 
-    # (a) PR-event runs must not materialize the PAT without the explicit
-    # caller opt-in input; push:main (trusted, post-review code) may.
+    # (a) The credential is ALLOWLIST-gated: auto-materialized only on a
+    # push to the default branch (post-review code); every other event —
+    # PRs, branch pushes, schedule, workflow_dispatch — needs the explicit
+    # caller opt-in input. Denylist forms ("not a PR") regressed this once
+    # (codex round-2 P1).
     assert "inputs.use_pat_for_git_deps" in text, workflow
-    assert "github.event_name != 'pull_request'" in text, workflow
+    allowlist = (
+        "github.event_name == 'push' && github.ref == "
+        "format('refs/heads/{0}', github.event.repository.default_branch)"
+    )
+    assert allowlist in text, workflow
 
     # (b) The credential lives in a scoped throwaway file, not ~/.gitconfig,
     # and a least-privilege GIT_DEPS_PAT (fine-grained read-only) wins over
