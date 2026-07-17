@@ -87,6 +87,11 @@ on:
         required: false
         type: string
         default: ""
+      use_pat_for_git_deps:
+        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). Only a push to the default branch (already-reviewed code) materializes the credential without this input; schedule / workflow_dispatch / branch-push runs need it too. NOTE the honest boundary: the real fleet protection is the DEFAULT of forwarding nothing — non-opted-in repos never expose the credential on a PR. Opting in accepts a residual install-phase window: PR-controlled code that `uv sync` runs (package build hooks, or whatever a poisoned lockfile pulls in) executes while the credential is present and CAN read it; only the post-install test phase is protected by the pre-test scrub (exception: a caller `test_command` runs install and tests as one command before the scrub, so the credential is present during those tests too). This input is also NOT a defense against actors with push access — they can edit the caller or add a workflow and read any repo-visible secret (GitHub's same-repo pull_request baseline; fork PRs get no secrets). Allowlist gating + preferring the least-privilege GIT_DEPS_PAT bound the blast radius. Unrelated to the seed-PR flow, which uses AUTOMERGE_PAT only on push:main."
+        required: false
+        type: boolean
+        default: false
       services_postgres:
         description: "Spin up a postgres container on port 5432 and export DATABASE_URL + TEST_DATABASE_URL to the test step. Default false."
         required: false
@@ -181,8 +186,11 @@ on:
         type: string
         default: ""
     secrets:
+      GIT_DEPS_PAT:
+        description: "Preferred, least-privilege git-deps credential: a fine-grained READ-ONLY PAT scoped to just the dependency repos (e.g. whois-api-llc/wxa-secrets, topcoder1/webcrawl). When forwarded, it is used for the insteadOf rewrite INSTEAD of AUTOMERGE_PAT, so theft during the residual dependency-resolution window yields read access to those few repos — not the fleet-wide automerge credential. Same materialization rules as AUTOMERGE_PAT (push:main whenever forwarded; pull_request only with use_pat_for_git_deps: true). NOT used by the seed-PR flow — that needs AUTOMERGE_PAT's write scope."
+        required: false
       AUTOMERGE_PAT:
-        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock."
+        description: "PAT used to push the seed branch and open the seed PR so that pull_request workflows actually fire (GITHUB_TOKEN doesn't trigger them — recursion prevention). Already deployed fleet-wide for `claude-author-automerge.yml`. Caller must explicitly forward this secret (see callers/coverage-floor.yml in topcoder1/dotclaude for the syntax). Required for the post-merge seed flow to land without manual unblock — keep forwarding it for that flow regardless of git-dep needs. Also the fallback git credential for git-URL dependency clones during install (GIT_DEPS_PAT wins when forwarded): on push:main whenever forwarded, on pull_request only when the caller sets `use_pat_for_git_deps: true` (PR runs execute PR-controlled code, so materializing the credential there is an explicit opt-in)."
         required: false  # absence falls back to GITHUB_TOKEN + warning
 
 permissions:
@@ -344,22 +352,54 @@ jobs:
             done <<< "$EXTRA_ENV"
           fi
 
-      - name: Configure git for cross-org clones (Python only)
+      - name: Configure scoped git credential for cross-org clones (Python only)
         # `uv sync` invokes `git clone` for git-URL dependencies (e.g.
         # `webcrawl @ git+https://github.com/topcoder1/webcrawl.git`). The
         # checkout step authenticated git with `github.token`, which is
         # scoped to the calling repo only — cross-org clones to a different
-        # org return 404 (or appear empty in workflows that swallow stderr).
-        # When the caller forwards `AUTOMERGE_PAT` (already deployed fleet-
-        # wide for the seed-PR flow), reuse it here as a read credential.
+        # org return 404 (or appear empty in workflows that swallow stderr),
+        # and same-org private git URLs 404 too.
         #
+        # SECURITY MODEL (2026-07-16, wxa-secrets#28 codex review): the
+        # measure step executes PR-controlled code on pull_request events
+        # (uv sync build hooks, pytest), so the PAT is handled as follows:
+        #   - Never written to global git config (the previous global
+        #     insteadOf rewrite was readable by test code via
+        #     `git config --get-regexp --global url`). It goes into a
+        #     throwaway config file under $RUNNER_TEMP, exposed to the
+        #     measure step via GIT_CONFIG_GLOBAL, deleted before the default
+        #     test invocation runs. (A caller `test_command` runs install +
+        #     tests as one command, so the credential persists through it —
+        #     that config accepts the wider window; see the measure step.)
+        #   - On pull_request runs it is materialized ONLY when the caller
+        #     sets `use_pat_for_git_deps: true`. Honest boundary (codex,
+        #     2026-07-16): the real fleet protection is the DEFAULT of
+        #     forwarding nothing for git-deps — non-opted-in repos never
+        #     expose the credential to the measure step on a PR. Opting in
+        #     accepts a residual install-phase window: PR-controlled code
+        #     that `uv sync` runs (package build hooks, or whatever a
+        #     poisoned lockfile pulls in) executes while the credential is
+        #     present and CAN read it; only the post-install test phase is
+        #     protected by the scrub below. The input is also NOT a boundary
+        #     against push-access actors — they can edit the caller or add
+        #     any workflow and read any repo-visible secret (GitHub's same-
+        #     repo pull_request baseline; fork PRs get no secrets).
+        #   - Only a push to the default branch runs already-reviewed code,
+        #     so only that event materializes the credential without the
+        #     input. Every other event — branch pushes, schedule,
+        #     workflow_dispatch — is treated like a PR and needs the input.
+        #     The seed-PR flow below is unaffected: it runs on push:main
+        #     only and reads AUTOMERGE_PAT directly.
+        #   - Least privilege: when the caller forwards GIT_DEPS_PAT (fine-
+        #     grained read-only PAT scoped to just the dep repos), it wins
+        #     over AUTOMERGE_PAT for the rewrite, so theft in the residual
+        #     window yields read-only access to a couple of repos rather
+        #     than the fleet automerge credential.
         # Rewrites are limited to the two fleet orgs, topcoder1 and
-        # whois-api-llc — not a global insteadOf — so the PAT never leaks
-        # to clones of third-party orgs. If AUTOMERGE_PAT isn't forwarded,
-        # this step no-ops and uv sync uses the github.token configured by
-        # actions/checkout (which works for same-org public git URLs but
-        # not cross-org, nor same-org private git URLs). Same fallback
-        # shape as the seed-PR step below.
+        # whois-api-llc — so the PAT never applies to clones of third-party
+        # orgs. If the credential isn't materialized, uv sync uses the
+        # github.token configured by actions/checkout (which works for
+        # same-repo URLs but not cross-org, nor same-org private git URLs).
         #
         # Burn 2026-05-13: wxa_webcat PRs failing coverage-floor with
         # `failed to fetch commit 27970847... topcoder1/webcrawl.git` —
@@ -375,19 +415,27 @@ jobs:
         # whois-api-llc/wxa-secrets) 404s without this rewrite.
         if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         env:
-          CROSS_ORG_PAT: ${{ secrets.AUTOMERGE_PAT }}
+          # Allowlist, not denylist (codex round-2 P1): auto-trust ONLY a
+          # push to the default branch — schedule / workflow_dispatch /
+          # feature-branch pushes run unreviewed code and need the explicit
+          # input just like PRs. "Not a PR" is not the same as "trusted".
+          CROSS_ORG_PAT: ${{ ((github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT) || '' }}
+          PAT_FORWARDED: ${{ secrets.GIT_DEPS_PAT != '' || secrets.AUTOMERGE_PAT != '' }}
         run: |
           set -euo pipefail
+          CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
           if [[ -n "${CROSS_ORG_PAT:-}" ]]; then
-            git config --global \
+            git config --file "$CROSS_ORG_GITCONFIG" \
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/topcoder1/".insteadOf \
               "https://github.com/topcoder1/"
-            git config --global \
+            git config --file "$CROSS_ORG_GITCONFIG" \
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/whois-api-llc/".insteadOf \
               "https://github.com/whois-api-llc/"
-            echo "==> Configured git insteadOf for topcoder1/* and whois-api-llc/* using AUTOMERGE_PAT"
+            echo "==> Wrote scoped insteadOf config for topcoder1/* and whois-api-llc/* (scrubbed before the default test run)"
+          elif [[ "$PAT_FORWARDED" == "true" ]]; then
+            echo "::notice::AUTOMERGE_PAT is forwarded but not materialized on pull_request runs unless the caller sets use_pat_for_git_deps: true. Repos with private git-URL deps need that input (keep forwarding the secret either way — the seed-PR flow uses it on push:main)."
           else
-            echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies (e.g. webcrawl from topcoder1/*) will fail with 404 on uv sync. Forward the secret in the caller's job spec — see callers/coverage-floor.yml."
+            echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies (e.g. webcrawl from topcoder1/*) will fail with 404 on uv sync, and the seed-PR flow falls back to GITHUB_TOKEN. Forward the secret in the caller's job spec — see callers/coverage-floor.yml."
           fi
 
       # Parse pre-measured artifact when caller opted in.
@@ -420,6 +468,16 @@ jobs:
           INPUT_TEST_COMMAND: ${{ inputs.test_command || '' }}
         run: |
           set -euo pipefail
+          # Scoped git credential (written by the configure step for python
+          # repos when allowed) is exposed to dependency installation ONLY,
+          # then deleted before the DEFAULT test invocation — which executes
+          # PR-controlled code and must not be able to read it. (A caller
+          # test_command runs install+tests as one command, so it is scrubbed
+          # only afterward; that branch accepts the wider window.)
+          CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
+          if [[ -f "$CROSS_ORG_GITCONFIG" ]]; then
+            export GIT_CONFIG_GLOBAL="$CROSS_ORG_GITCONFIG"
+          fi
           # When the caller provides test_command, it replaces the language-specific
           # install + pytest/go-test/npm-test invocation. The coverage-file existence
           # check + MEASURED extraction at the end of each case branch still runs,
@@ -430,8 +488,13 @@ jobs:
           case "$LANG_TYPE" in
             python)
               if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+                # test_command installs and tests in one opaque command, so
+                # the credential (when materialized) stays available
+                # throughout it. Repos combining test_command with
+                # use_pat_for_git_deps accept that wider window.
                 echo "==> caller test_command override (python)"
                 eval "$INPUT_TEST_COMMAND"
+                rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
               elif [[ -f pyproject.toml ]]; then
                 # extras controls which [project.optional-dependencies] extras get
                 # installed before pytest-cov runs. Default ("all") preserves the
@@ -469,17 +532,21 @@ jobs:
                 # Some repos have pyproject.toml as config-only (no [project]
                 # deps section) and keep actual deps in requirements.txt
                 # (inbox_superpilot/backend pattern). Install those on top so
-                # `uv run pytest` can import everything.
+                # the test invocation below can import everything.
                 [[ -f requirements.txt ]]     && uv pip install --quiet -r requirements.txt
                 [[ -f requirements-dev.txt ]] && uv pip install --quiet -r requirements-dev.txt
                 uv pip install --quiet pytest-cov
+                rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
                 # `|| true` lets us still parse coverage.json even when tests fail
                 # (tests-runner.yml is the gate for test pass/fail; we just need
-                # the coverage number here).
-                uv run pytest --cov --cov-report=json --quiet || true
+                # the coverage number here). --no-sync: the env was fully
+                # synced above; the test invocation must never trigger a
+                # re-resolve (the credential is already deleted).
+                uv run --no-sync pytest --cov --cov-report=json --quiet || true
               else
                 python -m venv .venv
                 .venv/bin/pip install -q -r requirements.txt pytest pytest-cov
+                rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
                 .venv/bin/pytest --cov --cov-report=json --quiet || true
               fi
               if [[ ! -f coverage.json ]]; then
@@ -546,6 +613,14 @@ jobs:
           MEASURED=$(awk -v m="$MEASURED" 'BEGIN {printf "%.1f", m}')
           echo "measured=$MEASURED" >> "$GITHUB_OUTPUT"
           echo "measured coverage: $MEASURED%"
+
+      - name: Scrub scoped git credential
+        # Belt-and-suspenders: the measure step deletes the credential file
+        # before running tests; this catches early-exit paths (e.g. uv sync
+        # failure with `set -e`) so no later step — including third-party
+        # actions like the sticky-comment poster — can read it.
+        if: always()
+        run: rm -f "$RUNNER_TEMP/cross-org-gitconfig"
 
       - name: Seed-not-yet on PR — pass-through with comment
         # Install PR ships current=0. Don't self-commit (would create a new
