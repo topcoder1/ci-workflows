@@ -26,8 +26,10 @@ name: Tests
 #
 # Defaults chosen for "drop into an existing repo and surface its current
 # test suite":
-#   - Python with pyproject.toml → `uv sync && uv run pytest -q` (uv is the
-#     fastest sustainable choice and handles lockfiles).
+#   - Python with pyproject.toml → `uv sync && uv run --no-sync pytest -q`
+#     (uv is the fastest sustainable choice and handles lockfiles; --no-sync
+#     because the test invocation runs after the scoped git credential is
+#     scrubbed and must never re-resolve deps).
 #   - Python with only requirements.txt → `pip install -r requirements.txt
 #     && pip install pytest && pytest -q`. No coverage gating here; that's
 #     coverage-floor.yml's job.
@@ -76,9 +78,14 @@ on:
         required: false
         type: string
         default: ""
+      use_pat_for_git_deps:
+        description: "Materialize AUTOMERGE_PAT as a git credential on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets) — and forward AUTOMERGE_PAT alongside it. push:main runs (already-reviewed code) always materialize the credential when the secret is forwarded, without this input. Either way the credential lives in a scoped throwaway config file that is deleted before the test invocation, never in global git config."
+        required: false
+        type: boolean
+        default: false
     secrets:
       AUTOMERGE_PAT:
-        description: "PAT with cross-org `repo` read scope. When forwarded, `uv sync` can resolve git-URL dependencies that point to repos in a different org (e.g. `whois-api-llc/*` repos depending on `topcoder1/webcrawl`). Same secret already deployed fleet-wide for `claude-author-automerge.yml` and `coverage-floor.yml` seed-PR flow. Absence falls back to GITHUB_TOKEN with a warning."
+        description: "PAT with cross-org `repo` read scope, used ONLY as a git credential for git-URL dependency clones during install. Forward it ONLY when the repo has private/cross-org git-URL deps, and pair it with `use_pat_for_git_deps: true` so pull_request runs can use it (push:main runs use it whenever forwarded). Repos without git-URL deps must not forward this secret — every forwarded copy is readable by PR-controlled code during dependency resolution. Absence falls back to GITHUB_TOKEN with a warning."
         required: false
 
 permissions:
@@ -162,35 +169,57 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Configure git for cross-org clones
+      - name: Configure scoped git credential for cross-org clones
         # `uv sync` invokes `git clone` for git-URL dependencies (e.g.
         # `webcrawl @ git+https://github.com/topcoder1/webcrawl.git`). The
         # checkout step authenticated git with `github.token`, which is
-        # scoped to the calling repo only — cross-org clones return 404.
-        # When the caller forwards `AUTOMERGE_PAT` (already deployed fleet-
-        # wide), use it as a read credential. Rewrites are limited to the
-        # two fleet orgs, topcoder1 and whois-api-llc, so the PAT never
-        # leaks to clones of third-party orgs. Mirrors coverage-floor.yml's
+        # scoped to the calling repo only — cross-org (and same-org private)
+        # clones 404 without a real credential. Mirrors coverage-floor.yml's
         # same step.
+        #
+        # SECURITY MODEL (2026-07-16, wxa-secrets#28 codex review): this job
+        # executes PR-controlled code on pull_request events (uv sync build
+        # hooks, pytest), so the PAT is handled as follows:
+        #   - Never written to global git config (the previous global
+        #     insteadOf rewrite was readable by test code via
+        #     `git config --get-regexp --global url`). It goes into a
+        #     throwaway config file under $RUNNER_TEMP, exposed to the
+        #     install step via GIT_CONFIG_GLOBAL, deleted before the test
+        #     invocation runs.
+        #   - On pull_request runs it is materialized ONLY when the caller
+        #     sets `use_pat_for_git_deps: true` — repos that actually have
+        #     private git-URL deps and accept that a same-repo PR can still
+        #     read the credential during dependency resolution (build hooks
+        #     run arbitrary code). Repos without git-URL deps should not
+        #     forward the secret at all.
+        #   - push:main runs main's already-reviewed code, so the credential
+        #     materializes whenever the secret is forwarded (no input needed).
+        # Rewrites are limited to the two fleet orgs, topcoder1 and
+        # whois-api-llc, so the PAT never applies to clones of third-party
+        # orgs.
         #
         # Burn 2026-05-13 -> 2026-07-06: wxa_sanctions' tests/coverage-floor
         # lanes were red since install because github.token is repo-scoped,
         # so even a same-org private git dep (whois-api-llc/wxa_sanctions ->
         # whois-api-llc/wxa-secrets) 404s without this rewrite.
         env:
-          CROSS_ORG_PAT: ${{ secrets.AUTOMERGE_PAT }}
+          CROSS_ORG_PAT: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || inputs.use_pat_for_git_deps) && secrets.AUTOMERGE_PAT || '' }}
+          PAT_FORWARDED: ${{ secrets.AUTOMERGE_PAT != '' }}
         run: |
           set -euo pipefail
+          CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
           if [[ -n "${CROSS_ORG_PAT:-}" ]]; then
-            git config --global \
+            git config --file "$CROSS_ORG_GITCONFIG" \
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/topcoder1/".insteadOf \
               "https://github.com/topcoder1/"
-            git config --global \
+            git config --file "$CROSS_ORG_GITCONFIG" \
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/whois-api-llc/".insteadOf \
               "https://github.com/whois-api-llc/"
-            echo "==> Configured git insteadOf for topcoder1/* and whois-api-llc/* using AUTOMERGE_PAT"
+            echo "==> Wrote scoped insteadOf config for topcoder1/* and whois-api-llc/* (deleted before tests run)"
+          elif [[ "$PAT_FORWARDED" == "true" ]]; then
+            echo "::notice::AUTOMERGE_PAT is forwarded but not materialized on pull_request runs unless the caller sets use_pat_for_git_deps: true. Repos with private git-URL deps need that input; repos without them should stop forwarding the secret."
           else
-            echo "::warning::AUTOMERGE_PAT not forwarded by caller. Cross-org git-URL dependencies will fail with 404 on uv sync."
+            echo "::warning::AUTOMERGE_PAT not forwarded by caller. Private/cross-org git-URL dependencies will fail with 404 on uv sync."
           fi
       - name: Install deps and run tests
         working-directory: ${{ inputs.working_directory || '.' }}
@@ -198,9 +227,24 @@ jobs:
           INPUT_TEST_COMMAND: ${{ inputs.test_command || '' }}
         run: |
           set -euo pipefail
+          # Scoped credential (if the previous step wrote one) is exposed to
+          # dependency installation ONLY, then deleted before the test
+          # invocation — tests execute PR-controlled code and must not be
+          # able to read it. GIT_CONFIG_GLOBAL redirects git's "global"
+          # config lookup to the throwaway file; unsetting it restores the
+          # default (credential-free) global config for everything after.
+          CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
+          if [[ -f "$CROSS_ORG_GITCONFIG" ]]; then
+            export GIT_CONFIG_GLOBAL="$CROSS_ORG_GITCONFIG"
+          fi
           if [[ -n "$INPUT_TEST_COMMAND" ]]; then
+            # test_command installs and tests in one opaque command, so the
+            # credential (when materialized) stays available throughout it.
+            # Repos combining test_command with use_pat_for_git_deps accept
+            # that wider window.
             echo "Running override: $INPUT_TEST_COMMAND"
             eval "$INPUT_TEST_COMMAND"
+            rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
           elif [[ -f pyproject.toml ]]; then
             # --all-extras matches coverage-floor.yml — install every
             # [project.optional-dependencies] extra so test deps in old-style
@@ -208,14 +252,20 @@ jobs:
             uv sync --all-extras
             # Some repos have pyproject.toml as config-only with deps in
             # requirements.txt (inbox_superpilot/backend pattern). Install
-            # those on top so `uv run pytest` finds them.
+            # those on top so the test invocation below finds them.
             [[ -f requirements.txt ]]     && uv pip install -r requirements.txt
             [[ -f requirements-dev.txt ]] && uv pip install -r requirements-dev.txt
-            uv run pytest -q
+            rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
+            # --no-sync: the env was fully synced above; the test invocation
+            # must never trigger a re-resolve (it would need the already-
+            # deleted credential, and silently re-fetching during tests is
+            # exactly the exposure this layout removes).
+            uv run --no-sync pytest -q
           elif [[ -f requirements.txt ]]; then
             python -m venv .venv
             .venv/bin/pip install -q -r requirements.txt
             .venv/bin/pip install -q pytest
+            rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
             .venv/bin/pytest -q
           else
             echo "::error::python language declared but no pyproject.toml or requirements.txt found"

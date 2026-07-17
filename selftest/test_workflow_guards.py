@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 
 # test_bb_automerge_risk_patterns.sh is deliberately absent: it resolves
@@ -32,3 +33,61 @@ def test_shell_selftest(script):
         ["bash", script], cwd=REPO_ROOT, capture_output=True, text=True
     )
     assert proc.returncode == 0, f"{script} failed:\n{proc.stdout}\n{proc.stderr}"
+
+
+def test_no_global_git_config_writes_in_workflows():
+    """No reusable may write to global git config.
+
+    2026-07-16 (wxa-secrets#28 codex review): tests-runner.yml and
+    coverage-floor.yml wrote AUTOMERGE_PAT into a global insteadOf rewrite
+    before running PR-controlled code (uv sync build hooks, pytest) on
+    pull_request events — any same-repo PR could read the cross-org PAT
+    via `git config --global --get-regexp url` and exfiltrate it.
+    Credentials must go into a scoped throwaway file (GIT_CONFIG_GLOBAL
+    pointed at $RUNNER_TEMP) that is deleted before test code runs.
+    """
+    offenders = [
+        wf.name
+        for wf in sorted(WORKFLOWS_DIR.glob("*.yml"))
+        if "git config --global" in wf.read_text()
+    ]
+    assert not offenders, (
+        f"global git config writes in {offenders} — use a scoped "
+        "GIT_CONFIG_GLOBAL temp file deleted before PR-controlled code runs"
+    )
+
+
+@pytest.mark.parametrize("workflow", ["tests-runner.yml", "coverage-floor.yml"])
+def test_scoped_git_credential_gated_and_scrubbed(workflow):
+    """The cross-org git credential must be (a) opt-in on pull_request
+    events, (b) written to a scoped file, and (c) deleted before the test
+    invocation, which executes PR-controlled code and must not be able to
+    re-resolve dependencies."""
+    text = (WORKFLOWS_DIR / workflow).read_text()
+
+    # (a) PR-event runs must not materialize the PAT without the explicit
+    # caller opt-in input; push:main (trusted, post-review code) may.
+    assert "inputs.use_pat_for_git_deps" in text, workflow
+    assert "github.event_name != 'pull_request'" in text, workflow
+
+    # (b) The credential lives in a scoped throwaway file, not ~/.gitconfig.
+    assert 'CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"' in text, workflow
+
+    # (c) Every install branch (test_command / uv / pip fallback) scrubs the
+    # credential, and the scrub precedes the credential-free test invocation.
+    scrub = 'rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL'
+    assert text.count(scrub) >= 3, (
+        f"{workflow}: every install branch must scrub the scoped credential "
+        "before test code runs"
+    )
+    assert "uv run --no-sync pytest" in text, workflow
+    # rindex: the actual invocation is the last occurrence — header comments
+    # may mention the command earlier.
+    assert text.index(scrub) < text.rindex("uv run --no-sync pytest"), workflow
+
+    # Regression trip-wire: a plain `uv run pytest` implicitly re-syncs the
+    # environment, which would re-fetch git deps mid-test-invocation.
+    assert "uv run pytest" not in text, (
+        f"{workflow}: test invocation must be `uv run --no-sync pytest` so "
+        "tests can never trigger a credential-needing re-resolve"
+    )
