@@ -79,7 +79,7 @@ on:
         type: string
         default: ""
       use_pat_for_git_deps:
-        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). Only a push to the default branch (already-reviewed code) materializes the credential without this input; schedule / workflow_dispatch / branch-push runs need it too. NOTE the honest boundary: this input is NOT a defense against actors with push access — they can edit the caller or add a workflow on their branch and read any repo-visible secret (GitHub's same-repo pull_request baseline). It defends the no-workflow-change surface: poisoned lockfiles / dependency build hooks and test-code changes riding otherwise-legitimate PRs."
+        description: "Materialize the git-deps credential (GIT_DEPS_PAT, falling back to AUTOMERGE_PAT) on pull_request runs so `uv sync` can clone private/cross-org git-URL dependencies. Default false: PR runs execute PR-controlled code during dependency install, so a readable credential there is exfiltratable (caught 2026-07-16 via wxa-secrets#28 codex review). Set true ONLY on repos that genuinely have git-URL deps (e.g. wxa_sanctions -> wxa-secrets). Only a push to the default branch (already-reviewed code) materializes the credential without this input; schedule / workflow_dispatch / branch-push runs need it too. NOTE the honest boundary: the real fleet protection is the DEFAULT of forwarding nothing — non-opted-in repos never expose the credential on a PR. Opting in accepts a residual install-phase window: PR-controlled code that `uv sync` runs (package build hooks, or whatever a poisoned lockfile pulls in) executes while the credential is present and CAN read it; only the post-install test phase is protected by the pre-test scrub. This input is also NOT a defense against actors with push access — they can edit the caller or add a workflow and read any repo-visible secret (GitHub's same-repo pull_request baseline; fork PRs get no secrets). Allowlist gating + preferring the least-privilege GIT_DEPS_PAT bound the blast radius."
         required: false
         type: boolean
         default: false
@@ -190,17 +190,19 @@ jobs:
         #     install step via GIT_CONFIG_GLOBAL, deleted before the test
         #     invocation runs.
         #   - On pull_request runs it is materialized ONLY when the caller
-        #     sets `use_pat_for_git_deps: true`. Honest boundary (codex P1,
-        #     2026-07-16): an actor with PUSH access can edit the caller —
-        #     or add any workflow — on their branch and read any repo-
-        #     visible secret; that is GitHub's baseline for same-repo
-        #     pull_request runs and no workflow input can prevent it. The
-        #     gate defends the no-workflow-change surface instead: poisoned
-        #     lockfiles / dependency build hooks and test-code changes
-        #     riding otherwise-legitimate PRs (dependabot bumps, generated
-        #     PRs), which execute during install/tests without touching
-        #     workflow files. Repos without git-URL deps should not forward
-        #     the secret at all.
+        #     sets `use_pat_for_git_deps: true`. Honest boundary (codex,
+        #     2026-07-16): the real fleet protection is the DEFAULT of
+        #     forwarding nothing — non-opted-in repos never expose the
+        #     credential on a PR. Opting in accepts a residual install-phase
+        #     window: PR-controlled code that `uv sync` runs (package build
+        #     hooks, or whatever a poisoned lockfile pulls in) executes
+        #     while the credential is present and CAN read it; only the
+        #     post-install test phase is protected by the scrub below.
+        #     The input is also NOT a boundary against push-access actors —
+        #     they can edit the caller or add any workflow and read any
+        #     repo-visible secret (GitHub's same-repo pull_request baseline;
+        #     fork PRs get no secrets). Repos without git-URL deps should
+        #     not forward the secret at all.
         #   - Only a push to the default branch runs already-reviewed code,
         #     so only that event materializes the credential without the
         #     input. Every other event — branch pushes, schedule,
