@@ -482,9 +482,28 @@ jobs:
       #     timeline hold.
       #
       # Both reads go through the issues API namespace the classifier-verdict
-      # step already uses in production, and both degrade gracefully
-      # (unreadable → that signal reports no hold) so this can never crash
-      # the run or strand a PR.
+      # step already uses in production, and both FAIL CLOSED after 3
+      # attempts (same retry/backoff as the classifier-verdict reads): an
+      # unreadable hold signal must never be read as "no hold" — that would
+      # let an API blip defeat the human's explicit hold under precisely
+      # the conditions (API misbehavior) where the defense matters, the
+      # same rationale that hardened the classifier-verdict label read
+      # (codex round-3 P1). An earlier revision promised the opposite
+      # ("degrades gracefully — can never crash the run"); that trade was
+      # wrong: a red run costs a re-run or a manual click, while a silently
+      # dropped hold costs an unwanted merge of exactly the PR a human
+      # flagged. Failing here never arms auto-merge (a failed step skips
+      # the enable step), and the always() error-revoke step at the end of
+      # the job — which counts steps.hold in its outcome list — disarms any
+      # arm a previous run already enabled, so a red read is safe for
+      # already-armed PRs too.
+      #
+      # Pagination is part of the same no-silent-loss contract: the label
+      # read paginates like the classifier's (a hold label past the
+      # 30-label default page must not read as absent), and the timeline
+      # aggregation runs across ALL pages in one jq pass — see the Signal 2
+      # comment for the per-page-max defect this replaces. Behavior pinned
+      # by selftest/test_automerge_hold_gate.sh.
       - name: Check manual hold
         id: hold
         if: |
@@ -496,14 +515,21 @@ jobs:
           HOLD_LABEL: ${{ inputs.hold_label }}
         run: |
           set -euo pipefail
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           hold=0
           reason=""
 
           # Signal 1: hold label. Query live labels, not the event snapshot —
           # the label may have been applied after the triggering event fired.
+          # Paginated for the same reason as the classifier-verdict label
+          # read: a hold label past the 30-label default page must not read
+          # as absent.
           if [ -n "$HOLD_LABEL" ]; then
-            labels=$(gh api "/repos/${{ github.repository }}/issues/$PR/labels" \
-              --jq '.[].name' 2>/dev/null || echo "")
+            labels=$(retry gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/labels?per_page=100" \
+              --paginate --jq '.[].name') || {
+              echo "::error::could not read PR labels after 3 attempts — cannot rule out a '$HOLD_LABEL' hold; refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+              exit 1
+            }
             if echo "$labels" | grep -qxF "$HOLD_LABEL"; then
               hold=1
               reason="label:$HOLD_LABEL"
@@ -518,23 +544,36 @@ jobs:
           # --disable-auto, not our own classifier/hold revoke). Ties resolve
           # toward the human disable — fail-safe. See the step's header
           # comment for why (a) chronology and (b) actor both matter.
+          #
+          # The jq runs ONCE across all pages (-s, then add): `gh api
+          # --paginate` emits each page as its own top-level JSON array, so
+          # a plain per-input filter computes a PER-PAGE max and prints one
+          # verdict line per page — multi-line output the string comparison
+          # below can never equal, i.e. any PR whose timeline crossed one
+          # page silently reported "no hold". And no `try`: a body that
+          # does not parse or shape-check is an UNKNOWN hold state, which
+          # fails closed below, never open.
           if [ "$hold" -eq 0 ]; then
-            human_disable=$(
-              (gh api "/repos/${{ github.repository }}/issues/$PR/timeline" \
-                 --paginate 2>/dev/null || echo '[]') \
-              | jq -r 'try (
-                  [ .[] | select(.event == "auto_merge_disabled"
-                        or .event == "auto_merge_enabled"
-                        or .event == "auto_squash_enabled"
-                        or .event == "auto_rebase_enabled") ]
-                  | (map(.created_at) | max) as $t
-                  | if $t == null then "no"
-                    elif any(.[]; .created_at == $t
-                          and .event == "auto_merge_disabled"
-                          and ((.actor.login // "") != "github-actions[bot]"))
-                    then "yes" else "no" end
-                ) // "no"'
-            )
+            timeline=$(retry gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/timeline?per_page=100" \
+              --paginate) || {
+              echo "::error::could not read the PR timeline after 3 attempts — cannot rule out a human auto-merge disable; refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+              exit 1
+            }
+            human_disable=$(printf '%s' "$timeline" | jq -rs '
+                (add // [])
+                | [ .[] | select(.event == "auto_merge_disabled"
+                      or .event == "auto_merge_enabled"
+                      or .event == "auto_squash_enabled"
+                      or .event == "auto_rebase_enabled") ]
+                | (map(.created_at) | max) as $t
+                | if $t == null then "no"
+                  elif any(.[]; .created_at == $t
+                        and .event == "auto_merge_disabled"
+                        and ((.actor.login // "") != "github-actions[bot]"))
+                  then "yes" else "no" end') || {
+              echo "::error::PR timeline response did not parse — refusing to arm auto-merge (fail closed)."
+              exit 1
+            }
             if [ "$human_disable" = "yes" ]; then
               hold=1
               reason="timeline:human-disable-newest"
@@ -946,7 +985,8 @@ jobs:
       # FAIL CLOSED for already-armed PRs (codex round-4 P1): "refusing
       # to arm" is not enough when a previous run already armed. If a
       # gating step ERRORED (rules unreadable after retries, label read
-      # failed, classifier enum violation, 3000-file listing cap), this
+      # failed, hold signals — label or timeline — unreadable after
+      # retries, classifier enum violation, 3000-file listing cap), this
       # run cannot know the PR is safe — and without this step the job
       # would just go red while the stale arm survives and merges once
       # checks pass. Runs last, under always(), because a failed step
@@ -971,6 +1011,7 @@ jobs:
            (steps.detect.outcome != 'success' &&
             startsWith(github.event.pull_request.head.ref, 'claude/'))) &&
           (steps.classifier_verdict.outcome == 'failure' ||
+           steps.hold.outcome == 'failure' ||
            steps.risk.outcome == 'failure' ||
            steps.setup_node.outcome == 'failure' ||
            steps.checkout.outcome == 'failure' ||
