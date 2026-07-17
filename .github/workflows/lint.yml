@@ -217,8 +217,10 @@ jobs:
       # Used by `gh api .../pulls/N/files` in changed-only mode. If the
       # caller's GITHUB_TOKEN doesn't grant pull-requests, this job-level
       # request is silently capped — the gh api call 403s and the
-      # "Resolve prettier targets" step gracefully falls back to full-glob
-      # mode (emits ::warning:: and sets mode=glob). The workflow still
+      # "Resolve prettier targets" step retries, warns, and skips the
+      # prettier check for that run (sets mode=none — a scoping failure
+      # is never widened to a full-tree check, which would go red on
+      # pre-existing drift in files the PR never touched). The workflow still
       # starts because this scope is requested at job level, not workflow
       # level — workflow-level perms are a hard ceiling that cause
       # startup_failure if exceeded by the caller's grant.
@@ -259,13 +261,14 @@ jobs:
 
       # Decide what files prettier should check. Three modes:
       #   - mode=glob   → existing behavior, run prettier --check "$GLOB"
-      #                   (push events, or PRs with prettier_changed_only=false,
-      #                   or PRs where listing changed files failed)
+      #                   (push events, or PRs with prettier_changed_only=false)
       #   - mode=files  → run prettier --check on an explicit file list
       #                   (PRs, default — only files added/modified/renamed
       #                   in the diff that also match the glob)
       #   - mode=none   → no targets; emit a no-op log line and pass
-      #                   (a PR that changed zero markdown files)
+      #                   (a PR that changed zero markdown files, or the
+      #                   changed-file listing failed after retries —
+      #                   fail-safe, see the listing block below)
       #
       # Glob ∩ changed-files intersection is computed by:
       #   1. Asking GitHub for the PR's file list (excludes deletions).
@@ -304,14 +307,31 @@ jobs:
             exit 0
           fi
 
+          # List the PR's changed files, with retries — the API can hiccup
+          # (an HTML 5xx body makes gh's --jq die with "invalid character
+          # '<' looking for beginning of value"). On persistent failure
+          # SKIP the prettier check for this run instead of falling open
+          # to the full-tree glob: a full-tree check goes red on
+          # pre-existing drift in files the PR never touched. Block below
+          # is byte-identical in prettier-autofix.yml — the selftest
+          # drift-checks it; keep both in sync.
           PR_FILES_LOG="$(mktemp)"
-          if ! gh api --paginate \
-                "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-                --jq '.[] | select(.status != "removed") | .filename' \
-                > "$PR_FILES_LOG" 2>/tmp/gh_err; then
-            echo "::warning::Could not list PR files (often means the caller's GITHUB_TOKEN lacks 'pull-requests: read'). Falling back to full-glob mode."
+          LISTED=0
+          for attempt in 1 2 3; do
+            if gh api --paginate \
+                 "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                 --jq '.[] | select(.status != "removed") | .filename' \
+                 > "$PR_FILES_LOG" 2>/tmp/gh_err; then
+              LISTED=1
+              break
+            fi
+            echo "Changed-file listing attempt ${attempt}/3 failed:"
             sed 's/^/  /' /tmp/gh_err || true
-            echo "mode=glob" >> "$GITHUB_OUTPUT"
+            if [ "$attempt" -lt 3 ]; then sleep "$(( attempt * 2 ))"; fi
+          done
+          if [ "$LISTED" -ne 1 ]; then
+            echo "::warning::Could not list PR files after 3 attempts (transient API error, or the caller's GITHUB_TOKEN lacks 'pull-requests: read'). Skipping prettier for this run — refusing to widen scope to the full tree."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           mapfile -t CHANGED < "$PR_FILES_LOG"

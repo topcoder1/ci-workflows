@@ -26,6 +26,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
         "selftest/test_classify_bracket_guard.sh",
         "selftest/test_classify_nocase.sh",
         "selftest/test_pr_files_listing.sh",
+        "selftest/test_prettier_scope_failsafe.sh",
         "selftest/test_prettier_symlink_filter.sh",
     ],
 )
