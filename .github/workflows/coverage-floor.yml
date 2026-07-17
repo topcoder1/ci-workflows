@@ -367,8 +367,10 @@ jobs:
         #     insteadOf rewrite was readable by test code via
         #     `git config --get-regexp --global url`). It goes into a
         #     throwaway config file under $RUNNER_TEMP, exposed to the
-        #     measure step via GIT_CONFIG_GLOBAL, deleted before the test
-        #     invocation runs.
+        #     measure step via GIT_CONFIG_GLOBAL, deleted before the default
+        #     test invocation runs. (A caller `test_command` runs install +
+        #     tests as one command, so the credential persists through it —
+        #     that config accepts the wider window; see the measure step.)
         #   - On pull_request runs it is materialized ONLY when the caller
         #     sets `use_pat_for_git_deps: true`. Honest boundary (codex,
         #     2026-07-16): the real fleet protection is the DEFAULT of
