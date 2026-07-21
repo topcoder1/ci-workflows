@@ -19,7 +19,8 @@ name: Lint
 #     required check reports `skipped` — which GitHub counts as SATISFIED — and the
 #     PR merges green and UNREVIEWED. See selftest/check_draft_gate_triggers.py.
 #   - prettier --check on the markdown glob (default **/*.md)
-#   - shellcheck on standalone shell scripts (opt-in, default OFF)
+#   - shellcheck on standalone shell scripts (opt-in for callers, default
+#     OFF; always ON for this repo's own self-test runs — see the job)
 #
 # Defaults chosen for "drop into an existing repo without breaking it":
 #   - actionlint runs WITHOUT shellcheck. Shellcheck integration in actionlint
@@ -467,10 +468,22 @@ jobs:
 
   shellcheck:
     name: shellcheck (scripts)
-    # Opt-in only — most repos have style/info shellcheck drift on existing
-    # scripts that would flood the first install PR. Caller flips
+    # Opt-in for callers — most repos have style/info shellcheck drift on
+    # existing scripts that would flood the first install PR. Caller flips
     # `run_shellcheck_scripts: true` when ready to enforce.
-    if: ${{ format('{0}', inputs.run_shellcheck_scripts) == 'true' }}
+    #
+    # Self-test runs (pull_request/push on this repo) always run this job —
+    # the fleet-wide rollout (2026-07-21) enforced this check on every
+    # consumer while the central repo's own operator scripts (scripts/,
+    # selftest/*.sh) had no shellcheck coverage at all. On self-test
+    # triggers the `inputs` context is null, so the input stringifies to ''
+    # and the body's `|| 'error'` / `|| '.'` fallbacks supply the defaults.
+    # A workflow_call caller can never hit the '' arm (omitted inputs
+    # resolve to their declared defaults, so callers always stringify to
+    # 'true'/'false') — and the `github.repository` conjunct pins that arm
+    # to this repo anyway, so caller behavior is unchanged even if
+    # input-default semantics ever drift.
+    if: ${{ format('{0}', inputs.run_shellcheck_scripts) == 'true' || (github.repository == 'topcoder1/ci-workflows' && format('{0}', inputs.run_shellcheck_scripts) == '') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
