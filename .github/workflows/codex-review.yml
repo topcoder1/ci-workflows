@@ -177,6 +177,26 @@ jobs:
           fi
           echo "$verdict" | head -c 4096 > /tmp/codex.verdict
 
+          # Record which Codex model + CLI version actually ran. `npm install
+          # -g @openai/codex@latest` (above) floats the CLI — and thus its
+          # default model — on every run, so a silently shifted default would
+          # otherwise drift unnoticed across the fleet. The CLI version is the
+          # reliable signal (always captured); the model is best-effort from
+          # Codex's startup banner, falling back to "(unreported)". grep/sed
+          # guarded with `|| true` so a missing banner never trips pipefail.
+          codex_version=$(codex --version 2>/dev/null | head -n1 || true)
+          model=$(grep -ioE 'model:[[:space:]]*[A-Za-z0-9._-]+' /tmp/codex.out \
+            | head -n1 | sed -E 's/^[Mm]odel:[[:space:]]*//' || true)
+          [ -n "$model" ] || model="(unreported — see logs)"
+          printf '%s' "$model" > /tmp/codex.model
+          printf '%s' "${codex_version:-unknown}" > /tmp/codex.cliversion
+          {
+            echo "### Codex review provenance"
+            echo "- CLI: \`${codex_version:-unknown}\`"
+            echo "- Model: \`${model}\`"
+            echo "- Reasoning effort: \`low\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Post review comment
         if: steps.gate.outputs.should_run == 'true'
         env:
@@ -187,5 +207,7 @@ jobs:
             echo "### Codex review"
             echo
             cat /tmp/codex.verdict
+            echo
+            echo "<sub>Model: \`$(cat /tmp/codex.model 2>/dev/null || echo unknown)\` · CLI: \`$(cat /tmp/codex.cliversion 2>/dev/null || echo unknown)\` · reasoning: \`low\`</sub>"
           } > /tmp/comment.md
           gh pr comment "$PR" --body-file /tmp/comment.md
