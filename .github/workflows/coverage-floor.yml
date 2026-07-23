@@ -312,7 +312,7 @@ jobs:
 
       # Language + tooling setup. Skipped when consuming a pre-measured artifact
       # (no tests to run → no toolchain needed).
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.detect.outputs.language == 'python' && inputs.pre_measured_coverage_artifact == ''
         with:
           python-version: ${{ inputs.python_version || '3.13' }}
