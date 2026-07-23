@@ -321,7 +321,7 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         if: steps.detect.outputs.language == 'go' && inputs.pre_measured_coverage_artifact == ''
         with:
           go-version: ${{ steps.detect.outputs.go_version }}
