@@ -265,7 +265,7 @@ jobs:
       - name: Setup Node (risk-paths classification)
         id: setup_node
         if: steps.detect.outputs.claude_authored == '1'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
 
