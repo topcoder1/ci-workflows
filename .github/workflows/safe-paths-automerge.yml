@@ -52,6 +52,17 @@ on:
           `secrets: inherit` in the caller, or pass explicitly.
         required: false
 
+# Serialize per PR. Without this, a run that classified an OLDER, docs-only
+# head can still be sitting in its enable step when a push adds
+# docs/legal/**; it then arms auto-merge against the CURRENT head — the
+# legal revision — and the newer run has already passed its revoke check, so
+# no event remains to disarm it. cancel-in-progress kills the stale run; the
+# head guard on the enable step below covers the window where it was already
+# past cancellation. (Codex review round 8 P1.)
+concurrency:
+  group: safe-paths-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   safe_paths_automerge:
     runs-on: ubuntu-latest
@@ -75,9 +86,82 @@ jobs:
           # checkout" footgun — the API form never needs a checkout.)
           changed=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[].filename')
-          # The listing endpoint caps at 3000 files. Past that we can't
-          # prove every changed file is safe → defer (same stance as the
-          # empty-diff branch below).
+          # NOTE the 3000-file truncation check lives AFTER the override
+          # block below, not here. Both exit early with all_safe=0, but only
+          # the override also emits reason=unsafe-override, which is what
+          # triggers the revoke step. Returning on truncation first would
+          # skip the override entirely, so an already-armed PR updated to
+          # 3000+ files including docs/legal/** would keep its arm and merge
+          # the legal change. (Codex review round 8 P2.) Checking the
+          # override on a truncated list is strictly better than not
+          # checking it: it still catches any legal path within the first
+          # 3000 entries.
+
+          # Built-in UNSAFE overrides, checked BEFORE the safe globs and
+          # winning over every one of them. These are paths that sit inside
+          # an otherwise-safe tree but are not "documentation" in the sense
+          # the safety argument above relies on.
+          #
+          # docs/legal/**: customer-facing legal wording (AUP, ToS, privacy).
+          # The `^docs/.*` safe glob's premise is "zero runtime impact, can
+          # never break code paths" — true of a runbook, false of a document
+          # that states contractual commitments to customers. A wrong clause
+          # cannot be caught by CI and is not revertable in one cycle once
+          # published, which is the repo protocol's own test for manual merge.
+          # Lesson 2026-07-25, whois-api-llc/wxa_vpn#1268: an AUP change
+          # asserting that all bulk deliveries are watermarked auto-merged
+          # here in ~seconds. The assertion was false for two formats (.mmdb,
+          # .parquet), and no human saw it before it landed on main.
+          #
+          # NOTE this is deliberately a SEPARATE gate from the customer-copy
+          # policy in claude-author-automerge.yml, which is enforced via the
+          # caller's .github/risk-paths.yml `sensitive:` list. That gate
+          # cannot help here: this workflow never consults the classifier —
+          # it decides on diff content alone — so a repo can list
+          # docs/legal/** as `sensitive:` and still have it merged by this
+          # workflow. Both gates are required; neither subsumes the other.
+          unsafe_overrides='^docs/legal/'
+
+          # A rename reports ONLY its destination in `.filename`; the source
+          # path lives in `.previous_filename`. Without this, moving
+          # docs/legal/aup.md to docs/archive/aup.md — which removes the
+          # policy from its canonical location — reads as a plain docs/**
+          # change and auto-merges. Match the override against BOTH ends of
+          # every rename. Deliberately a separate request rather than folding
+          # both fields into the `changed` listing above: that listing feeds
+          # the 3000-file cap and the safe-glob loop, and a previous_filename
+          # must never be counted there (it is not a changed file, and a
+          # rename INTO docs/legal/ would otherwise be judged on its old
+          # path). Kept override-only so the existing listing keeps its
+          # exact, separately-pinned semantics.
+          renamed_from=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename')
+
+          override_hits=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            while IFS= read -r p; do
+              p="${p#"${p%%[![:space:]]*}"}"
+              [ -z "$p" ] && continue
+              if echo "$f" | grep -Eq "$p"; then
+                override_hits="$override_hits$f\n"
+                break
+              fi
+            done <<< "$unsafe_overrides"
+          done <<< "$(printf '%s\n%s\n' "$changed" "$renamed_from")"
+
+          if [ -n "$override_hits" ]; then
+            echo "all_safe=0" >> "$GITHUB_OUTPUT"
+            echo "reason=unsafe-override" >> "$GITHUB_OUTPUT"
+            echo "Not safe — diff touches a built-in unsafe-override path."
+            echo "Override hits:"
+            printf "%b" "$override_hits"
+            exit 0
+          fi
+
+          # Deferred from above: the listing endpoint caps at 3000 files.
+          # Past that we can't prove every changed file is safe → defer
+          # (same stance as the empty-diff branch below).
           if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
             echo "all_safe=0" >> "$GITHUB_OUTPUT"
             echo "reason=file-list-truncated" >> "$GITHUB_OUTPUT"
@@ -139,6 +223,77 @@ jobs:
             echo "All $(echo "$changed" | wc -l | tr -d ' ') changed files are in safe paths."
           fi
 
+      # Computing all_safe=0 is not enough once auto-merge is already ON.
+      # GitHub PRESERVES an auto-merge request across pushes, so the
+      # sequence "PR touches only docs/foo.md (armed here) → push adds
+      # docs/legal/aup.md" leaves the arm standing: this run recomputes
+      # all_safe=0, exits, and the legal change merges the moment required
+      # checks go green. That is the very bypass the override exists to
+      # stop. Revoke explicitly. (Codex review round 5.)
+      #
+      # ONLY for the override — not for every all_safe=0. The other
+      # not-safe branches mean "defer to another workflow", and those
+      # workflows legitimately arm auto-merge; revoking there would fight
+      # them. The override is the one branch that is a positive "this must
+      # not auto-merge" verdict.
+      # `file-list-truncated` is included because a legal path can hide past
+      # the API's 3000-entry cap: the override scan then sees no hit, yet we
+      # also cannot prove the revision is clean. An arm from an earlier safe
+      # revision must not survive that. Consistent with the sibling gate —
+      # claude-author-automerge.yml also fails closed on truncation — so this
+      # does not fight a workflow that would legitimately arm.
+      # (Codex review round 10 P2.)
+      - name: Revoke auto-merge on an unsafe-override path
+        if: >-
+          steps.classify.outputs.reason == 'unsafe-override' ||
+          steps.classify.outputs.reason == 'file-list-truncated'
+        env:
+          # Match the enable step's token: an arm placed by the PAT is
+          # revoked by the same identity.
+          GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Ownership guard, mirroring claude-author-automerge.yml: if the
+          # head moved since this run's event, the newer head's own run
+          # owns the decision and an unconditional revoke here could land
+          # after it validly armed a clean PR, with no event left to
+          # re-arm. Skip only on a POSITIVE head-moved read; if the read
+          # itself fails, revoke anyway (fail toward safety).
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+          if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head moved (${HEAD_SHA} → ${now}) — newer run owns gating; skipping stale revoke."
+            exit 0
+          fi
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+          if [ "$state" = "OFF" ]; then
+            echo "Auto-merge already off — nothing to revoke."
+            exit 0
+          fi
+          echo "::warning::Diff touches an unsafe-override path (customer-facing legal wording) while auto-merge is armed — revoking."
+          # Fail CLOSED: only a verified OFF is success. A swallowed
+          # `--disable-auto` failure or an unreadable verify both leave the
+          # PR possibly still armed, and treating that as success would let
+          # the legal change merge — exactly what this step exists to stop.
+          # UNKNOWN is not OFF. (Codex review round 6.)
+          after="UNKNOWN"
+          for attempt in 1 2 3; do
+            gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+            after=$(gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+            echo "Revoke attempt ${attempt}: auto-merge state = $after"
+            [ "$after" = "OFF" ] && break
+            sleep 3
+          done
+          if [ "$after" != "OFF" ]; then
+            echo "::error::could not VERIFY auto-merge is off (state=$after) after 3 attempts — a customer-facing legal change may merge unreviewed. Disable auto-merge on this PR by hand."
+            exit 1
+          fi
+          echo "Auto-merge verified OFF."
+
       - name: Enable auto-merge
         if: steps.classify.outputs.all_safe == '1'
         env:
@@ -149,10 +304,24 @@ jobs:
           # `automerge_pat` secret docstring above for the full rationale.
           GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           METHOD: ${{ inputs.merge_method }}
           USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
         run: |
           set -euo pipefail
+          # Arm only the head this run actually classified. `gh pr merge
+          # --auto` acts on the PR's CURRENT head, so a run that classified
+          # an older docs-only revision would otherwise arm a newer revision
+          # it never inspected — including one that added docs/legal/**.
+          # Fail CLOSED on an unreadable head: skipping an arm is harmless
+          # (the newer head's own run arms it), arming blind is not.
+          # (Codex review round 8 P1.)
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+          if [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head is '${now:-<unreadable>}' but this run classified '${HEAD_SHA}' — not arming; the current head's own run owns that decision."
+            exit 0
+          fi
           echo "Safe-paths-only diff — enabling auto-merge ($METHOD)."
           if [ "$USING_PAT" = "1" ]; then
             echo "Auth: caller-supplied automerge_pat — downstream workflows WILL trigger on merge."

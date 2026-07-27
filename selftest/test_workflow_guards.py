@@ -30,6 +30,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
         "selftest/test_pr_files_listing.sh",
         "selftest/test_prettier_scope_failsafe.sh",
         "selftest/test_prettier_symlink_filter.sh",
+        "selftest/test_safe_paths_unsafe_overrides.sh",
     ],
 )
 def test_shell_selftest(script):
@@ -37,6 +38,155 @@ def test_shell_selftest(script):
         ["bash", script], cwd=REPO_ROOT, capture_output=True, text=True
     )
     assert proc.returncode == 0, f"{script} failed:\n{proc.stdout}\n{proc.stderr}"
+
+
+def test_codex_review_covers_every_automergeable_class():
+    """Codex must review every risk class that can merge unread.
+
+    2026-07-26 (whois-api-llc/wxa_vpn): pr-codex-review.yml gated on
+    `risk_class == 'sensitive'` alone, but `standard` is BOTH the default
+    class for ordinary src/** work AND a class claude-author-automerge.yml
+    will auto-merge. #1270 (+839 lines under src/**) and #1273 (+786) both
+    classified `standard`, passed CI clean, and never saw Codex; a manual
+    run on #1270 afterwards found four P1s, including a forgeable-identity
+    hole that let a customer attribute a leaked artifact to a competitor.
+
+    `blocked` is intentionally NOT required here — it cannot auto-merge, so
+    a human is already the gate.
+
+    Spend is bounded downstream by codex-gate.mjs (small-diff and
+    docs/tests-only skips), so this assertion is about coverage, not cost.
+    """
+    text = (WORKFLOWS_DIR / "pr-codex-review.yml").read_text()
+    # Strip comments so a class named only in prose can't satisfy the gate.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    for risk_class in ("sensitive", "standard"):
+        assert f"risk_class == '{risk_class}'" in code, (
+            f"pr-codex-review.yml must run Codex on risk:{risk_class} — it is "
+            "auto-mergeable, so nothing else guarantees a second reader"
+        )
+
+
+def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
+    """The risk:standard Codex lane must not publish the bypass-trusted check.
+
+    claude-author-automerge.yml bypasses its risk-tier manual-merge gate when
+    the check named by `codex_check_name` (default "review / Codex Review")
+    concludes SUCCESS. That check name is "<job id> / Codex Review".
+
+    The bypass trusts a CONCLUSION, not a review: when codex-gate.mjs skips
+    (small diff, or docs/tests-only), the review steps are skipped but the
+    job still concludes `success`. So routing risk:standard through job id
+    `review` would let a small change to an auth/billing/migration path —
+    classified `standard` because the repo's risk-paths.yml `sensitive:`
+    list is empty, yet flagged risky=1 by the central regex — auto-merge
+    with Codex having read nothing. Today that combination has no Codex
+    check at all, so the risk gate holds.
+
+    Keep the two lanes on distinct job ids. (Codex review round 2 caught
+    this on the first draft of the standard-class widening, 2026-07-27.)
+    """
+    text = (WORKFLOWS_DIR / "pr-codex-review.yml").read_text()
+
+    def job_id_for(risk_class):
+        # Job ids are top-level (2-space) keys under `jobs:`; find the one
+        # whose body gates on this risk class.
+        current, found = None, None
+        for line in text.splitlines():
+            m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if m:
+                current = m.group(1)
+            if (
+                not line.lstrip().startswith("#")
+                and f"risk_class == '{risk_class}'" in line
+            ):
+                found = current
+        return found
+
+    sensitive_job = job_id_for("sensitive")
+    standard_job = job_id_for("standard")
+    assert sensitive_job, "no job gates on risk_class == 'sensitive'"
+    assert standard_job, "no job gates on risk_class == 'standard'"
+    assert sensitive_job != standard_job, (
+        "risk:standard and risk:sensitive must run in DIFFERENT jobs — a "
+        "shared job id publishes the bypass-trusted check name for standard "
+        f"PRs too (both are '{sensitive_job}')"
+    )
+
+    # And the standard lane's id must not be the one claude-author-automerge
+    # trusts by default.
+    automerge = (WORKFLOWS_DIR / "claude-author-automerge.yml").read_text()
+    m = re.search(r'default:\s*"([^"]*?)\s*/\s*Codex Review"', automerge)
+    assert m, "could not read codex_check_name default from claude-author-automerge.yml"
+    trusted_job = m.group(1).strip()
+    assert standard_job != trusted_job, (
+        f"the risk:standard lane uses job id '{standard_job}', which is the "
+        f"bypass-trusted check name '{trusted_job} / Codex Review' — a "
+        "cost-gated SKIP would then read as a passed review and bypass the "
+        "risk-tier manual-merge gate"
+    )
+
+
+def test_safe_paths_never_automerges_customer_facing_legal():
+    """docs/legal/** must be excluded from the docs safe-paths carve-out.
+
+    2026-07-25 (whois-api-llc/wxa_vpn#1268): an Acceptable Use Policy change
+    matched the built-in `^docs/.*` glob and auto-merged unreviewed. This
+    workflow decides on diff content alone and never consults the risk
+    classifier, so a caller's risk-paths.yml `sensitive:` list cannot close
+    the hole — the override list in the workflow is the only gate.
+
+    Behavior is pinned by selftest/test_safe_paths_unsafe_overrides.sh; this
+    asserts the override list itself did not quietly lose the entry.
+    """
+    text = (WORKFLOWS_DIR / "safe-paths-automerge.yml").read_text()
+    assert "unsafe_overrides='^docs/legal/'" in text, (
+        "safe-paths-automerge.yml must keep docs/legal/ in unsafe_overrides — "
+        "customer-facing legal wording is not revertable in one cycle"
+    )
+
+    # Rename bypass: the pull-files API reports only the DESTINATION in
+    # .filename, so moving docs/legal/aup.md to docs/archive/ would read as
+    # an ordinary docs change without this. (Codex review round 1.)
+    assert "previous_filename" in text, (
+        "the override must also match rename SOURCES (.previous_filename) — "
+        "otherwise moving a legal doc out of docs/legal/ auto-merges"
+    )
+
+    # Already-armed bypass: GitHub preserves an auto-merge request across
+    # pushes, so computing all_safe=0 does not disarm a PR armed on an
+    # earlier safe revision. (Codex review round 5.)
+    assert "--disable-auto" in text, (
+        "safe-paths-automerge.yml must REVOKE an existing auto-merge arm when "
+        "an unsafe-override path appears — recomputing all_safe=0 leaves a "
+        "previously-armed PR armed, and the legal change merges anyway"
+    )
+    assert "steps.classify.outputs.reason == 'unsafe-override'" in text, (
+        "the revoke must be scoped to the override branch only — revoking on "
+        "every all_safe=0 would fight the workflows that legitimately arm"
+    )
+    # A legal path can hide past the API's 3000-entry cap: the override scan
+    # sees no hit, but the revision cannot be proven clean either, so an arm
+    # from an earlier safe revision must not survive. (Codex round 10.)
+    assert "steps.classify.outputs.reason == 'file-list-truncated'" in text, (
+        "revoke must also fire on a truncated file list — a docs/legal/ path "
+        "beyond the 3000-entry cap would otherwise keep a stale arm alive"
+    )
+
+    # The central risk scan is the DURABLE gate (it decides before arming,
+    # so it has no revoke race). It must see rename sources too, or moving a
+    # legal doc out of docs/legal/ escapes it. (Codex review round 9.)
+    automerge = (WORKFLOWS_DIR / "claude-author-automerge.yml").read_text()
+    assert "^docs/legal/.*" in automerge, (
+        "claude-author-automerge.yml's risk patterns must include "
+        "^docs/legal/.* — safe-paths revocation alone races this workflow's arm"
+    )
+    assert "previous_filename" in automerge, (
+        "the risk scan must also match rename SOURCES — otherwise moving a "
+        "risky file to a safe path escapes the gate"
+    )
 
 
 def test_no_global_git_config_writes_in_workflows():

@@ -76,13 +76,25 @@ name: Claude-author Auto-merge (reusable)
 #       changes (lesson 2026-05-04, wxa_vpn#250) and was narrowed
 #       2026-05-20.
 #
-# Customer-copy diffs (legal / marketing / pricing wording) are NOT
+# Customer-copy diffs (legal / marketing / pricing wording) are MOSTLY not
 # detected by the global regex here — repo layouts differ (techrecon:
 # site/src/**; wxa-astro: src/content/** Tina JSON), so a central glob
 # would over-block some repos and miss others. The enforcement for this
 # policy category is the caller's .github/risk-paths.yml `sensitive:`
 # list (item 1 above): marketing-site repos MUST list their
-# wording-bearing trees there. Lesson 2026-07-02 from
+# wording-bearing trees there.
+#
+# EXCEPTION: `^docs/legal/.*` IS matched centrally (added 2026-07-27).
+# Unlike a marketing tree, docs/legal/ is a fixed conventional path, so it
+# cannot over-block — a repo without that directory is unaffected — and it
+# needs a DURABLE gate rather than a per-repo one. safe-paths-automerge.yml
+# also refuses these paths, but that is a revocation after the fact and
+# races this workflow's arm; matching here means a Claude-authored legal
+# change is never armed in the first place. Lesson 2026-07-25,
+# whois-api-llc/wxa_vpn#1268: an AUP change asserting all bulk deliveries
+# are watermarked (false for .mmdb and .parquet) auto-merged unreviewed.
+# Legal wording is the archetypal not-revertable-in-one-cycle category:
+# CI cannot check whether a clause is TRUE. Lesson 2026-07-02 from
 # whois-api-llc/techrecon#405: a marketing-copy PR auto-merge-armed
 # because techrecon's sensitive: list had no site/ entries; fixed in
 # techrecon#410 + wxa-astro#63. Claude Review still reviews copy
@@ -673,6 +685,22 @@ jobs:
             echo "::error::PR changes 3000+ files — file listing is truncated and the risk scan cannot classify every path. Apply the '${BYPASS_LABEL:-auto-merge-approved}' label or merge manually."
             exit 1
           fi
+          # Renames report ONLY their destination in `.filename`; the source
+          # is in `.previous_filename`. Without it, MOVING a risky file out
+          # of a risky path — `docs/legal/aup.md` → `docs/archive/aup.md`,
+          # or `src/auth/login.py` → `src/util/login.py` — reads as an
+          # ordinary change and escapes the gate, even though deleting a
+          # policy from its canonical location is exactly the edit that
+          # needs a human. Scanning both ends can only ADD risk
+          # classification, never remove it, so it always fails toward
+          # manual merge. Appended AFTER the 3000-file count so rename
+          # sources cannot push a large-but-listable PR over the cap.
+          # (Codex review round 9.)
+          renamed_from=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename' 2>/dev/null || echo "")
+          if [ -n "$renamed_from" ]; then
+            changed=$(printf '%s\n%s' "$changed" "$renamed_from")
+          fi
           # Risk-tier glob patterns (kept in sync with global CLAUDE.md policy).
           # If you add a category, also update install-automerge-policy.sh and
           # the CLAUDE.md policy block.
@@ -684,6 +712,7 @@ jobs:
           ^(.*/)?migrations(/|$)
           .*\.sql$
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
+          ^docs/legal/.*
           (^|/)naf(/|\.(py|go|ts|js)$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
