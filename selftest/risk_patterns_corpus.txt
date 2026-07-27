@@ -52,6 +52,14 @@ RISKY: billing/invoices.py
 RISKY: internal/payment/charge.go
 RISKY: internal/pricing/calc.go
 
+# ── RISKY: customer-facing legal wording (wxa_vpn#1268 gap, 2026-07-27) ────
+# docs/legal/ is a fixed conventional path, so unlike marketing trees it can
+# be matched centrally without over-blocking. CI cannot check whether a
+# clause is TRUE, and a published one is not revertable in one cycle.
+RISKY: docs/legal/acceptable-use-policy.md
+RISKY: docs/legal/terms-of-service.md
+RISKY: docs/legal/privacy/gdpr.md
+
 # ── RISKY: NAF credit/billing gate (wxa_webcat#438 gap, 2026-05-28) ─────────
 # The validate_call/log_successful_call client that authorizes + charges each
 # customer API call. Path has no auth/billing keyword so it slipped through.
@@ -145,6 +153,9 @@ SAFE: src/utils/format.ts
 SAFE: src/api/findingsSlice.ts
 SAFE: docs/architecture.md
 SAFE: docs/data-dictionary.md
+# Anchored at docs/legal/ — "legal" elsewhere in the tree is ordinary docs.
+SAFE: docs/notes/legal-review-process.md
+SAFE: docs/legal-summary.md
 SAFE: README.md
 SAFE: tests/test_anything.py
 SAFE: tests/unit/utils_test.go

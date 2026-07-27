@@ -1,9 +1,14 @@
 name: PR Codex Review
 
 # OpenAI Codex CLI as a third-party reviewer for vendor diversity.
-# Runs ONLY on risk:sensitive PRs (per .github/risk-paths.yml). Pairs with
-# Claude Review (which runs on every PR via pr-review.yml) to give
+# Runs on risk:sensitive AND risk:standard PRs (per .github/risk-paths.yml)
+# — i.e. every class that can reach main without a human reading the diff.
+# Pairs with Claude Review (which runs on every PR via pr-review.yml) to give
 # independent-model coverage on high-impact code paths.
+#
+# Actual spend is gated a second time inside codex-review.yml by
+# codex-gate.mjs (small diffs and docs/tests-only diffs skip), so the
+# widening to `standard` does not mean a Codex run on every PR.
 
 # ready_for_review is required in the type list: every draft-phase run
 # (opened, synchronize) skips on the draft gate below, so without it a PR
@@ -13,8 +18,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     # Skip the entire Codex track on bootstrap-paths. The classifier labels
-    # these risk:blocked, and this caller only reviews risk:sensitive — so
-    # running it would burn a classify job just to produce a skipped review.
+    # these risk:blocked, and this caller reviews only sensitive/standard —
+    # so running it would burn a classify job just to produce a skipped
+    # review.
     # Bootstrap-path PRs always require admin merge by design, so a
     # secondary review adds no signal.
     #
@@ -52,9 +58,83 @@ jobs:
     if: github.event.pull_request.draft == false
     uses: topcoder1/ci-workflows/.github/workflows/pr-classify.yml@main
 
+  # ---------------------------------------------------------------------
+  # TWO jobs, never both. They differ ONLY in job id, and that difference is
+  # load-bearing: the check name GitHub publishes is "<job id> / Codex
+  # Review", and claude-author-automerge.yml's `codex_check_name` input
+  # (default "review / Codex Review") names THIS job's check as the one
+  # whose SUCCESS bypasses the risk-tier manual-merge gate.
+  #
+  # That bypass trusts a conclusion, not a review. When codex-gate.mjs
+  # decides to skip (diff under SIZE_THRESHOLD, or docs/tests-only), the
+  # review STEPS are skipped but the JOB still concludes `success` — so a
+  # skipped review is indistinguishable from a passed one at the check-run
+  # level.
+  #
+  # Routing `standard` through the same job id would therefore have turned
+  # a coverage fix into a security regression: a repo whose risk-paths.yml
+  # `sensitive:` list is empty (the shipped default) classifies a small
+  # change to an auth / billing / migration path as `standard`, the central
+  # risk regex in claude-author-automerge.yml still flags it risky=1, and
+  # today that combination has NO Codex check at all, so the risk gate
+  # holds and a human merges it. Emitting `review / Codex Review = success`
+  # for it — without Codex having read a line — would auto-merge it.
+  # (Codex review round 2 caught exactly this on the first draft of this
+  # change.)
+  #
+  # So: `sensitive` keeps job id `review` and its existing bypass semantics,
+  # unchanged. `standard` gets a DIFFERENT job id, publishing
+  # "review_standard / Codex Review", which matches no `codex_check_name`
+  # and can never satisfy the bypass. Pure added review coverage, zero new
+  # auto-merge surface.
+  #
+  # PRE-EXISTING and NOT addressed here: the same skip-reads-as-success hole
+  # already applies to `sensitive` PRs on the `review` job. Narrowing that
+  # means changing check-conclusion semantics fleet-wide (40+ repos) and is
+  # a deliberate design decision, not a side effect of this change.
   review:
     needs: classify
     if: needs.classify.outputs.risk_class == 'sensitive'
+    uses: topcoder1/ci-workflows/.github/workflows/codex-review.yml@main
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  # `standard` is the fallback class for any path matching no rule AND a
+  # class claude-author-automerge.yml will auto-merge — so without this it
+  # is the largest body of code reaching main with no second-model read.
+  # Lesson 2026-07-26, whois-api-llc/wxa_vpn#1270 (+839 lines under src/**,
+  # classified `standard`): CI passed it clean; a manual Codex run
+  # afterwards found four P1s, including a forgeable-identity hole that let
+  # a customer attribute a leaked artifact to a competitor. #1273 (+786,
+  # also `standard`) had the same exposure.
+  #
+  # Spend stays bounded by codex-review.yml's own codex-gate.mjs (skips
+  # small diffs and docs/tests-only diffs), so this is not "Codex on every
+  # PR" — the cost gate decides, not the risk class.
+  #
+  # SCOPE — this lane is ADVISORY, not a merge gate. Read this before
+  # assuming a standard PR cannot merge unreviewed.
+  # GitHub's auto-merge waits only for REQUIRED status checks.
+  # "review_standard / Codex Review" is not in any repo's required-checks
+  # ruleset and is not consulted by claude-author-automerge.yml, so a
+  # standard PR whose required checks go green first CAN merge before this
+  # lane finishes. Findings then land on an already-merged PR — useful as
+  # follow-up signal, but it does not prevent the #1270 class outright.
+  # (Codex review round 3 raised exactly this; recorded rather than
+  # silently overclaimed.)
+  #
+  # Making it blocking is a deliberate fleet operation, not a flag here:
+  # a required check must report on EVERY PR or it bricks them on
+  # "Expected — Waiting for status to be reported" forever. Since neither
+  # lane runs for risk:blocked or draft PRs, that needs an always()-gated
+  # summary job over both lanes (accepting `skipped` only with classifier
+  # proof) promoted to the required-checks ruleset in each caller repo.
+  # That is a per-repo ruleset change across 40+ repos with a real
+  # brick-the-fleet failure mode — an operator decision, deliberately not
+  # taken as a side effect of adding coverage.
+  review_standard:
+    needs: classify
+    if: needs.classify.outputs.risk_class == 'standard'
     uses: topcoder1/ci-workflows/.github/workflows/codex-review.yml@main
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
