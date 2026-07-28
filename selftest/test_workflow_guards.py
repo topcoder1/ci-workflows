@@ -27,6 +27,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
         "selftest/test_automerge_riskfile_gate.sh",
         "selftest/test_classify_bracket_guard.sh",
         "selftest/test_classify_nocase.sh",
+        "selftest/test_codex_verdict_gate.sh",
         "selftest/test_pr_files_listing.sh",
         "selftest/test_prettier_scope_failsafe.sh",
         "selftest/test_prettier_symlink_filter.sh",
@@ -38,6 +39,57 @@ def test_shell_selftest(script):
         ["bash", script], cwd=REPO_ROOT, capture_output=True, text=True
     )
     assert proc.returncode == 0, f"{script} failed:\n{proc.stdout}\n{proc.stderr}"
+
+
+def test_codex_verdict_gate_is_wired_and_opt_in():
+    """codex-review.yml must enforce Codex's verdict only when asked to.
+
+    The gate's logic is executed by selftest/test_codex_verdict_gate.sh;
+    this pins the workflow wiring around it, which that test cannot see.
+
+    Three properties, each with a real failure mode:
+
+    1. `default: false`. This reusable has 27 consumers on `@main`. A
+       default-on gate would start failing their PRs on Codex advisories
+       the moment this merges.
+    2. The input actually reaches the script. If the env binding is dropped
+       the script silently runs report-only forever — the opted-in repo
+       believes it is gated and is not. That is worse than no gate.
+    3. The evaluation runs AFTER the comment is posted. Failing first would
+       leave the PR with a red X and no visible explanation of what Codex
+       found.
+    """
+    text = (WORKFLOWS_DIR / "codex-review.yml").read_text()
+
+    assert "fail_on_regression:" in text, (
+        "codex-review.yml must declare the fail_on_regression input"
+    )
+    # The default lives in the input block; check it is the false literal and
+    # not merely mentioned in the description prose.
+    m = re.search(
+        r"fail_on_regression:.*?^        default:\s*(\S+)", text, flags=re.S | re.M
+    )
+    assert m, "could not read fail_on_regression's default"
+    assert m.group(1) == "false", (
+        f"fail_on_regression must default to false, got {m.group(1)!r} — 27 "
+        "repos consume this reusable via @main"
+    )
+
+    assert "FAIL_ON_REGRESSION: ${{ inputs.fail_on_regression }}" in text, (
+        "the input must be bound to the script's FAIL_ON_REGRESSION env var — "
+        "without it an opted-in repo runs report-only and believes it is gated"
+    )
+    assert "codex-verdict.mjs" in text, (
+        "codex-review.yml must fetch and run codex-verdict.mjs"
+    )
+
+    comment_at = text.find("gh pr comment")
+    evaluate_at = text.find("node .github/scripts/codex-verdict.mjs")
+    assert comment_at != -1 and evaluate_at != -1
+    assert comment_at < evaluate_at, (
+        "the verdict evaluation must run after the review comment is posted, "
+        "so a failing job still shows the reader what Codex found"
+    )
 
 
 def test_codex_review_covers_every_automergeable_class():

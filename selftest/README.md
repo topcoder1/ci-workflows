@@ -30,6 +30,14 @@ arbitrary helper scripts; that's a different kind of repo.
   it would demote an unmatched path from the strict `standard` fallback into
   an auto-merge-eligible class (a PR adding `Tests/release.py` under
   `safe_test: ['tests/**']`).
+- `test_codex_verdict_gate.sh` — `codex-verdict.mjs` classification and its
+  opt-in enforcement. Codex's verdict used to be a comment only: the job
+  exited 0 whatever it said, so domain-rank#74 and #79 (both 2026-07-27) each
+  merged with a reported missing-test regression unaddressed. Replays both
+  verdicts verbatim. Pins the two properties that keep the gate safe for the
+  other 26 consumers — enforcement happens only on the literal
+  `FAIL_ON_REGRESSION=true`, and under enforcement an unparseable or missing
+  verdict fails CLOSED.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
