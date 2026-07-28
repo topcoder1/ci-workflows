@@ -22,9 +22,13 @@ on:
           posting it as a comment. Default false, which is the historical
           behavior every existing caller relies on. Opt in per repo — many
           Codex findings are advisories that are correctly declined, so
-          blocking by default would be wrong. When true, an unparseable
-          verdict also fails (fail closed): "no verdict" is precisely the
-          state this gate cannot vouch for.
+          blocking by default would be wrong.
+
+          The verdict is read from the `VERDICT: CLEAN` / `VERDICT:
+          REGRESSION` trailer the prompt requires, not from prose. When true,
+          a response carrying neither that trailer nor a `regression:` finding
+          also fails (fail closed): a review that did not answer the contract
+          is precisely the state this gate cannot vouch for.
 
           Opting in also withdraws the auto-merge bypass on a bad review:
           claude-author-automerge.yml's Option B treats a SUCCESS conclusion
@@ -163,10 +167,16 @@ jobs:
              JSDoc / comment block above it. If the diff is now inconsistent
              with the comment, flag it.
 
-          Output format - exactly one of:
-            no regressions found
+          Output format. If and only if you are reporting regressions, list
+          them first, one per line:
             regression: <file:line> - <one sentence>
-            regression: <file:line> - <one>; regression: <file:line> - <two>
+
+          Then END YOUR RESPONSE with a final line that is EXACTLY one of:
+            VERDICT: CLEAN
+            VERDICT: REGRESSION
+
+          That final line is machine-read. Emit it even when you have
+          nothing to report.
 
           Be brief. Do not perform general bug-hunting; the first pass already did."
 
@@ -195,11 +205,28 @@ jobs:
           # token `codex` on its own line followed by the verdict. Grab the
           # LAST such block.
           verdict=$(awk '/^codex$/{flag=1; v=""; next} flag{v = (v=="" ? $0 : v ORS $0)} END{print v}' /tmp/codex.out)
-          # Truncate to 4KB for safety
           if [ -z "$verdict" ]; then
             verdict="(Codex produced no parseable verdict — see workflow logs)"
           fi
-          echo "$verdict" | head -c 4096 > /tmp/codex.verdict
+
+          # TWO files, and the split is load-bearing.
+          #
+          # codex.verdict.full is what the gate reads. It is never truncated,
+          # because the machine-read `VERDICT:` trailer is the LAST line and a
+          # prefix cut would drop it — classifying an otherwise clean review
+          # as no_verdict and failing an enforced PR closed. (Codex review
+          # round 3.)
+          #
+          # codex.verdict is the 4KB-capped body for the PR comment, which is
+          # the only thing the cap was ever protecting.
+          printf '%s\n' "$verdict" > /tmp/codex.verdict.full
+          # head reads from a FILE here rather than a pipe. In the `... | head
+          # -c` form head exits at its byte limit and the writer takes SIGPIPE,
+          # which `set -o pipefail` above turns into a failed step. Measured:
+          # that needs the verdict to outgrow the OS pipe buffer (fine at
+          # 128KB, aborts at 2MB), so it is hygiene rather than a live failure
+          # at realistic verdict sizes — but reading the file costs nothing.
+          head -c 4096 /tmp/codex.verdict.full > /tmp/codex.verdict
 
           # Record which Codex model + CLI version actually ran. `npm install
           # -g @openai/codex@latest` (above) floats the CLI — and thus its
@@ -247,6 +274,7 @@ jobs:
       - name: Evaluate Codex verdict
         if: steps.gate.outputs.should_run == 'true'
         env:
-          VERDICT_FILE: /tmp/codex.verdict
+          # The UNtruncated verdict — see the two-file note in the review step.
+          VERDICT_FILE: /tmp/codex.verdict.full
           FAIL_ON_REGRESSION: ${{ inputs.fail_on_regression }}
         run: node .github/scripts/codex-verdict.mjs

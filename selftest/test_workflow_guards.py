@@ -83,6 +83,38 @@ def test_codex_verdict_gate_is_wired_and_opt_in():
         "codex-review.yml must fetch and run codex-verdict.mjs"
     )
 
+    # The prompt and the parser are one contract. codex-verdict.mjs reads the
+    # `VERDICT:` trailer and fails closed without it, so a prompt edit that
+    # drops the instruction would fail every enforced repo's PRs — and it
+    # would look like Codex breaking, not like an edit here.
+    assert "VERDICT: CLEAN" in text and "VERDICT: REGRESSION" in text, (
+        "the review prompt must require the VERDICT: trailer — codex-verdict.mjs "
+        "reads it and fails closed when it is absent"
+    )
+
+    # The gate must read the UNtruncated verdict. The `VERDICT:` trailer is the
+    # last line, and the 4KB comment cap is a prefix cut — pointing the gate at
+    # the capped file would classify any long-but-clean review as no_verdict and
+    # fail an enforced PR closed. (Codex review round 3.)
+    assert "VERDICT_FILE: /tmp/codex.verdict.full" in text, (
+        "the verdict gate must read the untruncated verdict file — the 4KB cap "
+        "is for the PR comment and would drop the trailer the gate reads"
+    )
+    # And the cap must truncate from a file, not a pipe. In the `... | head -c`
+    # form head exits at its limit and the writer takes SIGPIPE, which pipefail
+    # turns into a failed step. Measured, that needs the verdict to outgrow the
+    # OS pipe buffer (fine at 128KB, aborts at 2MB), so this is hygiene rather
+    # than a live failure at realistic verdict sizes — kept because the file
+    # form is free and this shell trap has bitten the fleet before. Comments are
+    # stripped so naming the anti-pattern in prose does not trip the guard.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert not re.search(r"\|\s*head -c", code), (
+        "truncate from a FILE (`head -c N file`), never `... | head -c N` — "
+        "the early pipe close SIGPIPEs the writer and pipefail fails the step"
+    )
+
     comment_at = text.find("gh pr comment")
     evaluate_at = text.find("node .github/scripts/codex-verdict.mjs")
     assert comment_at != -1 and evaluate_at != -1
