@@ -23,7 +23,7 @@
 // Inputs (from env):
 //   VERDICT_FILE        path to the extracted verdict (default /tmp/codex.verdict)
 //   FAIL_ON_REGRESSION  "true" to enforce; anything else reports only
-//   GITHUB_OUTPUT       (optional) — verdict_state=clean|regression|unparseable
+//   GITHUB_OUTPUT       (optional) — verdict_state=clean|regression|no_verdict
 //   GITHUB_STEP_SUMMARY (optional) — append markdown summary
 //
 // Exit code: 1 only when FAIL_ON_REGRESSION=true AND the verdict is not
@@ -34,9 +34,9 @@ import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 const verdictFile = process.env.VERDICT_FILE || '/tmp/codex.verdict';
 const enforce = (process.env.FAIL_ON_REGRESSION || '').trim().toLowerCase() === 'true';
 
-// A missing file means the review step did not produce a verdict. Treat it
-// like an unparseable one (fail closed under enforcement) rather than
-// silently passing — "no verdict" is exactly the state we cannot vouch for.
+// A missing file means the review step never wrote a verdict. It reads as
+// the empty string, which lands in `no_verdict` below — fail closed under
+// enforcement rather than silently passing a review that did not happen.
 const raw = existsSync(verdictFile) ? readFileSync(verdictFile, 'utf8') : '';
 
 // Normalize for matching only; `raw` is still what gets reported. Markdown
@@ -61,41 +61,93 @@ const findings = [...text.matchAll(/\bregression\s*:\s*([^;]*)/g)]
   // nothing. Counting it would block a clean PR.
   .filter((d) => !NON_FINDING.test(d));
 
-// Codex frequently paraphrases the clean verdict rather than emitting the
-// canonical string — the pre-review of this very change answered "No
-// actionable regressions were identified", which an exact-match on
-// "no regressions found" would have failed under enforcement. Match the
-// negative-finding family instead: "no <adj>* <noun> <adv>* <verb>".
-// Widening this is safe in the direction that matters, because a verdict
-// using the `regression:` form is already decided above.
-const CLEAN =
-  /\bno\s+(?:\w+\s+){0,3}(?:regressions?|issues?|problems?|concerns?|findings?)\s+(?:\w+\s+){0,2}(?:found|identified|detected|observed|spotted|noted)\b/;
+// THE TRAILER IS THE VERDICT. codex-review.yml's prompt requires the response
+// to end with exactly `VERDICT: CLEAN` or `VERDICT: REGRESSION`, and that line
+// is what decides here. Everything else in the response is prose for a human.
+//
+// This exists because BOTH prose-reading rules fail, and each was tried:
+//
+//   - Requiring a recognizable clean phrase false-fails clean reviews. Codex
+//     phrases "nothing found" freely: "no regressions found", "No actionable
+//     regressions were identified", and one live verdict that just described
+//     the diff approvingly with no negative-finding phrase at all. A gate
+//     that reddens clean PRs gets switched off.
+//   - Treating any prose without a `regression:` token as clean lets an
+//     off-format finding through — "The new fallback branch has no test."
+//     reads clean and, worse, restores the auto-merge bypass. (Codex review
+//     round 1 caught exactly this on the previous revision.)
+//
+// One required output line is far more reliable to produce than a three-shape
+// contract, and non-compliance is now a single crisp signal instead of a
+// judgement call about English.
+// It must be the FINAL non-empty line, because that is what the prompt asks
+// for. Accepting the marker anywhere would let trailing prose slip past it:
+// "VERDICT: CLEAN" followed by "Also, the new branch has no test." would read
+// clean, which is the same off-format-finding hole in a new costume. A marker
+// that is not last means the response did not follow the contract, so it
+// falls through to no_verdict below and fails closed. (Codex review round 2.)
+//
+// Scanned against markdown-stripped text that still has its line structure —
+// `text` above collapsed newlines for the finding scan, which would defeat a
+// line anchor.
+// DELIBERATELY NOT trimming trailing CLI telemetry here. codex-review.yml's
+// awk extraction keeps everything after the last `codex` marker, so anything
+// the CLI printed below the model's answer would become the final line, and
+// three successive attempts to filter that out were each shown to swallow a
+// real finding instead — "Usage: the token refresh path has no test.",
+// "Tokens used: 1 token can authorize every tenant". Every such filter is a
+// hole in the strict final-line rule, which is the actual security property.
+//
+// It was defending a footer that does not exist: codex-cli 0.145.0 prints
+// nothing after the response (verified against real output 2026-07-27).
+//
+// If a future CLI does add one, the trailer stops being last, the gate reports
+// no_verdict, and enforcing repos go RED. That is loud, immediately
+// diagnosable, and fixed by one narrow filter written against the actual
+// footer format. The alternative — a speculative filter that silently eats a
+// finding — fails in the direction this gate exists to prevent. Do not re-add
+// one without a real footer sample to match against.
+const contentLines = raw
+  .replace(/[`*_]/g, ' ')
+  .split('\n')
+  .map((l) => l.trim())
+  .filter((l) => l !== '');
+const lastLine = contentLines.length ? contentLines[contentLines.length - 1] : '';
+const trailerMatch = lastLine.match(/^verdict:\s*(clean|regression)\s*\.?$/i);
+const trailer = trailerMatch ? trailerMatch[1].toLowerCase() : null;
 
-// A hedge AFTER the clean phrase means Codex cleared the diff and then
-// qualified it ("no regressions found, but the new branch is untested").
-// That is not a clean verdict this gate can vouch for, and because the
-// qualifier skips the `regression:` form it would otherwise pass. Scoped to
-// the text following the clean phrase so an incidental "but" earlier in the
-// reasoning does not demote an otherwise clean answer.
-const HEDGE = /\b(?:but|however|although|though|except|caveat)\b/;
+// codex-review.yml writes this exact sentinel when its awk extraction comes
+// up empty.
+const NO_VERDICT_SENTINEL = /codex produced no parseable verdict/;
 
-// Order matters: a verdict that lists findings is a regression even if the
-// surrounding prose also contains a clean phrase somewhere.
 let state;
-const cleanMatch = text.match(CLEAN);
-if (findings.length > 0) {
+if (trailer) {
+  // Authoritative. A response that lists findings and then claims CLEAN is
+  // still a regression — the findings are the evidence, the trailer is not
+  // allowed to retract them.
+  state = trailer === 'regression' || findings.length > 0 ? 'regression' : 'clean';
+} else if (findings.length > 0) {
+  // No trailer, but it reported in the finding form. Believe the findings.
   state = 'regression';
-} else if (cleanMatch && !HEDGE.test(text.slice(cleanMatch.index + cleanMatch[0].length))) {
-  state = 'clean';
 } else {
-  state = 'unparseable';
+  // No trailer and no findings: the response did not answer the contract, so
+  // there is nothing to vouch for. Fail closed. This also covers an empty or
+  // missing verdict file and the workflow's own no-parseable-verdict
+  // sentinel — a review that did not happen must never read as "clean".
+  state = 'no_verdict';
+  if (text !== '' && !NO_VERDICT_SENTINEL.test(text)) {
+    console.log(
+      '::warning::Codex answered without the required `VERDICT:` trailer. ' +
+        'Treating as no verdict.'
+    );
+  }
 }
 
 const summary = {
   clean: 'Codex reported no regressions.',
   regression: `Codex reported ${findings.length} regression(s).`,
-  unparseable:
-    'Codex produced no verdict this gate could classify — treated as unresolved.'
+  no_verdict:
+    'Codex produced no verdict at all — the review did not happen, so nothing is vouched for.'
 }[state];
 
 if (process.env.GITHUB_OUTPUT) {
@@ -115,7 +167,7 @@ if (enforce && state !== 'clean') {
   const hint =
     state === 'regression'
       ? 'Address the finding, or reply on the PR explaining why it is declined and re-run this check.'
-      : 'Re-run the Codex review; if it keeps producing no parseable verdict, check the workflow logs.';
+      : 'The review produced no verdict at all — re-run it, and check the workflow logs if it keeps coming back empty.';
   console.log(`::error::Codex review did not come back clean (${state}). ${hint}`);
   process.exit(1);
 }
