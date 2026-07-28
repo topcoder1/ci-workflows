@@ -325,7 +325,7 @@ jobs:
         if: steps.detect.outputs.language == 'go' && inputs.pre_measured_coverage_artifact == ''
         with:
           go-version: ${{ steps.detect.outputs.go_version }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         if: steps.detect.outputs.language == 'js' && inputs.pre_measured_coverage_artifact == ''
         with:
           node-version: ${{ inputs.node_version || '20' }}
