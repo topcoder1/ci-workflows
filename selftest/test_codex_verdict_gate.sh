@@ -14,13 +14,13 @@
 #   1. Enforcement is OPT-IN. Without FAIL_ON_REGRESSION=true the script
 #      must always exit 0 — 26 other repos consume this reusable and a
 #      default-on gate would start blocking their merges.
-#   2. Under enforcement the `VERDICT:` trailer decides, and a response
-#      answering neither the trailer nor the `regression:` form fails
-#      CLOSED. Both prose-reading rules were tried first and both failed:
-#      requiring a recognizable clean phrase false-failed a live clean
-#      review, and treating any prose without `regression:` as clean let an
-#      off-format finding through. One required output line replaces a
-#      judgement call about English.
+#   2. Under enforcement it fails on evidence of a FINDING — a `regression:`
+#      line or a `VERDICT: REGRESSION` trailer — plus on no output at all.
+#      Requiring the trailer was tried and failed the first real PR it ran
+#      on (domain-rank#82, below): the model ignores the instruction, and a
+#      clean review went red. Requiring a recognizable CLEAN phrase failed
+#      the same way. The accepted cost is that a finding phrased outside
+#      both forms is missed; the review comment still reaches a human.
 #
 # Run from the repo root:
 #   bash selftest/test_codex_verdict_gate.sh
@@ -74,9 +74,11 @@ check "domain-rank#74 verdict is report-only by default" "0 regression" "$(run f
 d79='regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box'
 check "domain-rank#79 verdict fails under enforcement" "1 regression" "$(run true "$d79")"
 
-# --- The trailer decides ----------------------------------------------------
-# The prompt requires the response to END with `VERDICT: CLEAN` or
-# `VERDICT: REGRESSION`. Prose above it is for humans.
+# --- The trailer, when the model bothers to emit it --------------------------
+# The prompt asks the response to END with `VERDICT: CLEAN` or
+# `VERDICT: REGRESSION`, and it is read from the final non-empty line. It is
+# used when present and simply absent when not (see domain-rank#82 below);
+# only `VERDICT: REGRESSION` can fail a PR on its own.
 check "CLEAN trailer passes" "0 clean" \
   "$(run true 'Reviewed the diff.
 VERDICT: CLEAN')"
@@ -111,35 +113,30 @@ VERDICT: CLEAN')"
 check "only the final line decides" "1 regression" \
   "$(run true 'The format asks me to answer VERDICT: CLEAN when nothing is wrong.
 VERDICT: REGRESSION')"
-# ...and prose AFTER the trailer means the contract was not followed. Reading
-# the earlier marker would be the off-format-finding hole in a new costume.
-check "prose after a CLEAN trailer fails closed" "1 no_verdict" \
+# KNOWN MISS, accepted deliberately. Prose after a CLEAN trailer is not read,
+# so a concern written there is not caught. Catching it means requiring the
+# trailer to be last, which requires the trailer — and domain-rank#82 below
+# shows that reddens clean PRs. The review comment still shows this to a human.
+check "prose after a CLEAN trailer is accepted (known miss)" "0 clean" \
   "$(run true 'VERDICT: CLEAN
 Also, the new fallback branch has no test.')"
 check "trailer with a trailing period passes" "0 clean" "$(run true 'ok
 VERDICT: CLEAN.')"
 
-# NOTHING below the trailer is forgiven, and that is the decision, not an
-# oversight. Three attempts to whitelist trailing CLI telemetry were each
-# shown to swallow a real finding written in the same shape, so the gate now
-# trusts only the last line. codex-cli 0.145.0 prints nothing after the
-# response (verified against real output), and if a future CLI adds a footer
-# these cases go no_verdict — RED and diagnosable — rather than silently
-# promoting an earlier CLEAN marker.
-check "a footer below the trailer fails closed, not open" "1 no_verdict" \
+# THE CASE THAT DECIDED THE DESIGN. Verbatim from topcoder1/domain-rank#82,
+# 2026-07-28T04:57Z, the first real PR the gate ran on. The prompt asking for
+# the trailer was in that run's log; gpt-5.6-sol answered without it, the gate
+# scored no_verdict, and a clean PR went red. Requiring the trailer is
+# therefore not viable — this must pass.
+check "clean prose without the trailer passes (domain-rank#82)" "0 clean" \
+  "$(run true 'No regressions found in the requested coverage, state-mutation, or contract-drift axes.
+No regressions found in the requested coverage, state-mutation, or contract-drift axes.')"
+# Trailing CLI noise is harmless now that the trailer is not required to be
+# last. codex-cli 0.145.0 emits none (verified against real output).
+check "a footer below the trailer is harmless" "0 clean" \
   "$(run true 'Reviewed.
 VERDICT: CLEAN
 tokens used: 12345')"
-# The three real findings that killed each successive filter. All must fail.
-check "prose below the trailer fails closed" "1 no_verdict" \
-  "$(run true 'VERDICT: CLEAN
-The token refresh path has no test.')"
-check "a finding opening with 'Usage:' fails closed" "1 no_verdict" \
-  "$(run true 'VERDICT: CLEAN
-Usage: the token refresh path has no test.')"
-check "a finding shaped like a token count fails closed" "1 no_verdict" \
-  "$(run true 'VERDICT: CLEAN
-Tokens used: 1 token can authorize every tenant.')"
 # Codex answering in the finding shape but reporting nothing must not block.
 check "'regression: none' is clean, not a finding" "0 clean" \
   "$(run true 'regression: none
@@ -150,19 +147,22 @@ check "semicolon-separated findings fail" "1 regression" \
   "$(run true 'regression: a.py:1 - one; regression: b.py:2 - two
 VERDICT: REGRESSION')"
 
-# --- Fail closed when the contract is not answered --------------------------
+# --- What still fails, and what is knowingly let through ---------------------
 # Both live findings predate the trailer and carry none, so they also pin the
-# fallback: a `regression:` line is believed even without a trailer.
+# primary signal: a `regression:` line is believed with or without a trailer.
 check "findings without a trailer still fail" "1 regression" "$(run true "$d79")"
 
-# An off-format FINDING — no trailer, no `regression:` token. Reading this as
-# clean is the hole Codex round 1 caught in the previous revision: it would
-# have passed AND restored the auto-merge bypass.
-check "off-format finding fails closed" "1 no_verdict" \
+# THE ACCEPTED RESIDUAL RISK, stated out loud: a finding phrased in neither
+# the `regression:` form nor a REGRESSION trailer is missed. Every rule that
+# caught it also failed clean PRs, because the two are indistinguishable
+# without reading English — "The new fallback branch has no test." and "Looks
+# good to me." are both trailer-less prose. This gate optimizes for not
+# blocking correct work, and leaves the miss to the human reading the comment.
+check "off-format finding is missed (accepted risk)" "0 clean" \
   "$(run true 'The new fallback branch has no test.')"
-check "terse approval without a trailer fails closed" "1 no_verdict" \
+check "terse approval without a trailer passes" "0 clean" \
   "$(run true 'Looks good to me.')"
-check "clean phrasing without a trailer fails closed" "1 no_verdict" \
+check "clean phrasing without a trailer passes" "0 clean" \
   "$(run true 'no regressions found')"
 
 # The workflow writes this literal sentinel when awk extracts nothing.

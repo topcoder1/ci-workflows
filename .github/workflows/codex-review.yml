@@ -24,11 +24,11 @@ on:
           Codex findings are advisories that are correctly declined, so
           blocking by default would be wrong.
 
-          The verdict is read from the `VERDICT: CLEAN` / `VERDICT:
-          REGRESSION` trailer the prompt requires, not from prose. When true,
-          a response carrying neither that trailer nor a `regression:` finding
-          also fails (fail closed): a review that did not answer the contract
-          is precisely the state this gate cannot vouch for.
+          When true, the job fails on evidence of a finding — a `regression:`
+          line, or the `VERDICT: REGRESSION` trailer the prompt asks for — and
+          on a review that produced no output at all. Clean prose passes even
+          without the trailer: the model frequently omits it, and requiring it
+          reddened a clean PR the first time this ran for real.
 
           Opting in also withdraws the auto-merge bypass on a bad review:
           claude-author-automerge.yml's Option B treats a SUCCESS conclusion

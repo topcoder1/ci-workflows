@@ -36,12 +36,13 @@ arbitrary helper scripts; that's a different kind of repo.
   merged with a reported missing-test regression unaddressed. Replays both
   verdicts verbatim. Pins the two properties that keep the gate safe for the
   other 26 consumers — enforcement happens only on the literal
-  `FAIL_ON_REGRESSION=true`, and under enforcement the `VERDICT:` trailer
-  the prompt requires is what decides — a response answering neither that
-  trailer nor the `regression:` form fails CLOSED. Both prose-reading rules
-  were tried first and both failed: requiring a recognizable clean phrase
-  false-failed a live clean review, and treating any prose without
-  `regression:` as clean let an off-format finding through.
+  `FAIL_ON_REGRESSION=true`, and under enforcement it fails on evidence of a
+  finding (a `regression:` line or a `VERDICT: REGRESSION` trailer) plus on no
+  output at all. Requiring the trailer was tried and failed the first real PR
+  it ran on (domain-rank#82): the model ignores the instruction and a clean
+  review went red. Requiring a recognizable CLEAN phrase failed the same way.
+  The accepted cost — asserted explicitly — is that a finding phrased outside
+  both forms is missed.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

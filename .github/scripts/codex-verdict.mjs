@@ -61,25 +61,15 @@ const findings = [...text.matchAll(/\bregression\s*:\s*([^;]*)/g)]
   // nothing. Counting it would block a clean PR.
   .filter((d) => !NON_FINDING.test(d));
 
-// THE TRAILER IS THE VERDICT. codex-review.yml's prompt requires the response
-// to end with exactly `VERDICT: CLEAN` or `VERDICT: REGRESSION`, and that line
-// is what decides here. Everything else in the response is prose for a human.
+// The prompt asks the response to end with `VERDICT: CLEAN` or
+// `VERDICT: REGRESSION`. When it complies, that line is used. It often does
+// not — see the measured note on the state decision below.
 //
-// This exists because BOTH prose-reading rules fail, and each was tried:
-//
-//   - Requiring a recognizable clean phrase false-fails clean reviews. Codex
-//     phrases "nothing found" freely: "no regressions found", "No actionable
-//     regressions were identified", and one live verdict that just described
-//     the diff approvingly with no negative-finding phrase at all. A gate
-//     that reddens clean PRs gets switched off.
-//   - Treating any prose without a `regression:` token as clean lets an
-//     off-format finding through — "The new fallback branch has no test."
-//     reads clean and, worse, restores the auto-merge bypass. (Codex review
-//     round 1 caught exactly this on the previous revision.)
-//
-// One required output line is far more reliable to produce than a three-shape
-// contract, and non-compliance is now a single crisp signal instead of a
-// judgement call about English.
+// Requiring a recognizable CLEAN phrase instead was tried and is worse: Codex
+// phrases "nothing found" freely ("no regressions found", "No actionable
+// regressions were identified", and one verdict that just described the diff
+// approvingly with no negative-finding phrase at all), so the rule reddened
+// clean PRs.
 // It must be the FINAL non-empty line, because that is what the prompt asks
 // for. Accepting the marker anywhere would let trailing prose slip past it:
 // "VERDICT: CLEAN" followed by "Also, the new branch has no test." would read
@@ -120,25 +110,43 @@ const trailer = trailerMatch ? trailerMatch[1].toLowerCase() : null;
 // up empty.
 const NO_VERDICT_SENTINEL = /codex produced no parseable verdict/;
 
+// THE TRAILER IS A BONUS SIGNAL, NOT A REQUIREMENT — and that is a measured
+// decision, not a preference. An earlier revision required it and failed the
+// first real PR it ran on: topcoder1/domain-rank#82, 2026-07-28T04:57Z. The
+// prompt asking for the trailer was verifiably in that run's log, and
+// gpt-5.6-sol at reasoning=low answered "No regressions found in the
+// requested coverage, state-mutation, or contract-drift axes." with no
+// trailer. The gate logged `state=no_verdict; enforcing=true` and reddened a
+// clean PR.
+//
+// So compliance cannot be assumed, and the failure signals are the ones that
+// have actually proven reliable:
+//
+//   - `regression:` findings. Three for three on real findings.
+//   - an explicit `VERDICT: REGRESSION` trailer, when the model does comply.
+//   - no output at all, which means the review did not happen.
+//
+// Residual risk, accepted and documented: a finding phrased outside BOTH
+// forms is missed. That is a miss, and the review comment still puts it in
+// front of a human. The alternative failure — blocking correct work — is
+// what gets a gate switched off, and then nothing is reviewed at all.
 let state;
-if (trailer) {
-  // Authoritative. A response that lists findings and then claims CLEAN is
-  // still a regression — the findings are the evidence, the trailer is not
-  // allowed to retract them.
-  state = trailer === 'regression' || findings.length > 0 ? 'regression' : 'clean';
-} else if (findings.length > 0) {
-  // No trailer, but it reported in the finding form. Believe the findings.
+if (findings.length > 0 || trailer === 'regression') {
+  // Findings outrank a CLEAN trailer: the trailer may not retract its own
+  // evidence.
   state = 'regression';
-} else {
-  // No trailer and no findings: the response did not answer the contract, so
-  // there is nothing to vouch for. Fail closed. This also covers an empty or
-  // missing verdict file and the workflow's own no-parseable-verdict
-  // sentinel — a review that did not happen must never read as "clean".
+} else if (text === '' || NO_VERDICT_SENTINEL.test(text)) {
+  // A review that produced nothing must never read as "nothing found".
   state = 'no_verdict';
-  if (text !== '' && !NO_VERDICT_SENTINEL.test(text)) {
+} else {
+  state = 'clean';
+  if (!trailer) {
+    // Not fatal, but worth surfacing: report-only callers make the fleet-wide
+    // compliance rate visible here, which is what would justify requiring the
+    // trailer later.
     console.log(
-      '::warning::Codex answered without the required `VERDICT:` trailer. ' +
-        'Treating as no verdict.'
+      '::warning::Codex answered without the `VERDICT:` trailer the prompt ' +
+        'asks for. Treated as clean because it reported no findings.'
     );
   }
 }
