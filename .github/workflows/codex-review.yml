@@ -15,6 +15,25 @@ name: Codex Review (reusable)
 
 on:
   workflow_call:
+    inputs:
+      fail_on_regression:
+        description: >-
+          Fail this job when Codex's verdict is not clean, instead of only
+          posting it as a comment. Default false, which is the historical
+          behavior every existing caller relies on. Opt in per repo — many
+          Codex findings are advisories that are correctly declined, so
+          blocking by default would be wrong. When true, an unparseable
+          verdict also fails (fail closed): "no verdict" is precisely the
+          state this gate cannot vouch for.
+
+          Opting in also withdraws the auto-merge bypass on a bad review:
+          claude-author-automerge.yml's Option B treats a SUCCESS conclusion
+          on `codex_check_name` as a substitute for the risk-tier manual-merge
+          gate, and requires an explicit success — so a failed job no longer
+          lets a regression read as "second-model reviewed".
+        required: false
+        type: boolean
+        default: false
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -43,13 +62,18 @@ jobs:
       # in the caller's risk-paths.yml lists bug-attractor files that bypass
       # the gate (they ALWAYS get reviewed regardless of size). See
       # .github/scripts/codex-gate.mjs for the decision rules.
-      - name: Fetch cost-gate script
+      - name: Fetch gate scripts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           mkdir -p .github/scripts
-          gh api repos/topcoder1/ci-workflows/contents/.github/scripts/codex-gate.mjs \
-            --jq '.content' | base64 -d > .github/scripts/codex-gate.mjs
+          # Both scripts live in this reusable's repo, not the caller's
+          # checkout, so they have to be pulled at run time.
+          for s in codex-gate.mjs codex-verdict.mjs; do
+            gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$s" \
+              --jq '.content' | base64 -d > ".github/scripts/$s"
+          done
 
       - name: Install gate deps
         run: npm install --no-save yaml@2 minimatch@10
@@ -211,3 +235,18 @@ jobs:
             echo "<sub>Model: \`$(cat /tmp/codex.model 2>/dev/null || echo unknown)\` · CLI: \`$(cat /tmp/codex.cliversion 2>/dev/null || echo unknown)\` · reasoning: \`low\`</sub>"
           } > /tmp/comment.md
           gh pr comment "$PR" --body-file /tmp/comment.md
+
+      # Runs on every caller, enforcing only where `fail_on_regression: true`.
+      # Report-only mode is deliberate: it exercises the classifier against
+      # real verdicts fleet-wide and records the state in the step summary,
+      # so the false-positive rate is observable BEFORE any repo lets it
+      # block a merge.
+      #
+      # Ordered after the comment step so the finding is always visible on
+      # the PR even when this step then fails the job.
+      - name: Evaluate Codex verdict
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          VERDICT_FILE: /tmp/codex.verdict
+          FAIL_ON_REGRESSION: ${{ inputs.fail_on_regression }}
+        run: node .github/scripts/codex-verdict.mjs
