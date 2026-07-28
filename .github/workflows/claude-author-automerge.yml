@@ -127,6 +127,11 @@ on:
         required: false
         type: string
         default: "manual-merge"
+      nonmain_base_optin_label:
+        description: "Label that opts a PR based on a NON-default branch into auto-merge. Non-default bases refuse by default: branch rulesets are conventionally scoped to the default branch, so a feature-branch base has no required checks and `--auto` merges on the spot (wxa-jake-ai#1027). This label does NOT lift the unconditional refusal when the base is another OPEN PR's head. Set empty to refuse every non-default base with no opt-in path."
+        required: false
+        type: string
+        default: "auto-merge-nonmain"
       codex_check_name:
         description: "Status-check name for Codex Review. When this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Set empty to disable Codex-trusted bypass."
         required: false
@@ -623,6 +628,168 @@ jobs:
             exit 1
           fi
 
+      # Base-branch gate. Runs AFTER the hold so a durable hold always wins
+      # the reason line, and BEFORE the risk/bypass lane so no bypass label
+      # and no Codex pass can talk past it.
+      #
+      # whois-api-llc/wxa-jake-ai#1027 (2026-07-28): a PR opened against
+      # another OPEN PR's head branch squash-merged 68 seconds after it was
+      # created, growing that PR's diff from 6 files to 8 files AFTER its
+      # 4-round codex review had completed — the human is then asked to
+      # click merge on a diff nobody reviewed. Branch rulesets are
+      # conventionally scoped to the default branch (`ref_name:
+      # ~DEFAULT_BRANCH`), so a feature-branch base has NO required checks
+      # and `gh pr merge --auto` merges on the spot instead of waiting.
+      #
+      # That instant merge is what makes this a security gap rather than a
+      # routing quirk: every other protection in this lane is latency-shaped
+      # (a caller-side classification gate, this workflow's own hold read)
+      # and silently assumes there is a wait to lose. Remove the wait and
+      # the unguarded arm always wins. In #1027 the losing disarm started 7
+      # seconds after the merge had already landed.
+      #
+      # Policy: the default branch is the only ref the ruleset protects, so
+      # it is the only base where "auto-merge" means "merge after required
+      # checks and review". Other bases refuse unless a human opts in
+      # per-PR. A base that is itself an open PR's head refuses outright —
+      # not overridable — because that is the review-scope-expansion vector.
+      #
+      # Fail-closed: an unreadable PR listing or label set is an UNKNOWN
+      # base state, which must never read as "no refusal".
+      - name: Check base branch
+        id: base_gate
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.hold.outputs.hold != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          OPTIN_LABEL: ${{ inputs.nonmain_base_optin_label }}
+        run: |
+          set -euo pipefail
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
+          refuse=0
+          reason=""
+
+          if [ -z "$BASE_REF" ] || [ -z "$DEFAULT_BRANCH" ]; then
+            echo "::error::empty base ref ('$BASE_REF') or default branch ('$DEFAULT_BRANCH') — cannot establish the base is protected; refusing to arm auto-merge (fail closed)."
+            exit 1
+          fi
+
+          # The open-PR-head check below is deliberately scoped to NON-default
+          # bases. Review raised the `main -> release` train shape, where the
+          # default branch is itself an open PR's head; applying the check
+          # there would refuse auto-merge for EVERY PR in every such repo for
+          # as long as that release PR stays open — a fleet-wide liveness
+          # regression. The trade is wrong in both directions: this invariant
+          # exists to stop merges into an UNPROTECTED branch someone is
+          # reviewing as a fixed diff, and the default branch is neither —
+          # it is ruleset-protected, and a release train PR is by
+          # construction expected to accumulate whatever lands on it.
+          if [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+            # Listed with a NON-aggregating jq: `gh api --paginate` emits one
+            # JSON array per page, so an aggregating filter would compute a
+            # per-page answer and print one line per page (the multi-page
+            # defect pinned in test_automerge_hold_gate.sh). This streams
+            # every page's refs into one newline-separated list.
+            #
+            # Same-repo heads only. A fork PR's `.head.ref` is just a branch
+            # name in the fork, so an unrelated fork branch called `develop`
+            # would otherwise read as "the parent PR's head" and refuse a
+            # legitimate opted-in merge (codex P2). `.head.repo` is null when
+            # a fork is deleted; in jq that yields null, which compares
+            # unequal and is filtered out — the safe direction.
+            open_heads=$(retry gh api "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+              --paginate --jq '.[] | select(.head.repo.full_name == env.GITHUB_REPOSITORY) | .head.ref') || {
+              echo "::error::could not list open PRs after 3 attempts — cannot rule out that '$BASE_REF' is another open PR's head; refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+              exit 1
+            }
+            if grep -qxF "$BASE_REF" <<<"$open_heads"; then
+              # Deliberately NOT liftable by OPTIN_LABEL: opting into a
+              # plain integration branch is a routing choice; opting into
+              # rewriting an under-review PR's diff is not one a label
+              # should be able to make.
+              refuse=1
+              reason="base '$BASE_REF' is the head branch of another open PR — merging would expand that PR's diff after its review"
+            elif [ -n "$OPTIN_LABEL" ]; then
+              labels=$(retry gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels?per_page=100" \
+                --paginate --jq '.[].name') || {
+                echo "::error::could not read PR labels after 3 attempts — cannot confirm a '$OPTIN_LABEL' opt-in; refusing to arm auto-merge (fail closed)."
+                exit 1
+              }
+              if grep -qxF "$OPTIN_LABEL" <<<"$labels"; then
+                echo "::notice::base '$BASE_REF' is not the default branch, but '$OPTIN_LABEL' opts in explicitly."
+              else
+                refuse=1
+                reason="base '$BASE_REF' is not the default branch ('$DEFAULT_BRANCH') and the '$OPTIN_LABEL' opt-in label is absent"
+              fi
+            else
+              refuse=1
+              reason="base '$BASE_REF' is not the default branch ('$DEFAULT_BRANCH') and the non-default-base opt-in is disabled"
+            fi
+          fi
+
+          {
+            echo "refuse=$refuse"
+            echo "reason=$reason"
+            # Published so the arm can re-bind to the routing THIS run
+            # validated — see the re-read in "Enable auto-merge".
+            echo "base_ref=$BASE_REF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$refuse" -eq 1 ]; then
+            echo "::notice::Auto-merge withheld: $reason. Manual merge remains available."
+          else
+            echo "Base '$BASE_REF' cleared."
+          fi
+
+      # Same idempotent revoke as the hold label: a base refusal must also
+      # disarm an arm placed by an earlier run (or by hand) — "refusing to
+      # arm" alone is not fail-closed for a PR that is already armed.
+      - name: Revoke auto-merge on base-gate refusal
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.base_gate.outputs.refuse == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          GATE_BASE_REF: ${{ steps.base_gate.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          # Ownership guard, mirroring the error-revoke's head-moved check.
+          # This verdict describes the base THIS run evaluated. Retargeting
+          # from a refused base onto an allowed one fires no event of its
+          # own, but any later subscribed event (a push, a label) starts a
+          # newer run that can validly arm — and this older run would then
+          # strand the PR by revoking a decision made from current state.
+          # Skip only on a POSITIVE differing read; if the read fails, revoke
+          # anyway (fail toward safety — a rare stale disarm self-heals on
+          # the next event, an unreviewed merge does not).
+          #
+          # This is deliberately NOT symmetric with the pre-arm disarm in
+          # "Enable auto-merge", which stays unconditional on a base change.
+          # There, the run HOLDS a live read proving the arm it is about to
+          # place was validated against a base that is no longer current, and
+          # nothing re-gates a retarget. Here the VERDICT is the stale
+          # artifact, and whichever run placed any live arm validated the
+          # base itself at arm time.
+          now_base=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .base.ref 2>/dev/null || echo "")
+          if [ -n "$now_base" ] && [ -n "$GATE_BASE_REF" ] && [ "$now_base" != "$GATE_BASE_REF" ]; then
+            echo "::notice::base changed ('$GATE_BASE_REF' → '$now_base') since this run's gate — this refusal is stale and a newer run owns the arm decision; skipping revoke."
+            exit 0
+          fi
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
+          echo "Auto-merge state after base-gate revoke: $state"
+          if [ "$state" = "ON" ]; then
+            echo "::error::auto-merge still ON after --disable-auto — investigate"
+            exit 1
+          fi
+
       # Option A: explicit human approval via label.
       # Run BEFORE the risk-tier path-scan so a PR the scan can't
       # classify can still bypass-merge. Historically that meant any
@@ -844,7 +1011,8 @@ jobs:
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
-          steps.hold.outputs.hold != '1' && (
+          steps.hold.outputs.hold != '1' &&
+          steps.base_gate.outputs.refuse != '1' && (
             steps.risk.outputs.risky != '1' ||
             steps.bypass_label.outputs.bypass == '1' ||
             steps.bypass_codex.outputs.bypass == '1'
@@ -865,8 +1033,86 @@ jobs:
           BYPASS_LABEL: ${{ steps.bypass_label.outputs.bypass }}
           BYPASS_CODEX: ${{ steps.bypass_codex.outputs.bypass }}
           USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
+          GATE_BASE_REF: ${{ steps.base_gate.outputs.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          OPTIN_LABEL: ${{ inputs.nonmain_base_optin_label }}
         run: |
           set -euo pipefail
+          # Re-bind the base-gate verdict to live state immediately before
+          # arming. `--match-head-commit` below binds the arm to the head
+          # SHA, but the BASE and the opt-in LABEL both mutate WITHOUT moving
+          # that SHA — so a run that cleared the gate, followed by a retarget
+          # onto an unprotected branch (or removal of the opt-in label),
+          # would arm against routing nothing ever validated and, with no
+          # required checks on that base, merge instantly. Refusing on ANY
+          # change is stricter than re-running the base rules and needs no
+          # second open-PR listing: the retarget's own event re-gates from
+          # scratch.
+          #
+          # Every rejection below DISARMS before exiting. Declining to call
+          # `gh pr merge --auto` is not enough when an earlier run already
+          # armed this PR: the base-gate refusal-revoke did not fire (that
+          # run's gate passed) and the always() error-revoke does not fire
+          # either when this step exits 0. Without the disarm, the change
+          # would be detected and then ignored, the stale arm merging anyway.
+          disarm_then_exit() {
+            gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+            state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+            echo "Auto-merge state after pre-arm revalidation revoke: $state"
+            if [ "$state" != "OFF" ]; then
+              echo "::error::auto-merge is '$state' after --disable-auto — investigate"
+              exit 1
+            fi
+            exit "$1"
+          }
+          now_base=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .base.ref) || {
+            echo "::error::could not re-read the base ref before arming — refusing to arm (fail closed)."
+            disarm_then_exit 1
+          }
+          # NOTE — do NOT "fix" this into an ownership guard that skips the
+          # disarm when the base moved (proposed as a stale-run concern in
+          # review). That reasoning assumes a retarget starts a newer run
+          # which owns the decision. It does not: a base change emits
+          # `pull_request: edited`, and no caller subscribes to `edited`
+          # (types are opened/synchronize/reopened/ready_for_review/labeled).
+          # So a retarget fires NOTHING, and skipping the disarm would leave
+          # an arm validated against the OLD base live on the new one — with
+          # no required checks there, it merges immediately. That is the
+          # incident, rebuilt. Disarming can strand a PR until its next event
+          # (or a human click); that cost is bounded, visible, and recoverable,
+          # and an unreviewed merge is none of those.
+          if [ "$now_base" != "$GATE_BASE_REF" ]; then
+            echo "::notice::base changed ('$GATE_BASE_REF' → '$now_base') since this run's gate read — not arming, and disarming: no event fires on a retarget, so an arm validated against '$GATE_BASE_REF' must not survive onto '$now_base'."
+            disarm_then_exit 0
+          fi
+          if [ "$now_base" != "$DEFAULT_BRANCH" ]; then
+            # Re-list open heads. Opening the PARENT PR fires NO event for
+            # this child, so nothing would re-gate it: a parent opened
+            # between this run's gate read and here would let the child merge
+            # into a branch that is now itself under review — precisely the
+            # #1027 shape, reassembled from the other side.
+            now_heads=$(gh api "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+              --paginate --jq '.[] | select(.head.repo.full_name == env.GITHUB_REPOSITORY) | .head.ref') || {
+              echo "::error::could not re-list open PRs before arming a non-default base — refusing to arm (fail closed)."
+              disarm_then_exit 1
+            }
+            if grep -qxF "$now_base" <<<"$now_heads"; then
+              echo "::notice::base '$now_base' became the head branch of an open PR since this run's gate read — not arming."
+              disarm_then_exit 0
+            fi
+            if [ -n "$OPTIN_LABEL" ]; then
+              optin=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels?per_page=100" \
+                --paginate --jq '.[].name') || {
+                echo "::error::could not re-read labels before arming a non-default base — refusing to arm (fail closed)."
+                disarm_then_exit 1
+              }
+              if ! grep -qxF "$OPTIN_LABEL" <<<"$optin"; then
+                echo "::notice::'$OPTIN_LABEL' is no longer present and the base is not the default branch — not arming."
+                disarm_then_exit 0
+              fi
+            fi
+          fi
           if [ "$BYPASS_LABEL" = "1" ]; then
             echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via approval label"
           elif [ "$BYPASS_CODEX" = "1" ]; then
@@ -1041,6 +1287,7 @@ jobs:
             startsWith(github.event.pull_request.head.ref, 'claude/'))) &&
           (steps.classifier_verdict.outcome == 'failure' ||
            steps.hold.outcome == 'failure' ||
+           steps.base_gate.outcome == 'failure' ||
            steps.risk.outcome == 'failure' ||
            steps.setup_node.outcome == 'failure' ||
            steps.checkout.outcome == 'failure' ||
