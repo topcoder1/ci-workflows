@@ -43,6 +43,16 @@ arbitrary helper scripts; that's a different kind of repo.
   review went red. Requiring a recognizable CLEAN phrase failed the same way.
   The accepted cost — asserted explicitly — is that a finding phrased outside
   both forms is missed.
+- `test_automerge_base_gate.sh` — auto-merge may only target the ref a
+  branch ruleset actually protects. Rulesets are conventionally scoped to
+  the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
+  has no required checks and `--auto` merges on the spot; every other
+  protection in that lane is latency-shaped and assumes a wait to lose.
+  wxa-jake-ai#1027 merged into another open PR's head 68s after opening and
+  grew that PR's reviewed diff from 6 files to 8. Pins: default base is free
+  (no API calls), another open PR's head refuses unconditionally, other
+  non-default bases need the opt-in label, and every unreadable input
+  refuses.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
