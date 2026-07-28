@@ -707,7 +707,7 @@ jobs:
               echo "::error::could not list open PRs after 3 attempts — cannot rule out that '$BASE_REF' is another open PR's head; refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
               exit 1
             }
-            if printf '%s\n' "$open_heads" | grep -qxF "$BASE_REF"; then
+            if grep -qxF "$BASE_REF" <<<"$open_heads"; then
               # Deliberately NOT liftable by OPTIN_LABEL: opting into a
               # plain integration branch is a routing choice; opting into
               # rewriting an under-review PR's diff is not one a label
@@ -720,7 +720,7 @@ jobs:
                 echo "::error::could not read PR labels after 3 attempts — cannot confirm a '$OPTIN_LABEL' opt-in; refusing to arm auto-merge (fail closed)."
                 exit 1
               }
-              if printf '%s\n' "$labels" | grep -qxF "$OPTIN_LABEL"; then
+              if grep -qxF "$OPTIN_LABEL" <<<"$labels"; then
                 echo "::notice::base '$BASE_REF' is not the default branch, but '$OPTIN_LABEL' opts in explicitly."
               else
                 refuse=1
@@ -1097,7 +1097,7 @@ jobs:
               echo "::error::could not re-list open PRs before arming a non-default base — refusing to arm (fail closed)."
               disarm_then_exit 1
             }
-            if printf '%s\n' "$now_heads" | grep -qxF "$now_base"; then
+            if grep -qxF "$now_base" <<<"$now_heads"; then
               echo "::notice::base '$now_base' became the head branch of an open PR since this run's gate read — not arming."
               disarm_then_exit 0
             fi
@@ -1107,7 +1107,7 @@ jobs:
                 echo "::error::could not re-read labels before arming a non-default base — refusing to arm (fail closed)."
                 disarm_then_exit 1
               }
-              if ! printf '%s\n' "$optin" | grep -qxF "$OPTIN_LABEL"; then
+              if ! grep -qxF "$OPTIN_LABEL" <<<"$optin"; then
                 echo "::notice::'$OPTIN_LABEL' is no longer present and the base is not the default branch — not arming."
                 disarm_then_exit 0
               fi
