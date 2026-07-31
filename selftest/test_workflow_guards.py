@@ -320,6 +320,12 @@ def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
     run the install from the checkout again — the same hole, reported green.
     Accepting only the :? form keeps the failure mode closed.
 
+    Only that one form is accepted, so an equally safe step-level
+    `working-directory: ${{ runner.temp }}` is rejected too. Deliberate: the
+    guard fails CLOSED and its message names the accepted form, so the cost
+    is one conversation, while a second accepted spelling is more surface to
+    keep correct. (Codex review round 1 raised the false positive.)
+
     Scoped to lint.yml deliberately. It is a CHECKER workflow: actionlint,
     the draft-gate checker, prettier (--ignore-scripts) and ruff (pipx) all
     hold the property that no checkout content is ever executed, so a
@@ -333,15 +339,26 @@ def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
     whose purpose is to run checkout content.
     """
     text = (WORKFLOWS_DIR / "lint.yml").read_text()
-    # Strip comments so prose naming the anti-pattern can't trip the guard.
-    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    # Fold shell line-continuations before scanning: `python3 \` + newline +
+    # `-m pip` would otherwise split the invocation across two lines and slip
+    # past a line-oriented scan. Then drop whole-line comments so prose that
+    # names the anti-pattern (including this file's own docstring's advice,
+    # quoted into lint.yml) cannot trip the guard.
+    folded = re.sub(r"\\\n[ \t]*", " ", text)
+    code = [line for line in folded.splitlines() if not line.lstrip().startswith("#")]
 
-    offenders = [
-        line.strip()
-        for line in code
-        if re.search(r"\bpython3?\s+-m\s+\S", line)
-        and 'cd "${RUNNER_TEMP:?' not in line
-    ]
+    escape = 'cd "${RUNNER_TEMP:?'
+    offenders = []
+    for line in code:
+        invocation = re.search(r"\bpython3?\s+-m\s+\S", line)
+        if not invocation:
+            continue
+        # The escape must come BEFORE the invocation on the line. A trailing
+        # comment that merely mentions it -- `python3 -m pip ...  # cd
+        # "${RUNNER_TEMP:?` -- runs from the checkout and must not pass.
+        escaped_at = line.find(escape)
+        if escaped_at == -1 or escaped_at > invocation.start():
+            offenders.append(line.strip())
     assert not offenders, (
         "lint.yml runs `python -m <module>` with the checkout as CWD, so PR "
         "content can shadow the module and execute on the runner:\n  "
