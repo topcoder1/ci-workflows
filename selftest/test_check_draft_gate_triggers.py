@@ -15,7 +15,6 @@
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 from selftest.check_draft_gate_triggers import (

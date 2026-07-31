@@ -298,6 +298,180 @@ def test_no_global_git_config_writes_in_workflows():
     )
 
 
+PYTHON_M_ESCAPE = 'cd "${RUNNER_TEMP:?'
+
+
+def checkout_cwd_python_invocations(text):
+    """Return the `python -m` invocations in `text` that run from the CWD.
+
+    Shared by the lint.yml guard below and by its own vacuum test, so the
+    shapes that test pins are the same code path the guard runs.
+    """
+    # Order matters: drop comments FIRST, then fold continuations. Comments
+    # go first so prose naming the anti-pattern cannot trip the guard, and
+    # because a `\` inside a comment does NOT continue the line in shell --
+    # a fold-first pass would splice the next real line into the comment and
+    # then discard it, hiding a live invocation. Inline comments go too, or
+    # `echo ok # cd "${RUNNER_TEMP:?fake}" \` lends a fake escape to the
+    # command below it. (Codex review rounds 2 and 4.)
+    code = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        code.append(re.sub(r"(?<=\s)#.*$", "", line))
+    # Now rejoin `python3 \` + newline + `-m pip`, which would otherwise
+    # split one invocation across two lines and slip past a line scan.
+    folded = re.sub(r"\\\n[ \t]*", " ", "\n".join(code)).splitlines()
+
+    offenders = []
+    for line in folded:
+        # Anything from `python`/`python3` up to the next command separator,
+        # then `-m`. Matching `-m` immediately after the interpreter would
+        # miss interpreter flags -- `python3 -B -m pip` and
+        # `python3 -X importtime -m pip` are equally vulnerable. EVERY match
+        # is checked, not just the first: a second command can sit past the
+        # closed subshell and run from the checkout.
+        # (Codex review rounds 2 and 8.)
+        for invocation in re.finditer(r"\bpython3?\b[^;&|]*?\s-m\s+\S", line):
+            # The escape must come BEFORE this invocation; take the NEAREST
+            # preceding one so each invocation is judged against the cd that
+            # actually governs it. A trailing comment merely mentioning it --
+            # `python3 -m pip ...  # cd "${RUNNER_TEMP:?` -- runs from the
+            # checkout and must not pass.
+            escaped_at = line.rfind(PYTHON_M_ESCAPE, 0, invocation.start())
+            if escaped_at == -1:
+                offenders.append(line.strip())
+                break
+            # ...and the invocation must still be inside that subshell, gated
+            # on the cd having SUCCEEDED. Two ways to lose that while keeping
+            # the text in place, both plausible as accidental edits:
+            #   `(cd "${RUNNER_TEMP:?x}") && python3 -m pip ...`  -- subshell
+            #     closes first, so the CWD is the checkout again (round 3)
+            #   `cd "${RUNNER_TEMP:?x}" || python3 -m pip ...`    -- runs
+            #     python precisely when the cd FAILED (round 6)
+            span = line[escaped_at : invocation.start()]
+            if ")" in span or "&&" not in span:
+                offenders.append(line.strip())
+                break
+    return offenders
+
+
+# The safe form, and every unsafe shape a review round found slipping past an
+# earlier version of the scanner. Pinned by the vacuum test below: this guard
+# went through five rounds of evasions, so "it passes" means nothing without
+# evidence it still rejects what it is supposed to reject.
+SAFE_INSTALL = (
+    '        run: (cd "${RUNNER_TEMP:?RUNNER_TEMP is not set}"'
+    " && python3 -m pip install --quiet pyyaml)"
+)
+UNSAFE_INSTALLS = {
+    "original bug": "        run: python3 -m pip install --quiet pyyaml",
+    "bare $RUNNER_TEMP (cd '' is a no-op returning 0)": (
+        '        run: (cd "$RUNNER_TEMP" && python3 -m pip install --quiet pyyaml)'
+    ),
+    "trailing-comment ruse": (
+        '        run: python3 -m pip install --quiet pyyaml  # cd "${RUNNER_TEMP:?x}"'
+    ),
+    "line-continuation split": (
+        "        run: python3 \\\n          -m pip install --quiet pyyaml"
+    ),
+    "comment ending in a backslash": (
+        "        run: |\n          # install the dep \\\n"
+        "          python3 -m pip install --quiet pyyaml"
+    ),
+    "interpreter flag before -m": (
+        "        run: python3 -B -m pip install --quiet pyyaml"
+    ),
+    "-X flag with a value": (
+        "        run: python3 -X importtime -m pip install --quiet pyyaml"
+    ),
+    "subshell closed before python runs": (
+        '        run: (cd "${RUNNER_TEMP:?x}") && python3 -m pip install --quiet pyyaml'
+    ),
+    "inline-comment fake escape": (
+        '        run: |\n          echo ok # cd "${RUNNER_TEMP:?fake}" \\\n'
+        "          python3 -m pip install --quiet pyyaml"
+    ),
+    "|| runs python exactly when the cd failed": (
+        '        run: cd "${RUNNER_TEMP:?x}" || python3 -m pip install --quiet pyyaml'
+    ),
+    "second invocation past the closed subshell": (
+        '        run: (cd "${RUNNER_TEMP:?x}" && python3 -m pip install --quiet pyyaml)'
+        " && python3 -m pip check"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", UNSAFE_INSTALLS.values(), ids=UNSAFE_INSTALLS.keys())
+def test_checkout_cwd_scanner_rejects_every_known_unsafe_shape(shape):
+    """The scanner must not go vacuous.
+
+    Each shape here slipped past some earlier version of it and would have
+    run pip from the checkout. A refactor that stops catching one of these
+    turns the guard below into decoration that reports green forever.
+    """
+    assert checkout_cwd_python_invocations(shape), (
+        f"scanner no longer flags an unsafe shape:\n{shape}"
+    )
+
+
+def test_checkout_cwd_scanner_accepts_the_safe_form():
+    """...and it must not reject the form the workflow actually ships."""
+    assert not checkout_cwd_python_invocations(SAFE_INSTALL)
+
+
+def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
+    """lint.yml must not invoke `python -m <module>` from the checkout.
+
+    `python3 -m X` prepends the CWD to sys.path (sys.path[0]), so with the
+    checkout as CWD a top-level `pip.py` / `pip/` in PR content shadows the
+    installed pip and executes on the runner. The shim picks its own exit
+    code, so it can report SUCCESS and leave no trace in the check. Verified
+    locally: a `pip.py` dropped beside the workflow's CWD ran with
+    argv=['...', 'install', '--quiet', 'pyyaml'] and exited 0.
+
+    Codex rated this exact pattern P1 on PR #137, where the new ruff job
+    reached it via `python3 -m pip install ruff`; that job now uses pipx.
+    pyyaml is an import dependency rather than a console tool, so pipx does
+    not apply to the draft-gate checker — it runs the install from
+    $RUNNER_TEMP instead.
+
+    The escape must use the `${RUNNER_TEMP:?...}` form, not a bare
+    "$RUNNER_TEMP". Measured: bash's `cd ""` is a no-op that returns 0 and
+    stays in the current directory, so an empty RUNNER_TEMP would silently
+    run the install from the checkout again — the same hole, reported green.
+    Accepting only the :? form keeps the failure mode closed.
+
+    Only that one form is accepted, so an equally safe step-level
+    `working-directory: ${{ runner.temp }}` is rejected too. Deliberate: the
+    guard fails CLOSED and its message names the accepted form, so the cost
+    is one conversation, while a second accepted spelling is more surface to
+    keep correct. (Codex review round 1 raised the false positive.)
+
+    Scoped to lint.yml deliberately. It is a CHECKER workflow: actionlint,
+    the draft-gate checker, prettier (--ignore-scripts) and ruff (pipx) all
+    hold the property that no checkout content is ever executed, so a
+    shadowed import is the whole attack. The repo's other `python -m` sites
+    are not in that class and are intentionally excluded:
+    tty-tests.yml runs `python -m pytest` on the PR's own test files, and
+    the `python -m venv` calls in tests-runner.yml / coverage-floor.yml sit
+    directly above `pip install -r requirements.txt`, which already executes
+    PR-declared build hooks (an exposure the credential-scrub guard above
+    documents and accepts). Shadowing gains an attacker nothing in a job
+    whose purpose is to run checkout content.
+    """
+    offenders = checkout_cwd_python_invocations(
+        (WORKFLOWS_DIR / "lint.yml").read_text()
+    )
+    assert not offenders, (
+        "lint.yml runs `python -m <module>` with the checkout as CWD, so PR "
+        "content can shadow the module and execute on the runner:\n  "
+        + "\n  ".join(offenders)
+        + "\nRun it outside the checkout, failing closed on an empty var:"
+        + '\n  (cd "${RUNNER_TEMP:?RUNNER_TEMP is not set}" && python3 -m ...)'
+    )
+
+
 @pytest.mark.parametrize("workflow", ["tests-runner.yml", "coverage-floor.yml"])
 def test_scoped_git_credential_gated_and_scrubbed(workflow):
     """The cross-org git credential must be (a) opt-in on pull_request
