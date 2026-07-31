@@ -367,6 +367,13 @@ def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
         escaped_at = line.find(escape)
         if escaped_at == -1 or escaped_at > invocation.start():
             offenders.append(line.strip())
+            continue
+        # ...and the invocation must still be INSIDE that subshell. A `)`
+        # between the two closes it and restores the checkout as CWD, so
+        # `(cd "${RUNNER_TEMP:?x}") && python3 -m pip ...` is the original
+        # bug wearing the fix's clothes. (Codex review round 3.)
+        if ")" in line[escaped_at : invocation.start()]:
+            offenders.append(line.strip())
     assert not offenders, (
         "lint.yml runs `python -m <module>` with the checkout as CWD, so PR "
         "content can shadow the module and execute on the runner:\n  "
