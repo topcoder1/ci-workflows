@@ -377,11 +377,17 @@ def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
         if escaped_at == -1 or escaped_at > invocation.start():
             offenders.append(line.strip())
             continue
-        # ...and the invocation must still be INSIDE that subshell. A `)`
-        # between the two closes it and restores the checkout as CWD, so
-        # `(cd "${RUNNER_TEMP:?x}") && python3 -m pip ...` is the original
-        # bug wearing the fix's clothes. (Codex review round 3.)
-        if ")" in line[escaped_at : invocation.start()]:
+        # ...and the invocation must still be inside that subshell, gated on
+        # the cd having SUCCEEDED. Two ways to lose that while keeping the
+        # text in place, both plausible as accidental edits:
+        #   `(cd "${RUNNER_TEMP:?x}") && python3 -m pip ...`  -- subshell
+        #     closes first, so the CWD is the checkout again (round 3)
+        #   `cd "${RUNNER_TEMP:?x}" || python3 -m pip ...`    -- runs python
+        #     precisely when the cd FAILED (round 6)
+        # So: no `)` may close the group before the invocation, and the two
+        # must be joined by `&&`.
+        span = line[escaped_at : invocation.start()]
+        if ")" in span or "&&" not in span:
             offenders.append(line.strip())
     assert not offenders, (
         "lint.yml runs `python -m <module>` with the checkout as CWD, so PR "
