@@ -66,6 +66,18 @@ arbitrary helper scripts; that's a different kind of repo.
   scope, so such pushes are always rejected — wxa-secrets#27). Extracts
   and executes the shipped bash; drift-checks the listing block between
   the two workflows.
+- `test_ruff_ruleset_warning.sh` — #139 pinned ruff's version, which stops a
+  release from reddening the fleet on release day; it does not make any
+  repo's rule set explicit. A repo with no `select` still inherits ruff's
+  built-in defaults, so the deliberate pin bump re-scopes what it enforces
+  and the new findings land on whoever opens the next unrelated PR there
+  (dotclaude#186 is that shape: unchanged tree, clean → 25 errors, purely
+  because 0.16 widened the defaults). Extracts and executes the shipped
+  detection bash. Pins that the warning fires only when nothing is declared,
+  that it reads **only** `[tool.ruff*]` tables — a `select` under another
+  tool must not suppress it — and that it can never fail the job, since a
+  hard failure would redden every currently-green consumer on merge. The
+  version pin itself is covered by `test_lint_ruff_version_is_pinned`.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.
