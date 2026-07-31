@@ -21,6 +21,10 @@ name: Lint
 #   - prettier --check on the markdown glob (default **/*.md)
 #   - shellcheck on standalone shell scripts (opt-in for callers, default
 #     OFF; always ON for this repo's own self-test runs — see the job)
+#   - ruff check on Python code (opt-in for callers, default OFF; always ON
+#     for this repo's own self-test runs). Scope mirrors bb-preflight's
+#     local gate — src/ and tests/ when present, else the repo root — so
+#     the local preflight and CI enforce the same file set.
 #
 # Defaults chosen for "drop into an existing repo without breaking it":
 #   - actionlint runs WITHOUT shellcheck. Shellcheck integration in actionlint
@@ -48,6 +52,9 @@ name: Lint
 #     actionlint's shellcheck: most repos have pre-existing style/info
 #     drift. When opted in, defaults to severity=error so only real bugs
 #     fail the check; tighten with `shellcheck_severity: warning` etc.
+#   - ruff is OFF by default for the same reason: repos that never gated
+#     on ruff usually carry pre-existing lint drift that would block the
+#     install PR. Callers with clean Python opt in via run_ruff.
 
 on:
   pull_request:
@@ -105,6 +112,16 @@ on:
         required: false
         type: string
         default: "."
+      run_ruff:
+        description: "Run ruff check on Python code. Default false (opt-in). Scope mirrors bb-preflight's local gate: src/ and tests/ when present, else the repo root; override with ruff_paths."
+        required: false
+        type: boolean
+        default: false
+      ruff_paths:
+        description: "Space-separated list of paths for ruff check, relative to repo root. Default '' = auto-detect (src/ and tests/ when present, else '.')."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -537,4 +554,53 @@ jobs:
           echo "Checking ${#UNIQUE[@]} script(s) at severity=${SEVERITY}:"
           printf '  %s\n' "${UNIQUE[@]}"
           shellcheck -S "$SEVERITY" "${UNIQUE[@]}"
+        shell: bash
+
+  ruff:
+    name: ruff (python)
+    # Opt-in for callers, same reason as shellcheck above: repos that never
+    # gated on ruff usually carry pre-existing lint drift that would flood
+    # the first install PR. The motivating incident is the asymmetry in the
+    # other direction (topcoder1/dotclaude, fixed by its #183, 2026-07-31):
+    # bb-preflight.sh runs `ruff check` locally and verdicts NOT READY on
+    # any violation, but no CI lane ran ruff at all — an F541 merged to
+    # main with every check green, after which every LOCAL preflight was
+    # blocked while CI stayed green. When enabled, the default scan scope
+    # replicates bb-preflight's PYTHON_DIRS logic (src/ and tests/ when
+    # present, else the repo root) so the local gate and the CI gate
+    # enforce the same file set in both directions.
+    # Self-test runs (pull_request/push on this repo) always run this job —
+    # same inputs-stringify-to-'' pattern as the shellcheck job above.
+    if: ${{ format('{0}', inputs.run_ruff) == 'true' || (github.repository == 'topcoder1/ci-workflows' && format('{0}', inputs.run_ruff) == '') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run ruff check
+        env:
+          RUFF_PATHS: ${{ inputs.ruff_paths }}
+        run: |
+          set -euo pipefail
+          DIRS=()
+          if [ -n "${RUFF_PATHS:-}" ]; then
+            read -r -a DIRS <<< "$RUFF_PATHS"
+          fi
+          if [ "${#DIRS[@]}" -eq 0 ]; then
+            if [ -d src ]; then DIRS+=(src); fi
+            if [ -d tests ]; then DIRS+=(tests); fi
+          fi
+          if [ "${#DIRS[@]}" -eq 0 ]; then DIRS=(.); fi
+          echo "ruff check: ${DIRS[*]}"
+          # pipx (preinstalled on ubuntu runners) resolves ruff from PyPI
+          # into an isolated venv and runs its console script. Deliberately
+          # NOT `python3 -m pip install ruff` + bare `ruff` — `python3 -m X`
+          # resolves a top-level X.py / X/ from the checkout CWD before the
+          # installed package (sys.path[0]), so PR content could execute
+          # code on the runner or fake a pass. This job must never execute
+          # checkout content, same property the prettier job keeps with
+          # --ignore-scripts. Unpinned on purpose: bb-preflight runs
+          # whatever ruff the workstation ships, so a CI pin would re-open
+          # the local-vs-CI rule-set gap in the other direction.
+          # (Codex review rounds 1-2.)
+          pipx run ruff check "${DIRS[@]}"
         shell: bash
