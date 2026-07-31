@@ -188,8 +188,24 @@ jobs:
           path: .ci-workflows-checker
           persist-credentials: false
 
+      # Run the install from $RUNNER_TEMP, NOT the checkout. `python3 -m X`
+      # prepends the CWD to sys.path (sys.path[0]), so with the checkout as
+      # CWD a top-level `pip.py` / `pip/` in PR content shadows the real pip
+      # and executes on the runner -- silently, since the shim controls its
+      # own exit code and can report success. This job is a CHECKER: unlike
+      # tests-runner/coverage-floor/tty-tests, which run checkout content by
+      # design, it must never execute any. Same property the prettier job
+      # keeps with --ignore-scripts and the ruff job keeps by using pipx.
+      # pyyaml is an import dependency of the checker, not a console tool, so
+      # pipx does not apply here -- leaving the checkout is the fix.
+      #
+      # `:?` rather than a bare "$RUNNER_TEMP": bash's `cd ""` is a no-op that
+      # returns 0 and stays in the CURRENT directory, so an empty RUNNER_TEMP
+      # would silently put the install back in the checkout -- the same bug,
+      # with no signal. The :? form aborts the step instead. Fail closed.
+      # Pinned by selftest/test_workflow_guards.py.
       - name: Install PyYAML
-        run: python3 -m pip install --quiet pyyaml
+        run: (cd "${RUNNER_TEMP:?RUNNER_TEMP is not set}" && python3 -m pip install --quiet pyyaml)
         shell: bash
 
       - name: Check draft-gate triggers

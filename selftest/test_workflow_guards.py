@@ -298,6 +298,59 @@ def test_no_global_git_config_writes_in_workflows():
     )
 
 
+def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
+    """lint.yml must not invoke `python -m <module>` from the checkout.
+
+    `python3 -m X` prepends the CWD to sys.path (sys.path[0]), so with the
+    checkout as CWD a top-level `pip.py` / `pip/` in PR content shadows the
+    installed pip and executes on the runner. The shim picks its own exit
+    code, so it can report SUCCESS and leave no trace in the check. Verified
+    locally: a `pip.py` dropped beside the workflow's CWD ran with
+    argv=['...', 'install', '--quiet', 'pyyaml'] and exited 0.
+
+    Codex rated this exact pattern P1 on PR #137, where the new ruff job
+    reached it via `python3 -m pip install ruff`; that job now uses pipx.
+    pyyaml is an import dependency rather than a console tool, so pipx does
+    not apply to the draft-gate checker — it runs the install from
+    $RUNNER_TEMP instead.
+
+    The escape must use the `${RUNNER_TEMP:?...}` form, not a bare
+    "$RUNNER_TEMP". Measured: bash's `cd ""` is a no-op that returns 0 and
+    stays in the current directory, so an empty RUNNER_TEMP would silently
+    run the install from the checkout again — the same hole, reported green.
+    Accepting only the :? form keeps the failure mode closed.
+
+    Scoped to lint.yml deliberately. It is a CHECKER workflow: actionlint,
+    the draft-gate checker, prettier (--ignore-scripts) and ruff (pipx) all
+    hold the property that no checkout content is ever executed, so a
+    shadowed import is the whole attack. The repo's other `python -m` sites
+    are not in that class and are intentionally excluded:
+    tty-tests.yml runs `python -m pytest` on the PR's own test files, and
+    the `python -m venv` calls in tests-runner.yml / coverage-floor.yml sit
+    directly above `pip install -r requirements.txt`, which already executes
+    PR-declared build hooks (an exposure the credential-scrub guard above
+    documents and accepts). Shadowing gains an attacker nothing in a job
+    whose purpose is to run checkout content.
+    """
+    text = (WORKFLOWS_DIR / "lint.yml").read_text()
+    # Strip comments so prose naming the anti-pattern can't trip the guard.
+    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+
+    offenders = [
+        line.strip()
+        for line in code
+        if re.search(r"\bpython3?\s+-m\s+\S", line)
+        and 'cd "${RUNNER_TEMP:?' not in line
+    ]
+    assert not offenders, (
+        "lint.yml runs `python -m <module>` with the checkout as CWD, so PR "
+        "content can shadow the module and execute on the runner:\n  "
+        + "\n  ".join(offenders)
+        + "\nRun it outside the checkout, failing closed on an empty var:"
+        + '\n  (cd "${RUNNER_TEMP:?RUNNER_TEMP is not set}" && python3 -m ...)'
+    )
+
+
 @pytest.mark.parametrize("workflow", ["tests-runner.yml", "coverage-floor.yml"])
 def test_scoped_git_credential_gated_and_scrubbed(workflow):
     """The cross-org git credential must be (a) opt-in on pull_request
