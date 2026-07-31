@@ -428,3 +428,60 @@ def test_lint_ruff_is_opt_in_and_mirrors_preflight_scope():
             f"ruff scope auto-detect lost {marker!r} — it must mirror "
             "bb-preflight's src/tests-else-root PYTHON_DIRS logic"
         )
+
+
+def test_lint_ruff_version_is_pinned():
+    """The ruff job must resolve an EXACT version, never float to latest.
+
+    2026-07-31, measured on the install PR (topcoder1/dotclaude#186): an
+    unpinned `pipx run ruff` pulled 0.16.1 while the workstation and
+    bb-preflight baseline was 0.15.10. 0.16 expanded ruff's DEFAULT rule
+    set, so CI failed dotclaude's tests/ with 25 errors (ISC004, PLW1510,
+    FURB167, RUF059, PIE810) that the local gate called clean — the same
+    local-vs-CI asymmetry this job exists to close, just inverted. Worse,
+    a floating resolve means the next ruff release reddens every consumer
+    of this reusable with no code change at all.
+
+    So: an exact `==` pin, defaulted, and reachable by callers who need a
+    different one. Bumping it is then a deliberate PR that shows the new
+    findings rather than a surprise fleet outage.
+    """
+    text = (WORKFLOWS_DIR / "lint.yml").read_text()
+
+    m = re.search(
+        r"^      ruff_version:.*?^        default:\s*\"([^\"]+)\"",
+        text,
+        flags=re.S | re.M,
+    )
+    assert m, "lint.yml must declare a ruff_version input with a default"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", m.group(1)), (
+        f"ruff_version default must be an exact x.y.z version, got {m.group(1)!r}"
+    )
+
+    assert 'pipx run --spec "ruff==${RUFF_VERSION}" ruff check' in text, (
+        "the ruff invocation must pin via --spec ruff==<version>; a bare "
+        "`pipx run ruff` floats to latest and reddens the fleet on release day"
+    )
+
+    # The step env needs a literal fallback: on this repo's own self-test
+    # events the `inputs` context is null, so an unguarded binding expands to
+    # empty and installs `ruff==`.
+    fb = re.search(
+        r"RUFF_VERSION: \$\{\{ inputs\.ruff_version \|\| '([^']*)' \}\}", text
+    )
+    assert fb, "ruff_version must be bound into the step env with a fallback"
+    # And the two literals must move together. Comparing the fallback against
+    # a hardcoded version here would let a bump that touches only the input
+    # default pass: callers would get the new ruff while direct self-test runs
+    # silently kept the old one. (Codex review round 2.)
+    assert fb.group(1) == m.group(1), (
+        f"the self-test fallback ({fb.group(1)}) has drifted from the input "
+        f"default ({m.group(1)}) — bump both or the two event paths run "
+        "different ruff versions"
+    )
+
+    # A pin is only a pin if it is concrete — pip accepts wildcards/ranges.
+    assert "ruff_version must be an exact x.y.z version" in text, (
+        "the step must reject non-exact ruff_version values; a caller passing "
+        "`0.15.*` would float to latest-matching while still looking pinned"
+    )
