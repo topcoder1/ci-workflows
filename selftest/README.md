@@ -66,6 +66,19 @@ arbitrary helper scripts; that's a different kind of repo.
   scope, so such pushes are always rejected — wxa-secrets#27). Extracts
   and executes the shipped bash; drift-checks the listing block between
   the two workflows.
+- `test_ruff_version_pin.sh` — the ruff job and `bb-preflight.sh` must run
+  the SAME ruff version. #137 shipped a bare `pipx run ruff` justified as
+  "unpinned on purpose", assuming both sides floated together; they never
+  did (preflight resolves `command -v ruff`, CI resolved newest-on-PyPI).
+  Ruff's built-in defaults widened in 0.16, so dotclaude's unchanged tests/
+  tree was clean locally and threw 25 errors in CI the same day (#186) —
+  the job meant to close a local-green/CI-red asymmetry recreated it
+  inverted. Extracts and executes the shipped version-selection and
+  rule-set-detection bash. Pins: the default is an exact version, the
+  null-inputs `||` fallback equals it (a drift there makes THIS repo
+  dogfood a different ruff than callers), `latest` is the only float and
+  announces itself, and the rule-set warning reads only `[tool.ruff*]`
+  tables — a `select` under another tool must not suppress it.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

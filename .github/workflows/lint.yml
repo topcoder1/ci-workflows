@@ -24,7 +24,12 @@ name: Lint
 #   - ruff check on Python code (opt-in for callers, default OFF; always ON
 #     for this repo's own self-test runs). Scope mirrors bb-preflight's
 #     local gate — src/ and tests/ when present, else the repo root — so
-#     the local preflight and CI enforce the same file set.
+#     the local preflight and CI enforce the same file set, and the ruff
+#     VERSION is pinned (ruff_version) to the same value bb-preflight
+#     resolves, so they also enforce the same rule set. Both halves are
+#     required: matching files under mismatched ruff versions still
+#     diverge, because ruff's built-in defaults widen across releases.
+#     See the job body and selftest/test_ruff_version_pin.sh.
 #
 # Defaults chosen for "drop into an existing repo without breaking it":
 #   - actionlint runs WITHOUT shellcheck. Shellcheck integration in actionlint
@@ -55,6 +60,10 @@ name: Lint
 #   - ruff is OFF by default for the same reason: repos that never gated
 #     on ruff usually carry pre-existing lint drift that would block the
 #     install PR. Callers with clean Python opt in via run_ruff.
+#   - ruff_version is PINNED by default rather than floating. A floating
+#     linter is not a stable default — it is a scheduled break on someone
+#     else's release cadence. The pin only ever goes stale, which is a
+#     bump, not an outage. Opting out is spelled `ruff_version: latest`.
 
 on:
   pull_request:
@@ -122,6 +131,11 @@ on:
         required: false
         type: string
         default: ""
+      ruff_version:
+        description: "Exact ruff version the ruff job installs, e.g. '0.15.10'. Must stay equal to the pin bb-preflight.sh resolves locally or the two gates enforce different rule sets. 'latest' floats to the newest release and is NOT recommended: ruff's built-in defaults widen across releases."
+        required: false
+        type: string
+        default: "0.15.10"
 
 permissions:
   contents: read
@@ -579,6 +593,14 @@ jobs:
       - name: Run ruff check
         env:
           RUFF_PATHS: ${{ inputs.ruff_paths }}
+          # Same null-inputs fallback as shellcheck_severity above: on this
+          # repo's own self-test triggers the `inputs` context is null and
+          # stringifies to '', so `||` supplies the declared default. That
+          # matters here — an empty RUFF_VERSION must never mean "float", or
+          # this repo would dogfood a floating ruff while callers get a pin.
+          # Floating is spelled 'latest' precisely so '' can keep meaning
+          # "the default pin".
+          RUFF_VERSION: ${{ inputs.ruff_version || '0.15.10' }}
         run: |
           set -euo pipefail
           DIRS=()
@@ -590,7 +612,7 @@ jobs:
             if [ -d tests ]; then DIRS+=(tests); fi
           fi
           if [ "${#DIRS[@]}" -eq 0 ]; then DIRS=(.); fi
-          echo "ruff check: ${DIRS[*]}"
+
           # pipx (preinstalled on ubuntu runners) resolves ruff from PyPI
           # into an isolated venv and runs its console script. Deliberately
           # NOT `python3 -m pip install ruff` + bare `ruff` — `python3 -m X`
@@ -598,9 +620,66 @@ jobs:
           # installed package (sys.path[0]), so PR content could execute
           # code on the runner or fake a pass. This job must never execute
           # checkout content, same property the prettier job keeps with
-          # --ignore-scripts. Unpinned on purpose: bb-preflight runs
-          # whatever ruff the workstation ships, so a CI pin would re-open
-          # the local-vs-CI rule-set gap in the other direction.
-          # (Codex review rounds 1-2.)
-          pipx run ruff check "${DIRS[@]}"
+          # --ignore-scripts. (Codex review rounds 1-2.)
+          #
+          # PINNED. The original version of this job ran a bare `pipx run
+          # ruff` and justified it as "unpinned on purpose: bb-preflight
+          # runs whatever ruff the workstation ships, so a CI pin would
+          # re-open the local-vs-CI rule-set gap in the other direction."
+          # That reasoning is wrong, and dotclaude#186 demonstrated it the
+          # same day this job shipped. The two sides never floated
+          # *together*: bb-preflight resolves `command -v ruff` (the
+          # workstation build, 0.15.10) and this job resolved `pipx run
+          # ruff` (newest on PyPI, 0.16.1). They agreed only by accident.
+          # Ruff's BUILT-IN defaults — what you get with no `select` — widen
+          # across releases, so dotclaude's unchanged tests/ tree was clean
+          # on 0.15.10 and threw 25 errors on 0.16.1 (ISC004 x12, PLW1510
+          # x8, FURB167 x3, RUF059, PIE810). The job meant to close a
+          # local-green/CI-red asymmetry recreated it inverted.
+          # A pin here is only half the fix and is worthless alone: it works
+          # because bb-preflight.sh resolves this SAME pin (dotclaude,
+          # templates/ci-workflows/scripts/bb-preflight.sh). Bump both
+          # together, or the gap reopens in whichever direction moved first.
+          RUFF=(pipx run)
+          if [ "$RUFF_VERSION" = "latest" ]; then
+            # Explicit opt-out. Named rather than blank so the dangerous
+            # choice has to be typed out; see the input description.
+            echo "::warning::ruff_version is 'latest': CI floats to the newest ruff while bb-preflight resolves a pin, so local and CI can enforce different rule sets. Pin an exact version instead."
+            RUFF+=(ruff)
+          else
+            RUFF+=(--spec "ruff==${RUFF_VERSION}" ruff)
+          fi
+
+          # A pin freezes the rule set but does not make it explicit. Repos
+          # with no `select` inherit ruff's built-in defaults, so the next
+          # pin bump silently re-scopes what they enforce — the same failure
+          # as above, just deferred to bump time. Warn, never fail: this job
+          # is opt-in and the repo's code is not wrong, its config is
+          # merely implicit. Failing here would turn every currently-green
+          # consumer red on merge, which is the class of fleet breakage this
+          # change exists to prevent.
+          RULESET_DECLARED=0
+          for f in ruff.toml .ruff.toml; do
+            [ -f "$f" ] || continue
+            if grep -Eq '^[[:space:]]*(extend-)?select[[:space:]]*=' "$f"; then
+              RULESET_DECLARED=1
+            fi
+          done
+          # In pyproject.toml only `[tool.ruff*]` tables count — a `select =`
+          # belonging to some other tool must not read as a ruff rule set.
+          if [ "$RULESET_DECLARED" -eq 0 ] && [ -f pyproject.toml ]; then
+            if awk '
+              /^[[:space:]]*\[/ { in_ruff = ($0 ~ /^[[:space:]]*\[+tool\.ruff/) ? 1 : 0; next }
+              in_ruff && /^[[:space:]]*(extend-)?select[[:space:]]*=/ { found = 1 }
+              END { exit found ? 0 : 1 }
+            ' pyproject.toml; then
+              RULESET_DECLARED=1
+            fi
+          fi
+          if [ "$RULESET_DECLARED" -eq 0 ]; then
+            echo "::warning::No explicit ruff rule selection found (no (extend-)select under [tool.ruff*] in pyproject.toml, nor in ruff.toml/.ruff.toml). This repo is enforcing ruff ${RUFF_VERSION}'s built-in defaults, which change between releases — the next ruff_version bump can add violations to code you did not touch. Declare one, e.g. [tool.ruff.lint] select = [\"E4\", \"E7\", \"E9\", \"F\"] (ruff's pre-0.16 defaults)."
+          fi
+
+          echo "ruff check: ${DIRS[*]} (ruff ${RUFF_VERSION})"
+          "${RUFF[@]}" check "${DIRS[@]}"
         shell: bash

@@ -23,6 +23,17 @@ dev = [
     "pyyaml",
 ]
 
+[tool.ruff.lint]
+# Declare the rule set instead of inheriting ruff's built-in defaults, which
+# are NOT stable across releases: 0.16 widened the default selection, and
+# dotclaude's unchanged tests/ tree went from clean to 25 errors on that bump
+# alone (dotclaude#186). lint.yml pins `ruff_version` so local and CI agree on
+# a version; declaring the rules here is the other half — it keeps a future
+# pin bump from silently re-scoping what this repo enforces. Without it, this
+# repo trips the very ::warning:: its own ruff job now emits.
+# These four are ruff's pre-0.16 defaults — the set this repo already passed.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["selftest"]
 
