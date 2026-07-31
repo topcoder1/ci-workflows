@@ -339,18 +339,26 @@ def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
     whose purpose is to run checkout content.
     """
     text = (WORKFLOWS_DIR / "lint.yml").read_text()
-    # Fold shell line-continuations before scanning: `python3 \` + newline +
-    # `-m pip` would otherwise split the invocation across two lines and slip
-    # past a line-oriented scan. Then drop whole-line comments so prose that
-    # names the anti-pattern (including this file's own docstring's advice,
-    # quoted into lint.yml) cannot trip the guard.
-    folded = re.sub(r"\\\n[ \t]*", " ", text)
-    code = [line for line in folded.splitlines() if not line.lstrip().startswith("#")]
+    # Order matters: drop whole-line comments FIRST, then fold continuations.
+    # Comments go first so prose naming the anti-pattern cannot trip the
+    # guard. Folding must come second because a comment ending in `\` does
+    # NOT continue in shell, but a fold-first pass would splice the next
+    # (real) line into the comment and then discard it -- hiding a live
+    # invocation. (Codex review round 2.)
+    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    # Now rejoin `python3 \` + newline + `-m pip`, which would otherwise
+    # split one invocation across two lines and slip past a line scan.
+    folded = re.sub(r"\\\n[ \t]*", " ", "\n".join(code)).splitlines()
 
     escape = 'cd "${RUNNER_TEMP:?'
     offenders = []
-    for line in code:
-        invocation = re.search(r"\bpython3?\s+-m\s+\S", line)
+    for line in folded:
+        # Anything from `python`/`python3` up to the next command separator,
+        # then `-m`. Matching `-m` immediately after the interpreter would
+        # miss interpreter flags -- `python3 -B -m pip` and
+        # `python3 -X importtime -m pip` are equally vulnerable.
+        # (Codex review round 2.)
+        invocation = re.search(r"\bpython3?\b[^;&|]*?\s-m\s+\S", line)
         if not invocation:
             continue
         # The escape must come BEFORE the invocation on the line. A trailing
