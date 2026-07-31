@@ -40,8 +40,11 @@ fail() {
   failed=1
 }
 
+# Extraction starts at the helper's definition, NOT at RULESET_DECLARED=0 —
+# the caller alone would eval to an undefined function, and every case would
+# then "warn" for the wrong reason while looking like a real detector bug.
 block=$(awk '
-  /^[[:space:]]*RULESET_DECLARED=0/ { grab = 1 }
+  /^[[:space:]]*ruff_select_declared\(\) \{/ { grab = 1 }
   grab && /^[[:space:]]*echo "ruff check \(v/ { exit }
   grab { print }
 ' "$WF" | sed 's/^[[:space:]]*//')
@@ -50,6 +53,16 @@ if [ -z "$block" ]; then
   echo "✗ could not extract the rule-set detection block from $WF"
   exit 1
 fi
+# Guard the extraction itself: both the helper and its caller must be present.
+for required in 'ruff_select_declared()' 'RULESET_DECLARED=0' '::warning::'; do
+  case "$block" in
+    *"$required"*) ;;
+    *)
+      echo "✗ extracted block is missing '$required' — the anchors have drifted"
+      exit 1
+      ;;
+  esac
+done
 
 # The warning must never be able to fail the job.
 if printf '%s' "$block" | grep -q '::error::'; then
@@ -105,6 +118,32 @@ select = ["E", "F"]'
 check_case "pyproject extend-select -> silent" no \
   pyproject.toml '[tool.ruff.lint]
 extend-select = ["I"]'
+
+# TOML dotted keys spell the same setting several ways. Matching a bare
+# `select` inside a ruff table sees only the first form and tells a repo that
+# DID declare a rule set that it did not — the harmful direction, since it
+# sends someone to add config they already have. (Claude review round 1.)
+check_case "pyproject [tool.ruff] + dotted lint.select -> silent" no \
+  pyproject.toml '[tool.ruff]
+lint.select = ["E4", "E7", "E9", "F"]'
+
+check_case "pyproject [tool.ruff] + dotted lint.extend-select -> silent" no \
+  pyproject.toml '[tool.ruff]
+lint.extend-select = ["B"]'
+
+check_case "pyproject [tool] + fully dotted ruff.lint.select -> silent" no \
+  pyproject.toml '[tool]
+ruff.lint.select = ["F"]'
+
+# A dotted key under [tool.ruff] that is NOT the rule set must still warn.
+check_case "pyproject [tool.ruff] + dotted lint.line-length -> warns" yes \
+  pyproject.toml '[tool.ruff]
+lint.line-length = 100'
+
+# And a dotted `select` owned by another tool must not match either.
+check_case "pyproject [tool] + other-tool dotted select -> warns" yes \
+  pyproject.toml '[tool]
+someotherlinter.select = ["ALL"]'
 
 check_case "pyproject with no ruff config -> warns" yes \
   pyproject.toml '[project]

@@ -635,24 +635,48 @@ jobs:
           # class of fleet breakage this whole line of work exists to prevent —
           # and it would contradict this file's "drop into an existing repo
           # without breaking it" default.
+          # Detection resolves each key to its FULL dotted path and matches
+          # that, rather than matching a bare `select` inside a ruff table.
+          # TOML spells the same setting several ways — `[tool.ruff.lint]` +
+          # `select`, `[tool.ruff]` + `lint.select`, even `[tool]` +
+          # `ruff.lint.select` — and a bare-key match sees only the first.
+          # Missing one is the harmful direction: it tells a repo that DID
+          # declare a rule set that it did not. (Claude review round 1.)
+          # Resolving the path also keeps the scoping honest for free: a
+          # `select` under `[tool.someotherlinter]` resolves to
+          # `tool.someotherlinter.select` and cannot match.
+          # `root` supplies the implied prefix for ruff.toml/.ruff.toml,
+          # whose tables are ruff's own (`[lint]` means `tool.ruff.lint`).
+          ruff_select_declared() {
+            awk -v root="$2" '
+              BEGIN { table = root }
+              /^[[:space:]]*#/ { next }
+              /^[[:space:]]*\[/ {
+                t = $0
+                sub(/^[[:space:]]*\[+/, "", t)
+                sub(/\]+.*$/, "", t)
+                gsub(/[[:space:]]|"|'"'"'/, "", t)
+                table = (root == "") ? t : root "." t
+                next
+              }
+              /=/ {
+                k = $0
+                sub(/=.*$/, "", k)
+                gsub(/[[:space:]]|"|'"'"'/, "", k)
+                if (k == "") next
+                full = (table == "") ? k : table "." k
+                if (full ~ /^tool\.ruff\.(lint\.)?(extend-)?select$/) { found = 1 }
+              }
+              END { exit found ? 0 : 1 }
+            ' "$1"
+          }
           RULESET_DECLARED=0
           for f in ruff.toml .ruff.toml; do
             [ -f "$f" ] || continue
-            if grep -Eq '^[[:space:]]*(extend-)?select[[:space:]]*=' "$f"; then
-              RULESET_DECLARED=1
-            fi
+            if ruff_select_declared "$f" tool.ruff; then RULESET_DECLARED=1; fi
           done
-          # In pyproject.toml only `[tool.ruff*]` tables count — a `select =`
-          # belonging to some other tool must not read as a ruff rule set and
-          # suppress the warning.
           if [ "$RULESET_DECLARED" -eq 0 ] && [ -f pyproject.toml ]; then
-            if awk '
-              /^[[:space:]]*\[/ { in_ruff = ($0 ~ /^[[:space:]]*\[+tool\.ruff/) ? 1 : 0; next }
-              in_ruff && /^[[:space:]]*(extend-)?select[[:space:]]*=/ { found = 1 }
-              END { exit found ? 0 : 1 }
-            ' pyproject.toml; then
-              RULESET_DECLARED=1
-            fi
+            if ruff_select_declared pyproject.toml ""; then RULESET_DECLARED=1; fi
           fi
           if [ "$RULESET_DECLARED" -eq 0 ]; then
             echo "::warning::No explicit ruff rule selection found (no (extend-)select under [tool.ruff*] in pyproject.toml, nor in ruff.toml/.ruff.toml). This repo is enforcing ruff ${RUFF_VERSION}'s built-in defaults, which change between releases — the next ruff_version bump can add violations to code you did not touch. Declare one, e.g. [tool.ruff.lint] select = [\"E4\", \"E7\", \"E9\", \"F\"] (ruff's pre-0.16 defaults)."
