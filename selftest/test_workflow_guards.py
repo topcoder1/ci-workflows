@@ -345,7 +345,16 @@ def test_lint_never_runs_python_m_with_the_checkout_as_cwd():
     # NOT continue in shell, but a fold-first pass would splice the next
     # (real) line into the comment and then discard it -- hiding a live
     # invocation. (Codex review round 2.)
-    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    code = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        # INLINE comments go too, for the same reason and one more: a `\`
+        # inside one does not continue the line in shell, but folding would
+        # splice the next line onto it and let the comment's text stand in
+        # for real code -- `echo ok # cd "${RUNNER_TEMP:?fake}" \` would
+        # lend a fake escape to the command below it. (Codex round 4.)
+        code.append(re.sub(r"(?<=\s)#.*$", "", line))
     # Now rejoin `python3 \` + newline + `-m pip`, which would otherwise
     # split one invocation across two lines and slip past a line scan.
     folded = re.sub(r"\\\n[ \t]*", " ", "\n".join(code)).splitlines()
