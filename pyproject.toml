@@ -23,6 +23,15 @@ dev = [
     "pyyaml",
 ]
 
+[tool.ruff.lint]
+# Declare the rule set instead of inheriting ruff's built-in defaults. #139
+# pinned ruff's VERSION, which stops a new release from reddening this repo
+# on release day; this is the other half — it keeps the deliberate pin bump
+# from silently re-scoping what gets enforced here. Without it, this repo
+# trips the very ::warning:: its own ruff job now emits at every consumer.
+# These four are ruff's pre-0.16 defaults — the set this repo already passed.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["selftest"]
 
