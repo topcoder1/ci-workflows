@@ -371,3 +371,60 @@ def test_scoped_git_credential_gated_and_scrubbed(workflow):
         f"{workflow}: test invocation must be `uv run --no-sync pytest` so "
         "tests can never trigger a credential-needing re-resolve"
     )
+
+
+def test_lint_ruff_is_opt_in_and_mirrors_preflight_scope():
+    """lint.yml's ruff job must stay opt-in and scope-matched to bb-preflight.
+
+    Motivation (2026-07-31, topcoder1/dotclaude — fixed by its #183):
+    bb-preflight.sh runs `ruff check` locally and verdicts NOT READY on any
+    violation, but no CI lane ran ruff at all — an F541 merged to main with
+    every check green, after which every LOCAL preflight was blocked while
+    CI stayed green. The fix is the lint.yml ruff job; these properties
+    keep it safe:
+
+    1. `default: false`. Consumers opted into lint checks one at a time; a
+       default-on ruff would redden every Python consumer's PRs the moment
+       it merges (same rule the codex verdict gate pins above).
+    2. The enable-guard uses the format() stringify dodge (GHA `==` does
+       loose numeric coercion, so `true == null` comparisons lie), the
+       input is actually bound into the run step, and the always-on
+       self-test arm stays pinned to this repo.
+    3. Scope parity: with no explicit ruff_paths the job must scan src/
+       and tests/ when present, else the repo root — the exact PYTHON_DIRS
+       logic in bb-preflight.sh. A wider CI scope re-opens the asymmetry
+       in the other direction (preflight says READY, push, CI blocks on
+       paths the local gate never checked).
+    """
+    text = (WORKFLOWS_DIR / "lint.yml").read_text()
+
+    m = re.search(
+        r"^      run_ruff:.*?^        default:\s*(\S+)", text, flags=re.S | re.M
+    )
+    assert m, "lint.yml must declare the run_ruff input (with a default)"
+    assert m.group(1) == "false", (
+        f"run_ruff must default to false, got {m.group(1)!r} — consumers "
+        "with pre-existing ruff drift would redden the moment this merges"
+    )
+
+    assert "format('{0}', inputs.run_ruff) == 'true'" in text, (
+        "the ruff job's enable-guard must use the format() stringify dodge"
+    )
+    assert (
+        "github.repository == 'topcoder1/ci-workflows' "
+        "&& format('{0}', inputs.run_ruff) == ''" in text
+    ), "the ruff self-test arm must stay pinned to this repo"
+    assert "RUFF_PATHS: ${{ inputs.ruff_paths }}" in text, (
+        "ruff_paths must be bound into the run step's env — without it the "
+        "job silently ignores a caller's scope override"
+    )
+
+    # Scope-parity markers: the auto-detect branch of the run step.
+    for marker in (
+        "if [ -d src ]; then DIRS+=(src); fi",
+        "if [ -d tests ]; then DIRS+=(tests); fi",
+    ):
+        assert marker in text, (
+            f"ruff scope auto-detect lost {marker!r} — it must mirror "
+            "bb-preflight's src/tests-else-root PYTHON_DIRS logic"
+        )
