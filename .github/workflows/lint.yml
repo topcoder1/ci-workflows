@@ -55,6 +55,10 @@ name: Lint
 #   - ruff is OFF by default for the same reason: repos that never gated
 #     on ruff usually carry pre-existing lint drift that would block the
 #     install PR. Callers with clean Python opt in via run_ruff.
+#   - ruff's VERSION is pinned (ruff_version), unlike the other tools here.
+#     Its default rule set changes between minor releases, so a floating
+#     resolve reddens every consumer the day a release lands. Bump the pin
+#     deliberately, in a PR that shows the new findings.
 
 on:
   pull_request:
@@ -122,6 +126,11 @@ on:
         required: false
         type: string
         default: ""
+      ruff_version:
+        description: "Exact ruff version to run. Pinned, NOT floating: ruff changes its default rule set between minor releases, so an unpinned resolve reddens every consumer the day a release lands, with no code change. Bump deliberately in a PR that shows the new findings."
+        required: false
+        type: string
+        default: "0.15.10"
 
 permissions:
   contents: read
@@ -579,6 +588,7 @@ jobs:
       - name: Run ruff check
         env:
           RUFF_PATHS: ${{ inputs.ruff_paths }}
+          RUFF_VERSION: ${{ inputs.ruff_version || '0.15.10' }}
         run: |
           set -euo pipefail
           DIRS=()
@@ -590,17 +600,32 @@ jobs:
             if [ -d tests ]; then DIRS+=(tests); fi
           fi
           if [ "${#DIRS[@]}" -eq 0 ]; then DIRS=(.); fi
-          echo "ruff check: ${DIRS[*]}"
-          # pipx (preinstalled on ubuntu runners) resolves ruff from PyPI
-          # into an isolated venv and runs its console script. Deliberately
-          # NOT `python3 -m pip install ruff` + bare `ruff` — `python3 -m X`
-          # resolves a top-level X.py / X/ from the checkout CWD before the
-          # installed package (sys.path[0]), so PR content could execute
-          # code on the runner or fake a pass. This job must never execute
-          # checkout content, same property the prettier job keeps with
-          # --ignore-scripts. Unpinned on purpose: bb-preflight runs
-          # whatever ruff the workstation ships, so a CI pin would re-open
-          # the local-vs-CI rule-set gap in the other direction.
-          # (Codex review rounds 1-2.)
-          pipx run ruff check "${DIRS[@]}"
+          # A floating resolve is a fleet hazard, not a parity win: ruff
+          # changes its DEFAULT rule set between minor releases, so the day
+          # a release lands every consumer goes red with no code change.
+          # Measured 2026-07-31 on the install PR itself — 0.15.10 (the
+          # workstation/bb-preflight baseline) reported dotclaude's tests/
+          # clean while an unpinned CI resolve pulled 0.16.1 and failed with
+          # 25 errors across ISC004/PLW1510/FURB167/RUF059/PIE810, none of
+          # which are 0.15.10 defaults. Bump this pin deliberately, in a PR
+          # that shows the new findings.
+          # The pin is only a pin if it is CONCRETE. pip accepts PEP 440
+          # wildcards and ranges, so a caller passing `0.15.*` (or `>=0.15`)
+          # would silently float to latest-matching and re-open the exact
+          # hazard above, with the workflow still looking pinned.
+          # (Codex review round 2.)
+          if ! printf '%s' "$RUFF_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::ruff_version must be an exact x.y.z version (got '${RUFF_VERSION}'). Ranges and wildcards defeat the pin."
+            exit 1
+          fi
+          echo "ruff check (v${RUFF_VERSION}): ${DIRS[*]}"
+          # `pipx run --spec` (pipx is preinstalled on ubuntu runners)
+          # resolves ruff into an isolated venv and runs its console script.
+          # Deliberately NOT `python3 -m pip install ruff` + bare `ruff` —
+          # `python3 -m X` resolves a top-level X.py / X/ from the checkout
+          # CWD before the installed package (sys.path[0]), so PR content
+          # could execute code on the runner or fake a pass. This job must
+          # never execute checkout content, the same property the prettier
+          # job keeps with --ignore-scripts. (Codex review rounds 1-2.)
+          pipx run --spec "ruff==${RUFF_VERSION}" ruff check "${DIRS[@]}"
         shell: bash
