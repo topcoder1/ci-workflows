@@ -79,4 +79,6 @@ jobs:
             Do NOT post inline comments. Do NOT do general bug-hunting. The
             first pass already did that — your value is the regression axes.
           claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 25
             --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"
