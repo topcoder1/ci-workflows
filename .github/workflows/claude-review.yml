@@ -138,5 +138,15 @@ jobs:
             This summary confirms the review ran even when nothing was flagged.
 
             ${{ inputs.review_focus }}
+          # --model / --max-turns: pin the review model and cap agentic turns.
+          # claude-code-action v1 has no `model` input — unpinned, the model
+          # rides the Claude Code binary default (installed at latest above),
+          # which flipped opus-4-8 → sonnet-5 at the Claude 5 launch
+          # (2026-08-01..03) and turned ~14s single-pass reviews into ~2min
+          # agentic runs: fleet spend went ~$50/day → ~$700/day (Aug 4). The
+          # turn cap bounds worst-case tokens regardless of future model or
+          # binary behavior changes.
           claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 25
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
