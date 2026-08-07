@@ -41,4 +41,32 @@ for wf in claude-author-automerge safe-paths-automerge pr-classify codex-review 
   fi
 done
 
+# 3. The merge gates must keep RENAME coverage: a rename's OLD path
+#    (.previous_filename) must feed the classification, or moving a risky
+#    file out of a gated tree reads as no-change. Same fail-open class as
+#    the caller-side changes-classifier holes fixed fleet-wide 2026-08-06
+#    (Codex pre-review of inbox_superpilot's quality-tests classifier).
+for wf in claude-author-automerge safe-paths-automerge; do
+  f=".github/workflows/${wf}.yml"
+  if grep -q 'previous_filename' "$f"; then
+    echo "✓ ${wf}.yml classifies renames via previous_filename"
+  else
+    echo "✗ ${wf}.yml lost rename coverage — a rename's old path (.previous_filename) must count"
+    failed=1
+  fi
+done
+
+# 4. Gating consumers of the listing must keep failing CLOSED at the files
+#    API's 3,000-entry truncation cap (a truncated listing can hide risky
+#    paths past the cap; under-classifying there is fail-open).
+for wf in claude-author-automerge safe-paths-automerge pr-classify codex-review; do
+  f=".github/workflows/${wf}.yml"
+  if grep -qE -- '-ge 3000' "$f"; then
+    echo "✓ ${wf}.yml fails closed at the 3000-file listing cap"
+  else
+    echo "✗ ${wf}.yml lost the 3000-file truncation guard (-ge 3000, fail closed)"
+    failed=1
+  fi
+done
+
 exit "$failed"
