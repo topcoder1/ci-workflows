@@ -46,12 +46,15 @@ done
 #    file out of a gated tree reads as no-change. Same fail-open class as
 #    the caller-side changes-classifier holes fixed fleet-wide 2026-08-06
 #    (Codex pre-review of inbox_superpilot's quality-tests classifier).
+#    Match the FUNCTIONAL jq invocation, not the bare field name — both
+#    workflows carry doc-comments mentioning previous_filename, and a
+#    comment must not satisfy this check after the real call is removed.
 for wf in claude-author-automerge safe-paths-automerge; do
   f=".github/workflows/${wf}.yml"
-  if grep -q 'previous_filename' "$f"; then
+  if grep -qE 'select\(\.previous_filename\)' "$f"; then
     echo "✓ ${wf}.yml classifies renames via previous_filename"
   else
-    echo "✗ ${wf}.yml lost rename coverage — a rename's old path (.previous_filename) must count"
+    echo "✗ ${wf}.yml lost rename coverage — the select(.previous_filename) jq call must feed the classification"
     failed=1
   fi
 done
