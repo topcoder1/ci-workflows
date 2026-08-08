@@ -175,7 +175,21 @@ for (const cls of Object.keys(excludeRules)) {
 				`so the change is visible rather than subtracted.`
 		);
 	}
-	for (const p of excludeRules[cls] || []) {
+	// A scalar where a list belongs is a fail-OPEN, not a syntax error: JS
+	// iterates a string per-character, so `sensitive: 'cmd/svc/**'` becomes the
+	// patterns 'c','m','d','/','s',… ,'*'. None trips the bracket or negation
+	// guards, and minimatch(file, '*') matches any root-level path — silently
+	// exempting files from the class. Require a real list.
+	const patterns = excludeRules[cls];
+	if (patterns !== null && patterns !== undefined && !Array.isArray(patterns)) {
+		fail(
+			`${RULES_PATH}: '${EXCLUDE_KEY}.${cls}:' must be a LIST of patterns, got a ${typeof patterns}. ` +
+				`A bare string is iterated per-character here, so every character becomes a pattern — ` +
+				`'*' among them silently exempts root-level paths from '${cls}'. Write each pattern on ` +
+				`its own "- '…'" line.`
+		);
+	}
+	for (const p of patterns || []) {
 		if (typeof p !== 'string') continue;
 		if (p.includes('[') || p.includes(']')) {
 			fail(

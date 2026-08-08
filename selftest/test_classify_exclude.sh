@@ -165,7 +165,28 @@ exclude:
     - '**/.env.example'
 " "may not subtract from 'blocked'" "exclude: under blocked: fails closed"
 
-# 13. Wrong shape (a list instead of a class→patterns mapping).
+# 13. A scalar where a list belongs is a fail-OPEN, not a syntax error: JS
+#     iterates a string per-character, so every character becomes a pattern
+#     and '*' among them matches any root-level path. Caught in review on the
+#     PR that introduced exclude: (ci-workflows#145).
+expect_fail "blocked: []
+sensitive:
+  - 'cmd/svc/**'
+exclude:
+  sensitive: 'cmd/svc/**/*_test.go'
+" "must be a LIST" "scalar exclude.<cls>: value fails closed"
+
+# 14. An empty exclusion list is legitimate (no exclusions) and must not fail.
+cat > "$tmp/repo/.github/risk-paths.yml" <<'YAML'
+blocked: []
+sensitive:
+  - 'cmd/svc/**'
+exclude:
+  sensitive:
+YAML
+expect sensitive "$(classify cmd/svc/main.go)" "empty exclusion list is a no-op, not an error"
+
+# 15. Wrong shape (a list instead of a class→patterns mapping).
 expect_fail "blocked: []
 exclude:
   - 'cmd/svc/**/*_test.go'
