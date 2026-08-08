@@ -88,6 +88,32 @@ try {
 // semantics but is deliberately permissive on config errors, so this
 // fail-closed pass is the only place a dead always_review entry gets
 // caught before it silently skips a required Codex review.
+// A scalar where a list belongs is a fail-OPEN, and a silent one. JS iterates
+// a string per-character, so `sensitive: 'cmd/**'` becomes the patterns
+// 'c','m','d','/','*','*' — none of which trips the bracket or negation guards
+// below, and none of which matches a real path. The class simply stops gating.
+// This is the gating-class twin of the exclude.<cls> guard further down; that
+// one was caught in review on ci-workflows#145, which is what surfaced this.
+//
+// Fleet-audited before adding, because this guard hard-fails any repo it
+// catches: all 140 repos across topcoder1 + whois-api-llc carry a
+// risk-paths.yml and every class value is a real list. Eight repos
+// (whois-api-qa, app-factory, wxa-graph, usdev, netsniper, domains_collector,
+// dnssniper, ProfessionalServices) have an EMPTY `sensitive:` key — null, not
+// a scalar — which stays legal here exactly as `rules[cls] || []` already
+// treated it. So this breaks no consumer today.
+for (const cls of [...PATTERN_CLASSES, 'always_review']) {
+	const v = rules[cls];
+	if (v !== null && v !== undefined && !Array.isArray(v)) {
+		fail(
+			`${RULES_PATH}: '${cls}:' must be a LIST of patterns, got a ${typeof v}. ` +
+				`A bare string is iterated per-character, so every character becomes its own ` +
+				`pattern and '${cls}' silently stops matching anything — an UN-gating fail-open, ` +
+				`not a syntax error. Write each pattern on its own "- '…'" line.`
+		);
+	}
+}
+
 for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	for (const p of rules[cls] || []) {
 		if (typeof p === 'string' && (p.includes('[') || p.includes(']'))) {
