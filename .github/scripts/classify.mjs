@@ -158,6 +158,23 @@ for (const cls of Object.keys(excludeRules)) {
 				`${PATTERN_CLASSES.join(', ')}. A typo here would silently exclude nothing, so it fails closed.`
 		);
 	}
+	// Subtracting from `blocked` is refused outright. blocked is the hardest
+	// tier — it hard-fails the classify check and never bypasses — and it
+	// carries the secrets family ('**/.env', '**/secrets*'), Dockerfiles and
+	// deploy/. A stray '**' in an exclusion there silently un-gates all of it,
+	// and an exclusion is exactly the kind of subtraction that is easy to get
+	// subtly wrong, where deleting a blocked: entry outright is at least
+	// visible in review. No concrete need for this has appeared; per the same
+	// reasoning as the bracket and negation bans above, strictness costs
+	// nothing today. Lift this if a real case turns up.
+	if (cls === 'blocked') {
+		fail(
+			`${RULES_PATH}: '${EXCLUDE_KEY}:' may not subtract from 'blocked' — it is the hardest ` +
+				`tier (hard-fails classify, never bypasses) and covers the secrets, Dockerfile and ` +
+				`deploy paths. Narrow the 'blocked:' patterns themselves if something is over-matched, ` +
+				`so the change is visible rather than subtracted.`
+		);
+	}
 	for (const p of excludeRules[cls] || []) {
 		if (typeof p !== 'string') continue;
 		if (p.includes('[') || p.includes(']')) {

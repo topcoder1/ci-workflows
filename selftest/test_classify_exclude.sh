@@ -155,7 +155,17 @@ exclude:
     - 'cmd/svc/**/*_test.go'
 " "unknown class" "unknown class key under exclude: fails closed"
 
-# 12. Wrong shape (a list instead of a class→patterns mapping).
+# 12. Subtracting from `blocked` is refused outright. It is the hardest tier
+#     and carries the secrets/Dockerfile/deploy families; a stray '**' in an
+#     exclusion there would silently un-gate all of them.
+expect_fail "blocked:
+  - '**/.env'
+exclude:
+  blocked:
+    - '**/.env.example'
+" "may not subtract from 'blocked'" "exclude: under blocked: fails closed"
+
+# 13. Wrong shape (a list instead of a class→patterns mapping).
 expect_fail "blocked: []
 exclude:
   - 'cmd/svc/**/*_test.go'
