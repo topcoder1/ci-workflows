@@ -40,6 +40,24 @@ const PATTERN_CLASSES = ['blocked', 'sensitive', 'safe_test', 'safe_deps', 'safe
 // folding case may only ever ADD gating, never remove it — which is exactly
 // why the safe/trivial classes are absent here.
 const NOCASE_CLASSES = new Set(['blocked', 'sensitive']);
+// Optional `exclude:` map, keyed by class — paths that match a class pattern
+// but must NOT be classified into it, falling through to the remaining classes
+// instead. The motivating case: a repo gating its deployed service entrypoint
+// with 'cmd/<svc>/**' under sensitive: has no way to let a tests-only diff in
+// that package auto-merge, because classify() returns the first matching class
+// and sensitive is checked before safe_test. Enumerating the production files
+// positively "works" but fails OPEN — a NEW file added to that package matches
+// nothing and lands on the `standard` fallback, i.e. auto-merge eligible with
+// no Codex review, on the deployed entrypoint. An exclusion keeps the broad
+// glob (so new files stay gated) and subtracts only the paths named.
+//
+// Exclusions are matched CASE-SENSITIVELY, always — including against the
+// nocase gating classes. The invariant documented on classify() is that
+// folding case may only ever ADD gating, never remove it; an exclusion REMOVES
+// gating, so folding one would let 'CMD/SVC/FOO_TEST.GO' escape a gate its
+// lowercase twin still hits. Case-sensitive exclusions can only ever subtract
+// fewer paths, which is the safe direction.
+const EXCLUDE_KEY = 'exclude';
 
 function fail(msg) {
 	process.stderr.write(`classify.mjs: ${msg}\n`);
@@ -113,6 +131,54 @@ for (const cls of NOCASE_CLASSES) {
 	}
 }
 
+// Exclusion lists get the SAME fail-closed guards as the gating classes, and
+// two of their own. A bracket is the silent-dead-gate footgun in either
+// direction. Negation inside an exclusion is worse than in a gating class: an
+// exclusion is already a subtraction, so negating it flips the rule into
+// "exclude everything EXCEPT this" and silently un-gates the whole class. An
+// unknown class key ('sensitve:') would exclude nothing while leaving the
+// author convinced they had exempted paths they had not — so it is rejected
+// rather than ignored, even though its effect is the safe direction.
+const rawExclude = rules[EXCLUDE_KEY];
+let excludeRules = {};
+if (rawExclude !== undefined && rawExclude !== null) {
+	if (typeof rawExclude !== 'object' || Array.isArray(rawExclude)) {
+		fail(
+			`${RULES_PATH}: '${EXCLUDE_KEY}:' must be a mapping of class name → pattern list ` +
+				`(e.g. "${EXCLUDE_KEY}:\\n  sensitive:\\n    - 'cmd/svc/**/*_test.go'"), got ` +
+				`${Array.isArray(rawExclude) ? 'a list' : typeof rawExclude}.`
+		);
+	}
+	excludeRules = rawExclude;
+}
+for (const cls of Object.keys(excludeRules)) {
+	if (!PATTERN_CLASSES.includes(cls)) {
+		fail(
+			`${RULES_PATH}: '${EXCLUDE_KEY}:' names unknown class '${cls}' — valid classes are ` +
+				`${PATTERN_CLASSES.join(', ')}. A typo here would silently exclude nothing, so it fails closed.`
+		);
+	}
+	for (const p of excludeRules[cls] || []) {
+		if (typeof p !== 'string') continue;
+		if (p.includes('[') || p.includes(']')) {
+			fail(
+				`${RULES_PATH}: pattern '${p}' (under '${EXCLUDE_KEY}.${cls}:') contains a bracket — ` +
+					`minimatch reads '[...]' as a character class, so the exclusion matches nothing and ` +
+					`the paths you meant to exempt stay gated. Replace the bracket segment with '*', or ` +
+					`enumerate. Same rule as the gating classes.`
+			);
+		}
+		if (p.trimStart().startsWith('!') || p.includes('!(')) {
+			fail(
+				`${RULES_PATH}: pattern '${p}' (under '${EXCLUDE_KEY}.${cls}:') uses glob negation — ` +
+					`an exclusion is already a subtraction, so negating it inverts the rule into ` +
+					`"exclude everything EXCEPT this" and silently un-gates the whole '${cls}' class. ` +
+					`Express the exclusion positively: list the paths to exempt.`
+			);
+		}
+	}
+}
+
 const changedFiles = readFileSync(0, 'utf8')
 	.split('\n')
 	.map((s) => s.trim())
@@ -166,8 +232,23 @@ if (changedFiles.length === 0) {
 // also case-sensitively ("CODEOWNERS paths are case sensitive, because GitHub
 // uses a case sensitive file system"). A repo relying on a lowercase glob to
 // own an uppercase path still needs an exact-case CODEOWNERS line.
+// isExcluded reports whether `file` is exempted from `cls` by an `exclude:`
+// entry. Always case-sensitive — see EXCLUDE_KEY above for why folding here
+// would break classify()'s invariant.
+function isExcluded(file, cls) {
+	for (const p of excludeRules[cls] || []) {
+		if (typeof p === 'string' && minimatch(file, p, { dot: true, matchBase: false, nocase: false })) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function classify(file) {
 	for (const cls of PATTERN_CLASSES) {
+		// Skip the whole class, not just the matching pattern: a file exempted
+		// from `sensitive` must not be re-gated by a second sensitive pattern.
+		if (isExcluded(file, cls)) continue;
 		const patterns = rules[cls] || [];
 		for (const p of patterns) {
 			const opts = { dot: true, matchBase: false, nocase: NOCASE_CLASSES.has(cls) };
