@@ -12,10 +12,16 @@
 # bakes that into version control.
 #
 # Fleet evidence gathered before shipping (2026-07-14): every blob in all 45
-# repos carrying a risk-paths.yml (18,604 files) was classified twice, nocase
-# off vs on. ZERO downgrades fleet-wide; exactly 2 upgrades, both real secrets
-# docs (wxa-jake-ai 'docs/SECRETS.md', inbox_superpilot
+# repos THEN carrying a risk-paths.yml (18,604 files) was classified twice,
+# nocase off vs on. ZERO downgrades fleet-wide; exactly 2 upgrades, both real
+# secrets docs (wxa-jake-ai 'docs/SECRETS.md', inbox_superpilot
 # 'docs/SECRETS_ROTATION.md').
+#
+# Fleet size corrected 2026-08-08: it is 140 repos now, not 45, and all 140
+# carry a risk-paths.yml. The blob-level comparison above was not redone at
+# that size — its conclusion holds structurally (folding can only ADD gating),
+# but cite the 140 when sizing blast radius. See classify.mjs's FLEET SIZE
+# note.
 #
 # Run from the repo root:
 #   bash selftest/test_classify_nocase.sh
