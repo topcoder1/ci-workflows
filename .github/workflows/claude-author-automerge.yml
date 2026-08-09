@@ -103,6 +103,15 @@ name: Claude-author Auto-merge (reusable)
 # This workflow does NOT bypass branch protection. It only enables GitHub's
 # "auto-merge" toggle, which still waits for required checks (Claude Review)
 # to pass and required reviews to land before merging.
+#
+# Because the merge itself happens SERVER-SIDE the instant the last required
+# check goes green, nothing can consult a reviewer at merge time — so the
+# consultation happens at ARM time instead: the final gate before the arm
+# (see "Quiet period + unaddressed findings" below, wxa_vpn#1392) waits for
+# findings_quiet_minutes of review silence, then runs the unaddressed-findings
+# detector, and declines + disarms when a finding is newer than the last
+# authored commit. It applies to every arm path (bypass labels included), is
+# not a required check, and never blocks the manual merge button.
 
 on:
   workflow_call:
@@ -142,6 +151,11 @@ on:
         required: false
         type: boolean
         default: true
+      findings_quiet_minutes:
+        description: "Quiet period (minutes) the PR must be free of new commits and review-bot comments before auto-merge is armed, after which the unaddressed-findings check runs (wxa_vpn#1392: findings posted 3-16 min after the last push merged unanswered). Applies to EVERY arm path, bypass labels included — the escape for a wrong finding is the manual merge click, which this gate never blocks. Set 0 to disable the whole gate (no wait, no findings check)."
+        required: false
+        type: number
+        default: 20
     secrets:
       automerge_pat:
         description: >-
@@ -1007,12 +1021,210 @@ jobs:
             echo "bypass=0" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Enable auto-merge
+      # Quiet period + unaddressed-findings gate (wxa_vpn#1392). Runs ONLY
+      # when every earlier gate has cleared — i.e. the PR would otherwise
+      # arm right now — and holds the arm until the review conversation has
+      # actually gone quiet, then consults the findings detector. Review
+      # bots post findings continuously and a PR can merge seconds later;
+      # measured gaps on the 4 incident PRs were 3m18s-16m17s, all inside
+      # the 20-minute default. Two halves:
+      #
+      #   1. QUIET — wait until >= findings_quiet_minutes have passed since
+      #      the newest of: the newest AUTHORED (non-merge) commit, the
+      #      newest inline review comment (any author — an inline comment
+      #      is a deliberate code-level finding), and the newest top-level
+      #      [bot] comment that is not this workflow's own marker comment
+      #      or pr-classify chatter (a gate that counts its own sticky
+      #      comment as review activity never opens). Sleeping here is
+      #      safe: callers run concurrency cancel-in-progress per PR, so a
+      #      new push replaces this run and restarts the clock, and the
+      #      arm below binds --match-head-commit so a moved head can never
+      #      inherit this run's arm. Chronic chatter is bounded by a 3x
+      #      cap, which declines + disarms (fail toward manual).
+      #
+      #   2. CONSULT — run the unaddressed-findings check (vendored twin
+      #      of dotclaude's bb-unaddressed-findings.sh, fetched from this
+      #      repo's default branch exactly like classify.mjs). A finding
+      #      newer than the last authored commit ⇒ decline to arm, disarm
+      #      any arm an earlier run placed, and leave a sticky comment.
+      #      Pushing a commit re-gates via its own synchronize run; a
+      #      wrong finding is overridden by the one thing this lane never
+      #      blocks: the manual click-merge. Measured precision of the
+      #      detector on a fresh 25-PR corpus (#1369-#1401) is 90.9%, and
+      #      40% of merges carried a real unaddressed finding — the
+      #      decline-to-manual cost is small and the caught class is not.
+      #
+      # This deliberately applies to the bypass-label and Codex-bypass arm
+      # paths too: wxa_vpn#1404 merged 56 seconds after a (false) Codex P1
+      # precisely because an approval decided minutes earlier raced a
+      # review that had not finished speaking. An approval label says "I
+      # read what was there", not "nothing further may be said".
+      #
+      # Fail direction: every error here exits nonzero, which skips the
+      # arm and triggers the always() error-revoke below (stale arms from
+      # earlier runs are disarmed). No required check is involved anywhere,
+      # so this gate can decline a merge but can never wedge a PR.
+      - name: Quiet period + unaddressed findings
+        id: quiet_findings
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
           steps.hold.outputs.hold != '1' &&
           steps.base_gate.outputs.refuse != '1' && (
+            steps.risk.outputs.risky != '1' ||
+            steps.bypass_label.outputs.bypass == '1' ||
+            steps.bypass_codex.outputs.bypass == '1'
+          )
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          QUIET_MINUTES: ${{ inputs.findings_quiet_minutes }}
+        run: |
+          set -euo pipefail
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
+
+          QUIET_S=$(( ${QUIET_MINUTES:-20} * 60 ))
+          if [ "$QUIET_S" -le 0 ]; then
+            { echo "clear=1"; echo "reason=disabled"; } >> "$GITHUB_OUTPUT"
+            echo "Findings gate disabled (findings_quiet_minutes=${QUIET_MINUTES})."
+            exit 0
+          fi
+
+          # Newest activity the gate must be quiet against. Merge commits
+          # are excluded for the same reason the findings check excludes
+          # them: an auto-update-branch merge introduces no authored change
+          # and must not reset either clock. jq slurps (-s) then `add`s so
+          # a --paginate stream (one top-level array per page) aggregates
+          # ACROSS pages, not per page — the multi-page defect pinned in
+          # test_automerge_hold_gate.sh.
+          read_anchor() {
+            local commits inline issue c1 c2 c3
+            commits=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits?per_page=100" --paginate) || return 1
+            c1=$(printf '%s' "$commits" | jq -rs '[(add // [])[] | select((.parents | length) < 2) | .commit.committer.date] | max // empty') || return 1
+            inline=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments?per_page=100" --paginate) || return 1
+            c2=$(printf '%s' "$inline" | jq -rs '[(add // [])[] | .created_at] | max // empty') || return 1
+            issue=$(retry gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100" --paginate) || return 1
+            c3=$(printf '%s' "$issue" | jq -rs '[(add // [])[]
+                  | select(((.user.login // "") | endswith("[bot]")))
+                  | select(((.body // "") | test("<!-- (claude-author-automerge|pr-classify)")) | not)
+                  | .created_at] | max // empty') || return 1
+            printf '%s\n%s\n%s\n' "$c1" "$c2" "$c3" | grep -v '^$' | sort | tail -1
+          }
+
+          waited=0
+          cap=$(( QUIET_S * 3 ))
+          while :; do
+            anchor=$(read_anchor) || {
+              echo "::error::could not read the quiet-period anchors (commits/comments) after retries — refusing to arm auto-merge (fail closed)."
+              exit 1
+            }
+            # SHAPE, not just emptiness — an error body that leaks through
+            # as "}" must not compare as a timestamp (same class the
+            # findings checker pins on its last-commit read).
+            case "$anchor" in
+              [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*) ;;
+              *)
+                echo "::error::quiet-period anchor is not an ISO-8601 timestamp (got: '${anchor:0:40}') — refusing to arm auto-merge (fail closed)."
+                exit 1
+                ;;
+            esac
+            age=$(( $(date -u +%s) - $(date -u -d "$anchor" +%s) ))
+            remaining=$(( QUIET_S - age ))
+            if [ "$remaining" -le 0 ]; then
+              echo "Quiet: newest commit/review activity is ${age}s old (>= ${QUIET_S}s)."
+              break
+            fi
+            if [ "$waited" -ge "$cap" ]; then
+              echo "::notice::review activity kept arriving for ${waited}s (cap ${cap}s) — not arming from this run and disarming any stale arm; the next PR event retries."
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              state=$(gh pr view "$PR_URL" --json autoMergeRequest --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+              echo "Auto-merge state after quiet-cap revoke: $state"
+              if [ "$state" = "ON" ]; then
+                echo "::error::auto-merge still ON after --disable-auto — investigate"
+                exit 1
+              fi
+              { echo "clear=0"; echo "reason=quiet-cap"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep_for=$remaining
+            [ "$sleep_for" -gt "$QUIET_S" ] && sleep_for=$QUIET_S
+            echo "Quiet period: newest activity ${age}s ago — sleeping ${sleep_for}s (waited ${waited}s, cap ${cap}s)."
+            sleep "$sleep_for"
+            waited=$(( waited + sleep_for ))
+          done
+
+          # CONSULT — fetched from this repo's default branch exactly like
+          # classify.mjs: one detector, no drift between what the operator
+          # CLI flags and what this gate declines on.
+          work=$(mktemp -d)
+          b64=$(retry gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/unaddressed-findings.sh" --jq '.content') || {
+            echo "::error::could not fetch unaddressed-findings.sh after retries — refusing to arm auto-merge (fail closed)."
+            exit 1
+          }
+          printf '%s' "$b64" | base64 -d > "$work/unaddressed-findings.sh"
+          chmod +x "$work/unaddressed-findings.sh"
+
+          set +e
+          report=$("$work/unaddressed-findings.sh" "${GITHUB_REPOSITORY}" "$PR" 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$report"
+
+          if [ "$rc" -eq 0 ]; then
+            { echo "clear=1"; echo "reason=quiet+clean"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::unaddressed-findings check errored (rc=$rc) — refusing to arm auto-merge (fail closed)."
+            exit 1
+          fi
+
+          # Findings present: never arm, and disarm any arm an earlier run
+          # placed (same idempotent revoke as every other gate).
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+          echo "Auto-merge state after findings revoke: $state"
+          if [ "$state" = "ON" ]; then
+            echo "::error::auto-merge still ON after --disable-auto — investigate"
+            exit 1
+          fi
+
+          marker="<!-- claude-author-automerge:findings-gate -->"
+          existing=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/comments?per_page=100" --paginate \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1 || true)
+          {
+            echo "$marker"
+            echo "**Auto-merge withheld — review findings arrived after the last authored commit.**"
+            echo ""
+            echo "The quiet-period gate ran the unaddressed-findings check and it flagged:"
+            echo ""
+            echo '```'
+            printf '%s\n' "$report" | head -40
+            echo '```'
+            echo ""
+            echo "- Push a commit addressing them — the push re-runs this gate and re-arms"
+            echo "  automatically when the check comes back clean."
+            echo "- If a finding is wrong, merge manually — this gate only withholds the"
+            echo "  automatic arm; it never blocks the merge button and is not a required check."
+          } > /tmp/automerge-findings.md
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "/repos/${GITHUB_REPOSITORY}/issues/comments/$existing" \
+              -f body="$(cat /tmp/automerge-findings.md)" >/dev/null
+          else
+            gh pr comment "$PR" --body-file /tmp/automerge-findings.md
+          fi
+          { echo "clear=0"; echo "reason=findings"; } >> "$GITHUB_OUTPUT"
+          echo "::notice::Auto-merge withheld: unaddressed review findings (see the sticky comment). Manual merge remains available."
+          exit 0
+
+      - name: Enable auto-merge
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.hold.outputs.hold != '1' &&
+          steps.base_gate.outputs.refuse != '1' &&
+          steps.quiet_findings.outputs.clear == '1' && (
             steps.risk.outputs.risky != '1' ||
             steps.bypass_label.outputs.bypass == '1' ||
             steps.bypass_codex.outputs.bypass == '1'
@@ -1289,6 +1501,7 @@ jobs:
            steps.hold.outcome == 'failure' ||
            steps.base_gate.outcome == 'failure' ||
            steps.risk.outcome == 'failure' ||
+           steps.quiet_findings.outcome == 'failure' ||
            steps.setup_node.outcome == 'failure' ||
            steps.checkout.outcome == 'failure' ||
            steps.detect.outcome == 'failure')
