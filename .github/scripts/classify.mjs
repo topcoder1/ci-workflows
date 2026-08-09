@@ -137,9 +137,12 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // (gated) but false under {nocase:true} (ungated) — a downgrade. Segment
 // extglobs have the same shape: 'src/!(*.md)' matches 'src/A.MD' today and
 // stops matching once case is folded. Fail closed rather than quietly violate
-// the invariant classify() documents. Zero of the 45 repos carrying a
-// risk-paths.yml use negation in a gating class (fleet audit 2026-07-14), so
-// — as with the bracket guard above — strictness costs nothing today and
+// the invariant classify() documents. Zero repos use negation in a gating
+// class: true of the 45 audited 2026-07-14, and re-established 2026-08-08
+// across the current fleet of 140 (see the FLEET SIZE note below — every one
+// of the 140 exits 0 through this script, and negation hard-fails, so a clean
+// run proves absence). As with the bracket guard above, strictness costs
+// nothing today and
 // stops the footgun from ever being introduced. (Codex round-2 P2 on the
 // change that introduced the fold.)
 for (const cls of NOCASE_CLASSES) {
@@ -279,11 +282,25 @@ if (changedFiles.length === 0) {
 // grow, safe/trivial can only shrink-or-stay. selftest/test_classify_nocase.sh
 // pins both halves.
 //
-// Fleet audit before shipping, 2026-07-14 — every blob in all 45 repos
+// Fleet audit before shipping, 2026-07-14 — every blob in all 45 repos then
 // carrying a risk-paths.yml (18,604 files) classified twice, fold off vs on:
 // ZERO downgrades, exactly 2 upgrades, both real secrets docs (wxa-jake-ai
 // 'docs/SECRETS.md', inbox_superpilot 'docs/SECRETS_ROTATION.md'). Both are
 // blocked:-class hits, so both still land under this narrower fold.
+//
+// FLEET SIZE, corrected 2026-08-08: the fleet is no longer 45. Enumerating
+// topcoder1 + whois-api-llc found 140 repos, and ALL 140 carry a
+// risk-paths.yml. The blob-level fold comparison above was never redone at
+// that size, so treat its numbers as covering the 45 that existed then — the
+// conclusion still holds structurally (folding can only ADD gating, by
+// construction), but the empirical backing is the smaller set.
+//
+// What WAS established across all 140 (2026-08-08): every one of their
+// risk-paths.yml files runs through this script and exits 0. Since this script
+// hard-fails on brackets, on negation in a gating class, and on a scalar where
+// a list belongs, a clean run over the fleet proves none of the 140 uses any
+// of them. Cite this rather than the stale 45 when sizing a guard's blast
+// radius — the earlier figure understated it by ~3x.
 //
 // NOTE: this does NOT fix .github/CODEOWNERS, which GitHub matches itself and
 // also case-sensitively ("CODEOWNERS paths are case sensitive, because GitHub
