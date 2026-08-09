@@ -71,6 +71,45 @@ try {
 	fail(`failed to read ${RULES_PATH}: ${e.message}`);
 }
 
+// A scalar where a list belongs is a fail-OPEN, and a silent one. JS iterates
+// a string per-character, so `sensitive: 'cmd/**'` becomes the patterns
+// 'c','m','d','/','*','*' — none of which trips the bracket or negation guards
+// below, and none of which matches a real path. The class simply stops gating.
+// This is the gating-class twin of the exclude.<cls> guard further down; that
+// one was caught in review on ci-workflows#145, which is what surfaced this.
+//
+// Fleet-audited before adding, because this guard hard-fails any repo it
+// catches. Re-audited 2026-08-08 after the first pass was found faulty (see
+// below): of 140 repos across topcoder1 + whois-api-llc, 45 carry a
+// risk-paths.yml — matching the count cited in the negation guard below — and
+// 95 carry none at all. Every class value in all 45 is a real list; zero
+// scalars. Eight (whois-api-qa, app-factory, wxa-graph, usdev, netsniper,
+// domains_collector, dnssniper, ProfessionalServices) have an EMPTY
+// `sensitive:` key — null, not a scalar — which stays legal here exactly as
+// `rules[cls] || []` already treated it. All 45 run through this script and
+// exit 0, so the guard breaks no consumer.
+//
+// CORRECTION: ci-workflows#146 shipped this comment claiming "all 140 repos
+// carry a risk-paths.yml". That was an artifact of the audit script, not a
+// measurement. `gh api .../contents/<path>` prints a ~127-byte JSON error to
+// STDOUT and exits 1 when the file is missing; the script tested only for an
+// empty body, so all 140 counted as carriers, and the YAML analyzer parsed
+// {"message":"Not Found"} as an object with no class keys and reported it
+// clean. If you re-run a sweep like this, gate on the EXIT CODE and keep a
+// known-missing repo as a negative control — "140 of 140" was the tell.
+// (topcoder1/dotclaude is a real non-carrier; use it as the control.)
+for (const cls of [...PATTERN_CLASSES, 'always_review']) {
+	const v = rules[cls];
+	if (v !== null && v !== undefined && !Array.isArray(v)) {
+		fail(
+			`${RULES_PATH}: '${cls}:' must be a LIST of patterns, got a ${typeof v}. ` +
+				`A bare string is iterated per-character, so every character becomes its own ` +
+				`pattern and '${cls}' silently stops matching anything — an UN-gating fail-open, ` +
+				`not a syntax error. Write each pattern on its own "- '…'" line.`
+		);
+	}
+}
+
 // A '[' in a pattern is a minimatch character class, never a literal
 // bracket — a SvelteKit-style 'src/routes/[id]/+page.ts' entry silently
 // matches nothing, and GitHub CODEOWNERS drops bracket lines entirely, so
@@ -88,32 +127,6 @@ try {
 // semantics but is deliberately permissive on config errors, so this
 // fail-closed pass is the only place a dead always_review entry gets
 // caught before it silently skips a required Codex review.
-// A scalar where a list belongs is a fail-OPEN, and a silent one. JS iterates
-// a string per-character, so `sensitive: 'cmd/**'` becomes the patterns
-// 'c','m','d','/','*','*' — none of which trips the bracket or negation guards
-// below, and none of which matches a real path. The class simply stops gating.
-// This is the gating-class twin of the exclude.<cls> guard further down; that
-// one was caught in review on ci-workflows#145, which is what surfaced this.
-//
-// Fleet-audited before adding, because this guard hard-fails any repo it
-// catches: all 140 repos across topcoder1 + whois-api-llc carry a
-// risk-paths.yml and every class value is a real list. Eight repos
-// (whois-api-qa, app-factory, wxa-graph, usdev, netsniper, domains_collector,
-// dnssniper, ProfessionalServices) have an EMPTY `sensitive:` key — null, not
-// a scalar — which stays legal here exactly as `rules[cls] || []` already
-// treated it. So this breaks no consumer today.
-for (const cls of [...PATTERN_CLASSES, 'always_review']) {
-	const v = rules[cls];
-	if (v !== null && v !== undefined && !Array.isArray(v)) {
-		fail(
-			`${RULES_PATH}: '${cls}:' must be a LIST of patterns, got a ${typeof v}. ` +
-				`A bare string is iterated per-character, so every character becomes its own ` +
-				`pattern and '${cls}' silently stops matching anything — an UN-gating fail-open, ` +
-				`not a syntax error. Write each pattern on its own "- '…'" line.`
-		);
-	}
-}
-
 for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	for (const p of rules[cls] || []) {
 		if (typeof p === 'string' && (p.includes('[') || p.includes(']'))) {
@@ -137,12 +150,9 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // (gated) but false under {nocase:true} (ungated) — a downgrade. Segment
 // extglobs have the same shape: 'src/!(*.md)' matches 'src/A.MD' today and
 // stops matching once case is folded. Fail closed rather than quietly violate
-// the invariant classify() documents. Zero repos use negation in a gating
-// class: true of the 45 audited 2026-07-14, and re-established 2026-08-08
-// across the current fleet of 140 (see the FLEET SIZE note below — every one
-// of the 140 exits 0 through this script, and negation hard-fails, so a clean
-// run proves absence). As with the bracket guard above, strictness costs
-// nothing today and
+// the invariant classify() documents. Zero of the 45 repos carrying a
+// risk-paths.yml use negation in a gating class (fleet audit 2026-07-14), so
+// — as with the bracket guard above — strictness costs nothing today and
 // stops the footgun from ever being introduced. (Codex round-2 P2 on the
 // change that introduced the fold.)
 for (const cls of NOCASE_CLASSES) {
@@ -282,25 +292,11 @@ if (changedFiles.length === 0) {
 // grow, safe/trivial can only shrink-or-stay. selftest/test_classify_nocase.sh
 // pins both halves.
 //
-// Fleet audit before shipping, 2026-07-14 — every blob in all 45 repos then
+// Fleet audit before shipping, 2026-07-14 — every blob in all 45 repos
 // carrying a risk-paths.yml (18,604 files) classified twice, fold off vs on:
 // ZERO downgrades, exactly 2 upgrades, both real secrets docs (wxa-jake-ai
 // 'docs/SECRETS.md', inbox_superpilot 'docs/SECRETS_ROTATION.md'). Both are
 // blocked:-class hits, so both still land under this narrower fold.
-//
-// FLEET SIZE, corrected 2026-08-08: the fleet is no longer 45. Enumerating
-// topcoder1 + whois-api-llc found 140 repos, and ALL 140 carry a
-// risk-paths.yml. The blob-level fold comparison above was never redone at
-// that size, so treat its numbers as covering the 45 that existed then — the
-// conclusion still holds structurally (folding can only ADD gating, by
-// construction), but the empirical backing is the smaller set.
-//
-// What WAS established across all 140 (2026-08-08): every one of their
-// risk-paths.yml files runs through this script and exits 0. Since this script
-// hard-fails on brackets, on negation in a gating class, and on a scalar where
-// a list belongs, a clean run over the fleet proves none of the 140 uses any
-// of them. Cite this rather than the stale 45 when sizing a guard's blast
-// radius — the earlier figure understated it by ~3x.
 //
 // NOTE: this does NOT fix .github/CODEOWNERS, which GitHub matches itself and
 // also case-sensitively ("CODEOWNERS paths are case sensitive, because GitHub
