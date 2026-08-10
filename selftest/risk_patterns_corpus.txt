@@ -33,6 +33,13 @@ RISKY: services/mfa/verify.py
 RISKY: app/totp/generate.go
 RISKY: lib/webauthn/register.go
 RISKY: internal/passkey/store.go
+# A spec file under a test root is STILL risky — the segment anchor makes no
+# exception for tests/, and safe-paths-automerge.yml's tier-2 hold now depends
+# on that. topcoder1/inbox_superpilot#215 (2026-08-10) merged a change to this
+# exact path unattended; "narrowing the false positive" by anchoring the auth
+# pattern away from test roots would silently reopen it. Change this line only
+# with a deliberate decision about who reviews auth-test edits.
+RISKY: web/tests/e2e/auth/signup.spec.ts
 
 # ── RISKY: Go entrypoints — wxa-mcp-server#193 gap ─────────────────────────
 RISKY: main.go
