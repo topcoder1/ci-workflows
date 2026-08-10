@@ -35,6 +35,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
         "selftest/test_prettier_scope_failsafe.sh",
         "selftest/test_prettier_symlink_filter.sh",
         "selftest/test_ruff_ruleset_warning.sh",
+        "selftest/test_safe_paths_risk_tier_hold.sh",
         "selftest/test_safe_paths_unsafe_overrides.sh",
     ],
 )
@@ -274,6 +275,55 @@ def test_safe_paths_never_automerges_customer_facing_legal():
     assert "previous_filename" in automerge, (
         "the risk scan must also match rename SOURCES — otherwise moving a "
         "risky file to a safe path escapes the gate"
+    )
+
+
+def test_safe_paths_honors_risk_tier_and_scopes_the_hold():
+    """safe-paths must honor risk-tier paths, and only where it would arm.
+
+    2026-08-10, topcoder1/inbox_superpilot#215: claude-author-automerge
+    posted "Auto-merge blocked — risk-tier paths touched. Manual click-merge
+    required" for web/tests/e2e/auth/signup.spec.ts, and safe-paths merged
+    the PR 12 minutes later. The two never disagreed in a resolvable sense —
+    claude-author-automerge can only decline to ARM, never block, and
+    safe-paths is the only workflow that arms a docs/tests diff. So the
+    decline was an abstention and the permissive gate won silently.
+
+    Behavior is pinned by selftest/test_safe_paths_risk_tier_hold.sh,
+    including a drift guard against the sibling's pattern list. This asserts
+    the wiring that test cannot see.
+    """
+    text = (WORKFLOWS_DIR / "safe-paths-automerge.yml").read_text()
+
+    assert "risk_tier_overrides='" in text, (
+        "safe-paths-automerge.yml must carry the risk-tier pattern list — "
+        "without it a tests-only auth change auto-merges past the sibling's "
+        "decline (inbox_superpilot#215)"
+    )
+    assert "steps.classify.outputs.reason == 'risk-tier-hold'" in text, (
+        "the revoke must fire on risk-tier-hold too — GitHub preserves an "
+        "auto-merge arm across pushes, so a PR armed on a clean revision "
+        "keeps its arm when a later push adds an auth spec"
+    )
+    assert "BYPASS_LABEL: ${{ inputs.risk_bypass_label }}" in text, (
+        "the hold must honor the bypass label — claude-author-automerge's "
+        "blocked-PR comment advertises it as the one-click release, and a "
+        "hold that ignored it would leave that escape hatch dead"
+    )
+
+    # STRUCTURAL: the risk scan must sit AFTER the safe-glob verdict, in the
+    # branch where every changed file is safe and this workflow would arm.
+    # Hoisting it up beside the tier-1 override looks equivalent and is not:
+    # it would emit a revoke-triggering reason on PRs this workflow never
+    # arms — a dependabot bump of .github/workflows/** matches the risk
+    # patterns — and the revoke step would disarm dependabot-auto-merge's
+    # legitimate arm.
+    unsafe_branch = text.index('if [ -n "$unsafe_files" ]')
+    risk_scan = text.index("risk_hits=$(")
+    assert risk_scan > unsafe_branch, (
+        "the risk-tier scan must run in the all-files-safe branch, after the "
+        "safe-glob check — running it earlier makes the revoke step disarm "
+        "sibling workflows on PRs safe-paths never arms"
     )
 
 

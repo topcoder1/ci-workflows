@@ -36,6 +36,16 @@ on:
         required: false
         type: string
         default: ""
+      risk_bypass_label:
+        description: |
+          Label that releases the risk-tier hold below. Must match the
+          caller's claude-author-automerge `risk_bypass_label` — that
+          workflow's blocked-PR comment advertises this exact label as the
+          one-click bypass, so a mismatch would leave the advertised
+          escape hatch dead here.
+        required: false
+        type: string
+        default: "auto-merge-approved"
     secrets:
       automerge_pat:
         description: >-
@@ -78,6 +88,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           EXTRA_GLOBS: ${{ inputs.extra_safe_globs }}
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
         run: |
           set -euo pipefail
           # Changed-file names via the paginated files API — `gh pr diff
@@ -88,8 +99,8 @@ jobs:
             --paginate --jq '.[].filename')
           # NOTE the 3000-file truncation check lives AFTER the override
           # block below, not here. Both exit early with all_safe=0, but only
-          # the override also emits reason=unsafe-override, which is what
-          # triggers the revoke step. Returning on truncation first would
+          # the overrides also emit a revoke-triggering reason
+          # (unsafe-override / risk-tier-hold). Returning on truncation first would
           # skip the override entirely, so an already-armed PR updated to
           # 3000+ files including docs/legal/** would keep its arm and merge
           # the legal change. (Codex review round 8 P2.) Checking the
@@ -120,7 +131,80 @@ jobs:
           # it decides on diff content alone — so a repo can list
           # docs/legal/** as `sensitive:` and still have it merged by this
           # workflow. Both gates are required; neither subsumes the other.
+          #
+          # TIER 1 — ABSOLUTE. Deliberately NOT released by the bypass
+          # label: a contractual clause needs the human who merges it to
+          # have read it, and a label click is not that.
           unsafe_overrides='^docs/legal/'
+
+          # TIER 2 — RISK-TIER HOLD (lesson 2026-08-10, below).
+          #
+          # Why this has to live in THIS workflow: claude-author-automerge
+          # cannot block a merge. It can only decline to ARM one. This
+          # workflow is the only one that arms auto-merge on a docs/tests
+          # diff and the only one that can revoke a standing arm — so a
+          # risk-tier decline over there is a NO-OP unless it is honored
+          # here. The two gates never disagreed in any resolvable sense:
+          # one abstained while the other acted.
+          #
+          # Incident, topcoder1/inbox_superpilot#215: a tests-only PR
+          # touching web/tests/e2e/auth/signup.spec.ts drew "Auto-merge
+          # blocked — risk-tier paths touched. Manual click-merge required"
+          # from claude-author-automerge, then merged here 12 minutes
+          # later. That comment is still on the merged PR. A gate that
+          # announces a block it cannot enforce is worse than no gate: it
+          # leaves an audit trail asserting a human approval that never
+          # happened.
+          #
+          # The premise the `*.spec.ts` safe glob rests on — "passing tests
+          # can't break runtime" — is true about RUNTIME and false about
+          # DETECTION. Deleting the assertion that catches a lockout is how
+          # the lockout ships in a LATER PR, laundered through a green
+          # suite. Same shape as the docs/legal case: a defect CI cannot
+          # catch, and the safe-by-glob argument does not reach it.
+          #
+          # Released by the caller's risk_bypass_label — the same one-click
+          # label claude-author-automerge's blocked-PR comment advertises.
+          # Holding without honoring that label would kill the advertised
+          # escape hatch.
+          #
+          # COPIED VERBATIM from the `patterns=` block in
+          # claude-author-automerge.yml. selftest/test_safe_paths_risk_tier_hold.sh
+          # re-derives both and fails on drift — edit both or neither.
+          risk_tier_overrides='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|jwt|mfa|totp|webauthn|passkey)(/|\.(py|go|ts|tsx|js|jsx)$|$)
+          ^(.*/)?secret[s]?(/|\.(py|go|ts|tsx|js|jsx)$|$)
+          ^(.*/)?\.env($|\..*)
+          ^(.*/)?keychain.*
+          ^(.*/)?credentials.*
+          ^(.*/)?migrations(/|$)
+          .*\.sql$
+          ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
+          ^docs/legal/.*
+          (^|/)naf(/|\.(py|go|ts|js)$)
+          (^|/)main\.go$
+          (^|/)Dockerfile(\..*)?$
+          ^docker-compose.*\.ya?ml$
+          (^|/)docker/docker-compose.*\.ya?ml$
+          ^\.github/workflows/.*
+          ^templates/ci-workflows/.*
+          ^\.github/actions?/.*
+          ^\.github/scripts/.*
+          (^|/)action\.ya?ml$
+          ^\.github/dependabot\.ya?ml$
+          ^\.github/risk-paths\.yml$
+          ^\.github/CODEOWNERS$
+          ^infra/iam/.*
+          ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
+          ^infra/nginx.*
+          ^infra/.*\.(service|slice|timer|tf|hcl|sh)$
+          ^terraform/.*
+          ^pulumi/.*
+          ^k8s/.*
+          ^fly\.toml$
+          ^deploy/.*
+          (^|/)deploy.*\.(sh|ya?ml)$
+          (^|/)ml/predictor\.(py|go|ts|js)$
+          (^|/)ml/retrain\.(py|go|ts|js)$'
 
           # A rename reports ONLY its destination in `.filename`; the source
           # path lives in `.previous_filename`. Without this, moving
@@ -158,6 +242,7 @@ jobs:
             printf "%b" "$override_hits"
             exit 0
           fi
+
 
           # Deferred from above: the listing endpoint caps at 3000 files.
           # Past that we can't prove every changed file is safe → defer
@@ -219,6 +304,68 @@ jobs:
             echo "Unsafe files:"
             printf "%b" "$unsafe_files"
           else
+            # TIER 2 — RISK-TIER HOLD. Evaluated ONLY here, in the branch
+            # where every changed file is safe-by-glob and this workflow
+            # would otherwise arm. Placing it earlier (beside the tier-1
+            # override) looked equivalent and is not: it would emit a
+            # revoke-triggering reason on PRs this workflow never arms — a
+            # dependabot bump of `.github/workflows/**` matches the risk
+            # patterns — and the revoke step would then disarm a SIBLING
+            # workflow's legitimate auto-merge. Scoping the hold to the
+            # would-arm branch keeps the blast radius exactly the target
+            # set: diffs that are 100% docs/tests AND touch a risk path.
+            #
+            # Scans `renamed_from` too, so moving an auth spec OUT of
+            # auth/ (destination safe-by-glob, source risk-tier) still
+            # holds — same rename-bypass reasoning as tier 1.
+            #
+            # One `grep -E -f` pass rather than the nested per-pattern loop
+            # used above: tier 1 is a single pattern, tier 2 is 34, and at
+            # the 3000-file cap the nested form would fork ~100k greps.
+            # Matching FILES is all the decision needs; the per-pattern
+            # attribution below runs only over the (few) hits, so the log
+            # stays as actionable as the sibling's blocked-PR comment.
+            risk_pat_file=$(mktemp)
+            printf '%s\n' "$risk_tier_overrides" \
+              | sed -e 's/^[[:space:]]*//' -e '/^$/d' > "$risk_pat_file"
+            risk_hits=$(printf '%s\n%s\n' "$changed" "$renamed_from" \
+              | sed '/^$/d' | grep -E -f "$risk_pat_file" || true)
+            rm -f "$risk_pat_file"
+
+            if [ -n "$risk_hits" ]; then
+              annotated=""
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                while IFS= read -r p; do
+                  p="${p#"${p%%[![:space:]]*}"}"
+                  [ -z "$p" ] && continue
+                  if echo "$f" | grep -Eq "$p"; then
+                    annotated="$annotated$f (matched: $p)\n"
+                    break
+                  fi
+                done <<< "$risk_tier_overrides"
+              done <<< "$risk_hits"
+
+              # Read labels LIVE, not from the event payload: the bypass is
+              # applied by a human AFTER the blocked-PR comment appears, so
+              # a payload captured at `opened`/`synchronize` never shows it.
+              # Fail CLOSED — an unreadable label list holds the PR, which
+              # matches this workflow's stance everywhere else.
+              bypass_label="${BYPASS_LABEL:-auto-merge-approved}"
+              pr_labels=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.labels[].name' 2>/dev/null || echo "")
+              if printf '%s\n' "$pr_labels" | grep -Fxq "$bypass_label"; then
+                echo "::notice::Risk-tier paths present but '$bypass_label' is applied — hold released."
+                printf "%b" "$annotated"
+              else
+                echo "all_safe=0" >> "$GITHUB_OUTPUT"
+                echo "reason=risk-tier-hold" >> "$GITHUB_OUTPUT"
+                echo "::warning::Diff is docs/tests-only but touches risk-tier paths — holding for a human. Apply '$bypass_label' to release."
+                echo "Risk-tier hits:"
+                printf "%b" "$annotated"
+                exit 0
+              fi
+            fi
+
             echo "all_safe=1" >> "$GITHUB_OUTPUT"
             echo "All $(echo "$changed" | wc -l | tr -d ' ') changed files are in safe paths."
           fi
@@ -243,9 +390,19 @@ jobs:
       # claude-author-automerge.yml also fails closed on truncation — so this
       # does not fight a workflow that would legitimately arm.
       # (Codex review round 10 P2.)
+      # `risk-tier-hold` joins the revoke set for the same reason as the
+      # override: GitHub PRESERVES an auto-merge request across pushes, so
+      # "PR touches only kb/*.spec.ts (armed here) → push adds
+      # auth/signup.spec.ts" would otherwise keep the arm and merge the
+      # auth-test change the hold exists to stop. Both are positive "this
+      # must not auto-merge" verdicts, unlike the other all_safe=0 branches
+      # which mean "defer to another workflow". Releasing the hold via the
+      # bypass label sets no reason at all, so an operator who applies the
+      # label never trips this step. (Lesson 2026-08-10, inbox_superpilot#215.)
       - name: Revoke auto-merge on an unsafe-override path
         if: >-
           steps.classify.outputs.reason == 'unsafe-override' ||
+          steps.classify.outputs.reason == 'risk-tier-hold' ||
           steps.classify.outputs.reason == 'file-list-truncated'
         env:
           # Match the enable step's token: an arm placed by the PAT is
@@ -254,6 +411,7 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CLASSIFY_REASON: ${{ steps.classify.outputs.reason }}
         run: |
           set -euo pipefail
           # Ownership guard, mirroring claude-author-automerge.yml: if the
@@ -273,7 +431,7 @@ jobs:
             echo "Auto-merge already off — nothing to revoke."
             exit 0
           fi
-          echo "::warning::Diff touches an unsafe-override path (customer-facing legal wording) while auto-merge is armed — revoking."
+          echo "::warning::Diff touches a path this workflow must not auto-merge (reason=${CLASSIFY_REASON:-unknown}) while auto-merge is armed — revoking."
           # Fail CLOSED: only a verified OFF is success. A swallowed
           # `--disable-auto` failure or an unreadable verify both leave the
           # PR possibly still armed, and treating that as success would let
