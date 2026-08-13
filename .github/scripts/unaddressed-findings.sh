@@ -93,7 +93,75 @@ fi
 # matters more here than anywhere else now: with the header gone this is the
 # sole admission gate, so a lowercased `verdict: regression` that fails to match
 # is not a comment classified wrongly, it is a comment never examined at all.
-FINDING_RE='([Ff]lagged [0-9]+ issue|\bP[012]\b|VERDICT: REGRESSION|regression: \S+:[0-9]+)'
+# The `regression:` marker matches its path by SHAPE, not by a `file:line`
+# literal. Demanding the `:LINE` suffix — via a `\S+` a backtick also breaks —
+# is what made this script report "no unaddressed findings" on
+# whois-api-llc/wxa-jake-ai#1054. claude[bot] posted, 3m41s after the last
+# commit and 1m23s before the merge:
+#
+#   regression: `tests/ci/prod-model-health-author-scope.test.ts` — no test pins
+#   the cron schedule value `7,22,37,52 * * * *` ...
+#
+# The path was BACKTICKED and carried NO line number, so `\S+:[0-9]+` matched
+# nothing, the comment never reached CLEAN_RE, and the PR merged with the
+# finding live. Both deviations are ordinary: the path a finding names is often
+# a whole file rather than a line in one, and both bots write paths in code
+# spans.
+#
+# The replacement still demands a PLAUSIBLE SOURCE PATH IN LABEL POSITION — two
+# independent constraints, and both are load-bearing. This is the sole
+# admission gate, so a marker that accepted any prose after `regression:` would
+# flag every comment containing the word; a sweeper that cries wolf gets
+# ignored, which costs strictly more than the miss it fixes.
+#
+#   1. PATH SHAPE. The unbroken run of non-space characters starting
+#      immediately after `regression:` must carry ONE of three signals: a `/`,
+#      a `.` followed by a LETTER (an extension), or a `:LINE` suffix on a
+#      token that starts with a letter. Admits `main.go:267`,
+#      `docs/package.json:13`, `.github/workflows/x.yml:96`,
+#      `` `tests/ci/x.test.ts` ``, the extensionless `scripts/deploy` and the
+#      root-level `Dockerfile:12`; rejects `regression: none`,
+#      `regression: nothing to report`, `regression: 3.2 seconds slower`.
+#
+#      The `:LINE` signal is not decoration — it is what the ORIGINAL marker
+#      relied on exclusively, so dropping it would have traded this bug for its
+#      mirror image: codex caught `regression: Dockerfile:12` and
+#      `regression: Makefile:8` going dark, root-level extensionless files that
+#      the old expression matched and the first two shapes do not. Requiring a
+#      leading letter keeps `12:30` (a time, not a path) out.
+#
+#      Residual, and deliberately so: a root-level extensionless file with NO
+#      line number (`regression: Dockerfile — the base image is stale`) carries
+#      none of the three signals and is missed. It is indistinguishable from a
+#      bare word without an allowlist of famous filenames, and the pre-fix
+#      marker missed it too — this change is strictly additive here.
+#      `n/a` is excluded BY NAME because it is the one empty-bucket token whose
+#      own slash satisfies the shape test — `_NOT_EMPTY` below already treats it
+#      as empty for the P-labels, and codex raised the inconsistency reviewing
+#      this change. The other empty tokens need no naming: they carry neither a
+#      slash nor a dotted extension, so the shape test rejects them already.
+#
+#   2. LABEL POSITION. The marker must OPEN its line, optionally bulleted or
+#      bolded — the same rule LGTM and the `[P2]` labels follow below, and the
+#      line format codex's own prompt mandates (`regression: <file:line> -
+#      <sentence>`). This rejects NEGATED uses, which shape 1 cannot see:
+#      codex's review OF THIS CHANGE produced "No regression: package.json is
+#      unchanged", a clean summary CLEAN_RE does not recognise (it knows only
+#      the plural "No regressions found") and that SEVERITY_RE would then
+#      override anyway — a false "do not merge yet" on a pass. Anchoring
+#      answers every negation phrasing at once ("No regression:", "Not a
+#      regression:", "the diff shows no regression: main.go:267 is covered")
+#      without parsing English negation, which the note below explains does not
+#      converge.
+#
+# Both observed burn bodies satisfy the anchor: #1054 opens with the marker,
+# #1067 puts it on its own line beneath a bold header.
+#
+# Backticks are optional and sit OUTSIDE the captured path; `:LINE` is optional.
+# Shared with SEVERITY_RE below so the admission gate and the clean-marker
+# override can never disagree about what a regression line looks like.
+_REGRESSION_MARKER='(^|\n)[[:space:]]*([-*+][[:space:]]*)?\**regression:\**[[:space:]]*`?(?!n/a\b)(?=[^[:space:]`]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
+FINDING_RE="([Ff]lagged [0-9]+ issue|\bP[012]\b|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
 # With the header gone from FINDING_RE, CLEAN_RE no longer has to rescue every
 # codex pass — those now never match a finding marker in the first place. What
 # still reaches it is the LOOSE `\bP[012]\b` alternative, which a clean summary
@@ -148,7 +216,8 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 #   * codex's own regression markers, which carry NO P-token at all
 #     (wxa-mcp-server#374, #369 are `regression: <file:line>` bodies). Without
 #     them a scoped "No regressions found on axis A" would suppress a real
-#     regression line on axis B.
+#     regression line on axis B. Shape only — the line number is optional and
+#     the path may be backticked; see _REGRESSION_MARKER above for why.
 #   * a severity introduced by a CONTRAST conjunction ("No issues found on
 #     coverage, but P1 unscoped token reaches push"), the one prose form that
 #     is an assertion: clean phrase and finding share a sentence, and only the
@@ -162,12 +231,19 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 # those before this rewrite; the structural test answers all of them at once.
 #
 # Residual gap: a bot that asserts a finding ONLY in unstructured prose while
-# also emitting a clean marker, no VERDICT: REGRESSION, no `regression:` line
-# and no inline comment. No observed body does this — codex itemizes and stamps
-# a trailer, and claude[bot] posts findings as INLINE comments, which this
-# filter never touches (author-agnostic, no clean-marker check at all).
+# also emitting a clean marker, no VERDICT: REGRESSION and no `regression:`
+# line. Codex itemizes and stamps a trailer, so this is narrow — but do NOT
+# assume claude[bot] findings always arrive as inline comments (which this
+# filter never touches: author-agnostic, no clean-marker check at all). On
+# wxa-jake-ai#1054 claude[bot] posted its finding TOP-LEVEL, as a `regression:`
+# line, with zero inline comments on the PR. The top-level path is load-bearing
+# for both bots. A live instance of the residual gap: the codex comment on that
+# same PR ("No regression found. Missing coverage: no test pins the new cron
+# expression at `...yml:63`") is a real finding phrased with no marker at all,
+# and it is still missed — closing it means matching bare prose, which is the
+# trade this design deliberately refuses.
 _NOT_EMPTY='(?![[:blank:]]*(none|nothing|n/a|not applicable|no findings|no issues|(0|zero)[[:blank:]]+(finding|issue)s?)\b)[[:blank:]]*[^[:space:]]'
-SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]* issue|VERDICT: REGRESSION|regression: \S+:[0-9]+)"
+SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]* issue|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
 
 # The "last commit" a finding is measured against must be a commit that could
 # plausibly ANSWER it — i.e. one carrying the author's changes. `auto-update-branch`

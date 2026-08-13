@@ -27,6 +27,12 @@
 #   B9. anchor read fails 3x ⇒ nonzero exit (fail closed)
 #   V1. vendored detector, --fixture: late bot P1 comment ⇒ rc=1
 #   V2. vendored detector, --fixture: clean PR ⇒ rc=0
+#   V3. vendored detector: backticked, line-less `regression:` path ⇒ rc=1
+#       (wxa-jake-ai#1054 — this gate armed over it)
+#   V4. vendored detector: "regression:" in prose ⇒ rc=0 (over-correction guard)
+#   V5. vendored detector: root-level extensionless `Dockerfile:12` ⇒ rc=1
+#       (the shape the OLD marker caught — the fix must not trade one for the
+#       other)
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_findings_gate.sh
@@ -315,6 +321,55 @@ if [ "$v2" -eq 0 ]; then
   echo "✓ V2 vendored detector passes a clean PR (rc=0)"
 else
   echo "✗ V2 vendored detector rc=$v2 on a clean PR — expected 0"
+  failed=1
+fi
+
+# ---------------------------------------------------------------------------
+# V3-V4. `regression:` findings whose path carries no `:LINE`, or is backticked.
+#
+# wxa-jake-ai#1054: claude[bot] posted, 3m41s after the last commit,
+#   regression: `tests/ci/prod-model-health-author-scope.test.ts` — no test pins
+#   the cron schedule value ...
+# and the detector reported "no unaddressed findings". FINDING_RE's marker was
+# `regression: \S+:[0-9]+`, which demands a line number the finding did not have
+# and cannot skip the backtick the path is wrapped in. Nothing matched, so the
+# comment was never examined — and this gate armed auto-merge on a PR carrying a
+# live finding. A second instance (#1067) merged the same way a week later.
+#
+# V4 is the over-correction guard, and it matters more than V3: this marker is
+# the gate's sole admission test, so one that accepted any prose after
+# `regression:` would decline every arm and get the whole gate switched off.
+# Its NEGATED case ("No regression: package.json is unchanged") and its `n/a`
+# case are both ones codex raised against the widening itself. CLEAN_RE knows
+# only the plural "No regressions found", and the marker also sits in
+# SEVERITY_RE, so each would have declined the arm on a clean review: the first
+# without the label-position anchor, the second because `n/a` carries a slash
+# that satisfies the path-shape test.
+# ---------------------------------------------------------------------------
+printf '%s' '[{"created_at":"2026-01-01T01:00:00Z","user":{"login":"claude[bot]"},"body":"regression: `tests/ci/prod-model-health-author-scope.test.ts` — no test pins the cron schedule value `7,22,37,52 * * * *`."}]' > "$FX/issue.json"
+set +e
+bash "$CHECKER" --fixture "$FX" o/r 1 >/dev/null 2>&1; v3=$?
+printf '%s' '[{"created_at":"2026-01-01T01:00:00Z","user":{"login":"github-actions[bot]"},"body":"### Codex review\n\nregression: none\n\nregression: n/a\n\nNo regression: package.json is unchanged.\n\nThis introduced no regression: everything is covered."}]' > "$FX/issue.json"
+bash "$CHECKER" --fixture "$FX" o/r 1 >/dev/null 2>&1; v4=$?
+printf '%s' '[{"created_at":"2026-01-01T01:00:00Z","user":{"login":"github-actions[bot]"},"body":"### Codex review\n\nregression: Dockerfile:12 - the base image is stale"}]' > "$FX/issue.json"
+bash "$CHECKER" --fixture "$FX" o/r 1 >/dev/null 2>&1; v5=$?
+set -e
+if [ "$v3" -eq 1 ]; then
+  echo "✓ V3 vendored detector flags a backticked, line-less regression: path (rc=1)"
+else
+  echo "✗ V3 vendored detector rc=$v3 on the wxa-jake-ai#1054 body — expected 1; the gate would arm over a live finding"
+  failed=1
+fi
+if [ "$v4" -eq 0 ]; then
+  echo "✓ V4 vendored detector ignores 'regression:' in prose (rc=0)"
+else
+  echo "✗ V4 vendored detector rc=$v4 on prose containing 'regression:' — expected 0; a marker that matches everything gates nothing"
+  failed=1
+fi
+if [ "$v5" -eq 1 ]; then
+  echo "✓ V5 vendored detector still flags a root-level extensionless file:line (rc=1)"
+else
+  echo "✗ V5 vendored detector rc=$v5 on 'regression: Dockerfile:12' — expected 1; the widening traded one blind spot for another"
   failed=1
 fi
 
