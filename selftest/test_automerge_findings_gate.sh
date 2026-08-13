@@ -51,6 +51,10 @@
 #  V11. the wrappers and prefixes round 3 lost outright, end-to-end: bold,
 #       backtick-in-bold, markdown link, quoted, parenthesized paths; checkbox
 #       and table-row items; colon-outside-bold and code-span marker spellings
+#  V14. follow-up hint: a LATER PR cross-referencing this one is printed, and
+#       rc STAYS 1 (advisory, never clears the gate)
+#  V15. follow-up hint: a fixture with no timeline.json still reports the
+#       finding (the timeline read is a hint, never a dependency)
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_findings_gate.sh
@@ -920,6 +924,66 @@ else
 fi
 
 fi  # raw-marker extraction guard
+
+# ---------------------------------------------------------------------------
+# V14-V15. Follow-up cross-reference hint (dotclaude#216, ported here so the
+# twins stay byte-identical below the vendored header).
+#
+# The detector's whole signal is "no commit on THIS PR answered the finding",
+# and that stays true forever once the fix lands in a LATER PR — so the report
+# never expires and every sweep re-dispatches finished work. inbox_superpilot
+# #211 cost three sessions that way. The hint reads the timeline for PRs that
+# cross-reference this one and prints them.
+#
+# What these two cases pin is the SAFETY shape of that hint, because it runs
+# inside the auto-merge arming path:
+#
+#   V14 — rc STAYS 1 while the hint prints. A cross-reference proves a later PR
+#         mentioned this one, NOT that the finding was fixed; if it cleared the
+#         report, the gate would arm on the exact class it exists to catch, and
+#         this file's whole B3 path would go quiet. The fixture also carries an
+#         xref that PREDATES the finding — the `since` guard must suppress it,
+#         or every long-lived PR grows a permanent false hint.
+#   V15 — the timeline read is NON-FATAL. It is the one fetch in the script
+#         guarded by `|| echo '[]'` rather than a fail-closed `exit 2`, because
+#         it decorates a report that already stands on its own. A fixture with
+#         no timeline.json (every fixture above) must still report the finding.
+#         Inside the gate the same property means a timeline 403 or outage
+#         degrades to "no hint", never to a detector error — which the gate
+#         treats as rc!=1 and fails closed on.
+#
+# Cost note: the clean path returns BEFORE this block, so a PR with no findings
+# makes zero timeline calls — the read is on the decline path only.
+# ---------------------------------------------------------------------------
+printf '%s' '[{"created_at":"2026-01-01T01:00:00Z","user":{"login":"github-actions[bot]"},"body":"- [P1] token validation bypassed — auth.py:41"}]' > "$FX/issue.json"
+printf '%s' '[
+  {"event":"cross-referenced","created_at":"2025-12-01T00:00:00Z",
+   "source":{"issue":{"number":99,"state":"open","title":"predates the finding",
+             "pull_request":{"merged_at":null}}}},
+  {"event":"cross-referenced","created_at":"2026-01-02T00:00:00Z",
+   "source":{"issue":{"number":213,"state":"closed","title":"test: pin the auth check",
+             "pull_request":{"merged_at":"2026-01-02T01:00:00Z"}}}}
+]' > "$FX/timeline.json"
+set +e
+out14=$(bash "$CHECKER" --fixture "$FX" o/r 1 2>&1); v14=$?
+rm -f "$FX/timeline.json"
+out15=$(bash "$CHECKER" --fixture "$FX" o/r 1 2>&1); v15=$?
+set -e
+if [ "$v14" -eq 1 ] && grep -q 'possible follow-up' <<<"$out14" \
+   && grep -q '#213' <<<"$out14" && grep -q 'MERGED' <<<"$out14" \
+   && ! grep -q '#99' <<<"$out14"; then
+  echo "✓ V14 follow-up hint names the later PR, suppresses the earlier xref, and rc stays 1"
+else
+  echo "✗ V14 rc=$v14 — expected rc=1 with a '#213 MERGED' hint and no '#99'; got: $(tr '\n' ' ' <<<"$out14" | head -c 200)"
+  failed=1
+fi
+if [ "$v15" -eq 1 ] && grep -q 'UNADDRESSED FINDINGS' <<<"$out15" \
+   && ! grep -q 'possible follow-up' <<<"$out15"; then
+  echo "✓ V15 a fixture with no timeline.json still reports the finding (hint is non-fatal)"
+else
+  echo "✗ V15 rc=$v15 — a missing timeline must degrade to 'no hint', not change the verdict; got: $(tr '\n' ' ' <<<"$out15" | head -c 200)"
+  failed=1
+fi
 
 echo
 if [ "$failed" -ne 0 ]; then

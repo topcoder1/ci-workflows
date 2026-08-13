@@ -23,6 +23,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
     "script",
     [
         "selftest/test_automerge_base_gate.sh",
+        "selftest/test_automerge_findings_gate.sh",
         "selftest/test_automerge_hold_gate.sh",
         "selftest/test_automerge_risk_patterns.sh",
         "selftest/test_automerge_riskfile_gate.sh",
