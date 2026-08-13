@@ -21,21 +21,16 @@ blocked:
   - 'Dockerfile*'
   - 'docker-compose*.yaml'
   - 'docker-compose*.yml'
-  # Only the actual secrets-bearing .env variants are blocked. Documentation
-  # templates (.env.example, .env.sample, .env.template, .env.dist) are NOT
-  # secrets — they ship literal-string placeholders to teach readers which
-  # env vars exist. Treating them as `blocked` was a false-positive that
-  # bounced wxa-graph PR #154 in 2026-05-23.
-  - '**/.env'
-  - '**/.env.local'
-  - '**/.env.development'
-  - '**/.env.development.local'
-  - '**/.env.production'
-  - '**/.env.production.local'
-  - '**/.env.staging'
-  - '**/.env.staging.local'
-  - '**/.env.test'
-  - '**/.env.test.local'
+  # EVERY .env* variant, templates included. Replaces an enumerated list
+  # (2026-05-24, ci-workflows#74) that missed .env.prod, .env.dev, .env.ci,
+  # .env.qa, .env.uat, .env.sandbox, .env.aws and .env.secret.
+  #
+  # Templates (.env.example/.sample/.template/.dist) are blocked too. Carving
+  # them out bought nothing: the central risk-tier regex in ci-workflows
+  # matches ^(.*/)?\.env($|\..*) regardless, so a template PR needs the click
+  # either way. Enumeration is what opened the gap; one prefix glob cannot
+  # regrow it.
+  - '**/.env*'
   - '**/secrets*'
   - '.github/workflows/**'
   - '.github/risk-paths.yml'
