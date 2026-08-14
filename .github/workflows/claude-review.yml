@@ -46,6 +46,38 @@ jobs:
       # We post a "Skipped" summary comment so the required check is satisfied
       # green — branch rulesets that require `review / Claude Review` would
       # otherwise treat a skipped job as failing.
+      #
+      # WHO OPENED THE PR IS NOT WHO WROTE THE CODE. `pull_request.user.login`
+      # is fixed at open time and never changes, but anyone with push access
+      # can add commits to a bot's branch afterwards. Gating the skip on the
+      # opener alone therefore hands arbitrary hand-written code a green
+      # `review / Claude Review` in ~11 seconds with no diff ever read — and
+      # because that context is REQUIRED on the fleet's main rulesets, green
+      # is all a merge needs.
+      #
+      # Not hypothetical. whois-api-llc/wxa-jake-ai#1064 (2026-08-13):
+      #   890ef310  dependabot[bot]  the actual bump
+      #   18bd99d0  topcoder1        hand-written, two files under src/routes/**
+      # `review / Claude Review` reported SUCCESS at 22:54:25Z->22:54:36Z
+      # having skipped on the opener, and the PR merged at 22:57:59Z. Both
+      # compensating controls the skip message names were absent: the risk
+      # classifier is a classifier, not a gate, and there was no human merge
+      # gate because auto-merge had been armed for the bump-only diff three
+      # days earlier and stayed armed across the later push. (That second
+      # half is fixed in dependabot-auto-merge.yml, this repo, same PR.)
+      #
+      # So the skip now requires that EVERY commit on the PR is bot-authored.
+      # The step-level `if:` below stays as a cheap pre-filter; the real
+      # decision is the commit-authorship check inside.
+      #
+      # Note this also keeps faith with the original crash rationale above:
+      # GitHub hands out the restricted dependabot GITHUB_TOKEN based on the
+      # actor that TRIGGERED the run, so a human `synchronize` push already
+      # carries a normal token and the action runs fine.
+      #
+      # FAIL CLOSED everywhere — "fail" here means "run the real review",
+      # which costs a few minutes of Claude time. The other direction costs
+      # an unreviewed merge, so every uncertain branch below runs the review.
       - name: Skip review for bot-authored PRs (dependabot/renovate)
         id: bot_check
         if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]' }}
@@ -53,9 +85,85 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           ACTOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh pr comment "$PR" --body "Skipped: bot-authored PR (\`$ACTOR\`). Dependency bumps are reviewed by the risk classifier and human merge gate."
+
+          # A commit counts as the bot's own only if ALL THREE hold:
+          #
+          #   author    is a [bot] account       catches an ordinary human push
+          #                                      (the #1064 shape above)
+          #   committer is a bot or web-flow     catches `git commit --amend` and
+          #                                      rebase, which PRESERVE the original
+          #                                      author and rewrite only the committer
+          #   signature verifies                 catches a locally crafted commit with
+          #                                      a spoofed author/committer email,
+          #                                      since those are unsigned
+          #
+          # `.author`/`.committer` are GitHub's mapping of the commit's author
+          # and committer EMAIL to accounts, and are null when an email maps to
+          # no account — the `// "UNMAPPED"` sentinel does not end in `[bot]`,
+          # so an unmapped commit counts as non-bot. Fail closed by default.
+          #
+          # web-flow is GitHub's committer identity for commits it creates
+          # server-side, which is what a genuine dependabot commit looks like:
+          #   author=dependabot[bot] committer=web-flow verified=true reason=valid
+          # Measured on wxa-jake-ai#1063/#1064 and ci-workflows#136. Requiring a
+          # [bot] COMMITTER alone would therefore reject every real bump and
+          # send every dependency PR to a full review.
+          #
+          # Only dependabot and renovate count — the same two openers the step
+          # `if:` above allows, and the only two the crash/no-value rationale
+          # was ever argued for. A different signed app appending a commit (a
+          # formatter bot, a changeset bot) is code nobody reviewed and nobody
+          # claimed was upstream version metadata, so it gets a real review.
+          #
+          # KNOWN LIMIT, deliberately not chased: someone with push access who
+          # sets BOTH author and committer to a bot's noreply address AND signs
+          # with their own registered GPG key still reads as bot-authored. That
+          # is a deliberate forgery by a person who can already push. This gate
+          # exists to stop ACCIDENTAL inheritance — #1064 was a maintainer
+          # pushing a legitimate prettier fix — and casual spoofing, not to be
+          # an authentication boundary against a malicious committer.
+          if ! ROWS=$(gh api "repos/${REPO}/pulls/${PR}/commits" --paginate \
+                --jq '.[] | "\(.author.login // "UNMAPPED")|\(.committer.login // "UNMAPPED")|\(.commit.verification.verified)"' 2>&1); then
+            echo "::warning::Could not list commits for PR #${PR}: ${ROWS}"
+            echo "Failing closed - running the full review."
+            exit 0
+          fi
+
+          TOTAL=$(printf '%s\n' "$ROWS" | awk 'NF' | wc -l | tr -d ' ')
+          NON_BOT=$(printf '%s\n' "$ROWS" | awk -F'|' '
+            NF == 0 { next }
+            $1 ~ /^(dependabot|renovate)\[bot\]$/ && ($2 ~ /^(dependabot|renovate)\[bot\]$/ || $2 == "web-flow") && $3 == "true" { next }
+            { n++ }
+            END { print n + 0 }
+          ')
+
+          echo "PR #${PR} opened by ${ACTOR}; commits: total=${TOTAL} non-bot=${NON_BOT}"
+          printf '%s\n' "$ROWS" | awk 'NF' | sort | uniq -c | sed 's/^/  /'
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::warning::Commit list came back empty for PR #${PR}."
+            echo "Failing closed - running the full review."
+            exit 0
+          fi
+
+          # The pulls/{n}/commits endpoint tops out at 250 commits. Past that
+          # a non-bot commit could sit beyond the horizon we can see, so the
+          # all-bot conclusion is no longer supportable.
+          if [ "$TOTAL" -ge 250 ]; then
+            echo "::warning::PR #${PR} hit the 250-commit API cap; cannot prove every commit is bot-authored."
+            echo "Failing closed - running the full review."
+            exit 0
+          fi
+
+          if [ "$NON_BOT" -ne 0 ]; then
+            echo "PR was opened by ${ACTOR} but carries ${NON_BOT} non-bot commit(s) - running the full review."
+            exit 0
+          fi
+
+          gh pr comment "$PR" --body "Skipped: bot-authored PR (\`$ACTOR\`), all ${TOTAL} commit(s) bot-authored. Dependency bumps are reviewed by the risk classifier and human merge gate. Pushing a non-bot commit to this branch re-enables the full review."
           echo "skipped=true" >> "$GITHUB_OUTPUT"
 
       # Pre-install the Claude Code native binary explicitly. Workaround for

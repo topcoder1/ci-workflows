@@ -110,9 +110,47 @@ jobs:
           # Also skip for the coverage-floor seed branch: it diffs against a
           # potentially-stale base, which can make CLAUDE.md Lessons bullets
           # appear removed then re-added as a false-positive diff.
+          #
+          # `PR_AUTHOR` is who OPENED the PR and never changes afterwards, but
+          # anyone with push access can add commits to a bot's branch. Gating
+          # on it alone lets a human land a Lessons bullet with no paired test
+          # by pushing onto any dependabot branch — this is a REQUIRED check on
+          # the fleet's main rulesets, so skipping it is the whole enforcement.
+          # Same defect that let whois-api-llc/wxa-jake-ai#1064 inherit a green
+          # `review / Claude Review` from its opener; see claude-review.yml in
+          # this repo for the full incident note.
+          #
+          # So the premise has to be checked, not assumed: skip only when every
+          # commit in the PR range really is bot-authored. Unlike claude-review
+          # this reads git rather than the API — the checkout above is
+          # `fetch-depth: 0` at the PR head, so the full range is already local.
+          # That avoids both the 250-commit API cap and a network failure mode.
+          #
+          # Committer as well as author: `--amend` and rebase PRESERVE the
+          # original author and rewrite only the committer, so author alone
+          # would still hand an amended dependabot commit the skip. `GitHub` is
+          # the committer name on commits GitHub creates server-side, which is
+          # what a genuine bump looks like (author dependabot[bot], committer
+          # GitHub) — requiring a [bot] committer alone would reject every one.
+          #
+          # Deliberately weaker than claude-review.yml, which additionally
+          # requires the GitHub signature to verify. That needs the API, and
+          # the trade is not worth it here: this check gates a
+          # lessons-vs-tests convention rather than code review, and adding a
+          # network call would put a new failure mode inside a required check.
           if [[ "$PR_AUTHOR" == *"[bot]" ]]; then
-            echo "skipping convention check: bot-authored PR (${PR_AUTHOR}) — bots can't add paired regression tests"
-            exit 0
+            NON_BOT_COMMITS=$(git log --format='%an|%cn' "${BASE_SHA}..${HEAD_SHA}" \
+              | awk -F'|' '
+                  NF == 0 { next }
+                  $1 ~ /\[bot\]$/ && ($2 ~ /\[bot\]$/ || $2 == "GitHub") { next }
+                  { n++ }
+                  END { print n + 0 }
+                ')
+            if [[ "$NON_BOT_COMMITS" -eq 0 ]]; then
+              echo "skipping convention check: bot-authored PR (${PR_AUTHOR}) — bots can't add paired regression tests"
+              exit 0
+            fi
+            echo "PR opened by ${PR_AUTHOR} but carries ${NON_BOT_COMMITS} non-bot commit(s) — enforcing the convention check"
           fi
           if [[ "$PR_HEAD_BRANCH" == chore/coverage-floor-seed* ]]; then
             echo "skipping convention check: coverage-floor seed branch (${PR_HEAD_BRANCH}) — stale-base diffs are expected"

@@ -26,8 +26,115 @@ on:
     # GITHUB_TOKEN is automatically passed to reusable workflows; no need to declare.
 
 jobs:
+  # Is this PR still only what dependabot put there?
+  #
+  # Its own job so the arm and the revoke below read ONE verdict, computed
+  # once, and — more importantly — so they can be ORDERED against each other.
+  # As two independent top-level jobs they raced: a dependabot push to an
+  # already-human-touched branch could have `auto-merge` re-arm while
+  # `revoke-stale-arm` read "no arm present" and exited, leaving the stale arm
+  # alive. (Codex round-1 P1.)
+  #
+  # This job never fails. Uncertainty is reported as non_bot=1, so both
+  # consumers gate on a deterministic output value rather than on job status.
+  authorship:
+    name: Classify commit authorship
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      non_bot: ${{ steps.scan.outputs.non_bot }}
+    steps:
+      - name: Count non-bot commits
+        id: scan
+        env:
+          GH_TOKEN: ${{ secrets.automerge_pat || secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # A commit counts as the bot's own only if ALL THREE hold:
+          #
+          #   author    is dependabot[bot]       catches an ordinary human push
+          #                                      (the whois-api-llc/wxa-jake-ai#1064 shape)
+          #   committer is a bot or web-flow     catches `git commit --amend` and
+          #                                      rebase, which PRESERVE the original
+          #                                      author and rewrite only the committer
+          #   signature verifies                 catches a locally crafted commit with
+          #                                      a spoofed author/committer email,
+          #                                      since those are unsigned
+          #
+          # web-flow is GitHub's committer identity for commits it creates
+          # server-side, which is what a genuine dependabot commit looks like:
+          #   author=dependabot[bot] committer=web-flow verified=true reason=valid
+          # Measured on wxa-jake-ai#1063/#1064 and ci-workflows#136. Requiring a
+          # [bot] COMMITTER alone would therefore reject every real bump and
+          # send every dependency PR to a full review.
+          #
+          # dependabot[bot] SPECIFICALLY, not any `[bot]` login. The invariant
+          # this workflow arms on is "the PR contains only what dependabot
+          # supplied", and a different signed app appending a commit — a
+          # formatter bot, a changeset bot — breaks that just as a human does.
+          # Its commit was never part of the dependency update and the arming
+          # metadata never described it. (Codex round-2 P2. regression-
+          # convention.yml deliberately keeps the broad `[bot]` test: its
+          # invariant is only "no human wrote this", since the skip there
+          # exists because bots cannot add paired regression tests.)
+          #
+          # KNOWN LIMIT, deliberately not chased: someone with push access who
+          # sets BOTH author and committer to a bot's noreply address AND signs
+          # with their own registered GPG key still reads as bot-authored. That
+          # is a deliberate forgery by a person who can already push. This gate
+          # exists to stop ACCIDENTAL inheritance — #1064 was a maintainer
+          # pushing a legitimate prettier fix — and casual spoofing. It is not
+          # an authentication boundary against a malicious committer; the
+          # required review is.
+          if ! ROWS=$(gh api "repos/${REPO}/pulls/${PR}/commits" --paginate \
+                --jq '.[] | "\(.author.login // "UNMAPPED")|\(.committer.login // "UNMAPPED")|\(.commit.verification.verified)"' 2>&1); then
+            echo "::warning::Could not list commits for PR #${PR}: ${ROWS}"
+            echo "Failing closed - reporting non_bot=1."
+            echo "non_bot=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TOTAL=$(printf '%s\n' "$ROWS" | awk 'NF' | wc -l | tr -d ' ')
+          NON_BOT=$(printf '%s\n' "$ROWS" | awk -F'|' '
+            NF == 0 { next }
+            $1 == "dependabot[bot]" && ($2 == "dependabot[bot]" || $2 == "web-flow") && $3 == "true" { next }
+            { n++ }
+            END { print n + 0 }
+          ')
+
+          printf '%s\n' "$ROWS" | awk 'NF' | sort | uniq -c | sed 's/^/  /'
+
+          # 250 is the endpoint's cap: a non-bot commit may sit beyond it, so
+          # "every commit is bot-authored" is no longer a supportable claim.
+          if [ "$TOTAL" -eq 0 ] || [ "$TOTAL" -ge 250 ]; then
+            echo "::warning::Commit list for PR #${PR} is empty or hit the 250-commit API cap; cannot prove it is bot-only."
+            NON_BOT=1
+          fi
+
+          echo "PR #${PR}: total=${TOTAL} non_bot=${NON_BOT}"
+          echo "non_bot=${NON_BOT}" >> "$GITHUB_OUTPUT"
+
+  # An arm granted here is PERMANENT until something revokes it. GitHub's
+  # auto-merge survives pushes to the branch, and this job's `github.actor`
+  # gate means a human push does not merely fail to re-arm — it never
+  # re-evaluates at all, reporting `skipped`. So the arm outlives the diff it
+  # was granted for, and every later commit inherits a merge decision made
+  # about a version bump.
+  #
+  # whois-api-llc/wxa-jake-ai#1064: armed 2026-08-10 for a bump-only diff; a
+  # hand-written commit touching src/routes/** landed 2026-08-13 22:54:12Z;
+  # this workflow reported `skipped` at 22:54:23Z; the PR merged at 22:57:59Z.
+  # See `revoke-stale-arm` below, and claude-review.yml for the review half.
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    needs: [authorship]
+    # Refusing at the source, not only revoking after the fact: a PR carrying
+    # non-bot commits must never be (re-)armed in the first place.
+    if: github.actor == 'dependabot[bot]' && needs.authorship.outputs.non_bot == '0'
     runs-on: ubuntu-latest
     # Job-level permissions: capped by what the CALLER's repo grants via
     # Settings → Actions → General → Workflow permissions.
@@ -49,7 +156,121 @@ jobs:
           steps.meta.outputs.package-ecosystem != 'github_actions'
           && (steps.meta.outputs.update-type == 'version-update:semver-patch'
               || (inputs.allow_minor && steps.meta.outputs.update-type == 'version-update:semver-minor'))
-        run: gh pr merge --auto --${{ inputs.merge_method }} "$PR_URL"
+        # --match-head-commit binds the arm to the SHA `authorship` actually
+        # classified. Without it the gate is defeated ACROSS runs, which the
+        # in-run `needs:` ordering cannot help with: a dependabot run
+        # classifies the old head as bot-only; a human pushes; the human's run
+        # classifies the new head, goes to revoke and finds no arm yet; the
+        # older run then reaches this step and arms the now-human-touched PR.
+        # Bound to the SHA, that arm is refused because the head has moved.
+        # (Codex round-2 P1. Same idiom as claude-author-automerge.yml.)
+        run: gh pr merge --auto --${{ inputs.merge_method }} --match-head-commit "$HEAD_SHA" "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ secrets.automerge_pat || secrets.GITHUB_TOKEN }}
+
+  # The counterweight: withdraw an arm granted by an earlier run once the PR
+  # stops being the thing that was armed. The gate above only prevents NEW
+  # arms; #1064's arm was three days old by the time the human commit landed.
+  #
+  # Why this matters beyond the review gate: the arming decision is made from
+  # dependabot metadata (patch/minor, ecosystem != github_actions) and never
+  # consults the risk classifier. A human commit added afterwards can
+  # therefore carry `risk:blocked` paths — workflows, Dockerfile, secrets — to
+  # a merge that pr-auto-merge.yml and claude-author-automerge.yml would both
+  # have refused. A bot branch was otherwise a standing bypass of the risk tier.
+  #
+  # Scoped to dependabot specifically, not any `[bot]`: this workflow only ever
+  # arms dependabot PRs, so disarming a renovate PR would revoke an arm granted
+  # by someone else — safe-paths-automerge.yml, or a human. (Codex round-1 P2.)
+  revoke-stale-arm:
+    name: Revoke auto-merge on non-bot commit
+    # `needs` here is for ORDERING, not for success — hence always(). The
+    # human-push case is exactly when `auto-merge` is skipped and exactly when
+    # this must run, and a skipped dependency would otherwise skip this too.
+    needs: [authorship, auto-merge]
+    if: >-
+      always()
+      && github.event.pull_request.user.login == 'dependabot[bot]'
+      && needs.authorship.outputs.non_bot != '0'
+    runs-on: ubuntu-latest
+    # contents: write as well as pull-requests: write — `gh pr merge
+    # --disable-auto` needs it, and without it the revoke fails and leaves the
+    # stale arm alive, defeating the whole job. Matches the arming job, and
+    # stays within the caller template's workflow-level grant (callers/
+    # dependabot-auto-merge.yml grants contents+pull-requests write), so this
+    # cannot cap-mismatch existing fleet callers. (Codex round-3 P1.)
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Revoke the arm if a non-bot commit is present
+        env:
+          GH_TOKEN: ${{ secrets.automerge_pat || secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          ACTOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+          NON_BOT: ${{ needs.authorship.outputs.non_bot }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          echo "authorship verdict: non_bot=${NON_BOT:-<unset>}"
+
+          # Ownership guard, mirroring claude-author-automerge.yml. If the head
+          # moved since this run's event, the newer head's own run owns the
+          # decision. An unconditional revoke could land AFTER that run validly
+          # re-armed a rebased, bot-only PR — disarming a clean PR with no
+          # event left to re-arm it. Skip only on a POSITIVE head-moved read;
+          # if the read itself fails, revoke anyway, failing toward safety
+          # (a rare stale disarm self-heals on the next dependabot push).
+          # (Codex round-3 P2.)
+          #
+          # This narrows the window; it cannot close it. The read below and
+          # the `--disable-auto` further down are not atomic, so a newer
+          # bot-only run can still move the head and validly arm in between,
+          # and this run would then disarm it. Left as a documented residual
+          # (Codex round-5 P2) rather than papered over, because:
+          #   - it fails SAFE. The lost thing is an ARM, so the PR simply
+          #     waits for a human merge or the next dependabot push. Nothing
+          #     merges that should not have.
+          #   - GitHub exposes no head-bound revoke. `gh pr merge --auto` has
+          #     --match-head-commit; `--disable-auto` has no counterpart, so
+          #     there is no atomic compare-and-swap to reach for here.
+          #   - the alternative, a shared cancel-in-progress concurrency group
+          #     across the arm and revoke jobs, buys a benign self-correcting
+          #     race for cancellation semantics that have silently eaten
+          #     required runs on this fleet before.
+          # claude-author-automerge.yml's equivalent guard carries the same
+          # residual and shipped with the same reasoning.
+          now=$(gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+          if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head moved (${HEAD_SHA} -> ${now}) since this event — the newer head's run owns gating; skipping stale revoke."
+            exit 0
+          fi
+
+          # Only act when an arm actually exists, so routine pushes to a
+          # human-touched bot branch don't re-comment on every synchronize.
+          # An UNREADABLE state must not read as "no arm" — fail loudly.
+          if ! ARMED=$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest \
+                --jq '.autoMergeRequest != null' 2>&1); then
+            echo "::error::Could not read auto-merge state for PR #${PR}: ${ARMED}"
+            exit 1
+          fi
+
+          if [ "$ARMED" != "true" ]; then
+            echo "No auto-merge arm on PR #${PR} - nothing to revoke."
+            exit 0
+          fi
+
+          gh pr merge --disable-auto "$PR" --repo "$REPO"
+          gh pr comment "$PR" --repo "$REPO" --body "Auto-merge revoked: this PR was opened by \`${ACTOR}\` and armed for a dependency bump, but it now carries commits that are not bot-authored. The arming decision was made from dependabot metadata and never saw this code, so it no longer applies. Review and merge manually, or move the change to its own PR."
+          echo "Revoked auto-merge on PR #${PR}."
+
+          # RESIDUAL RACE: if every required check is already green when the
+          # non-bot commit lands, GitHub can merge before this job finishes.
+          # Narrowed by construction rather than eliminated — the same push
+          # also invalidates the required `review / Claude Review`, which now
+          # runs a real review (claude-review.yml, this repo) taking minutes,
+          # while this job takes seconds. DRAFT remains the only airtight
+          # opt-out.
