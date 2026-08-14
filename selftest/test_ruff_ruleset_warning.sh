@@ -43,9 +43,15 @@ fail() {
 # Extraction starts at the helper's definition, NOT at RULESET_DECLARED=0 —
 # the caller alone would eval to an undefined function, and every case would
 # then "warn" for the wrong reason while looking like a real detector bug.
+# Terminator moved from `echo "ruff check (v` to `RC=0` when the format gate
+# landed. That echo is now nested inside `if [ "$RUN_CHECK" = "true" ]`, so
+# stopping at it would capture the opening `if` without its `fi` — the block
+# would fail to parse and every case below would report for the wrong reason.
+# `RC=0` is the first line after the advisory and sits at the same top level
+# the echo used to, so the extracted region stays exactly the rule-set logic.
 block=$(awk '
   /^[[:space:]]*ruff_select_declared\(\) \{/ { grab = 1 }
-  grab && /^[[:space:]]*echo "ruff check \(v/ { exit }
+  grab && /^[[:space:]]*RC=0[[:space:]]*$/ { exit }
   grab { print }
 ' "$WF" | sed 's/^[[:space:]]*//')
 
