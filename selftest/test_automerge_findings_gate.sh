@@ -497,7 +497,11 @@ else
 # characters per iteration. _BLOCK_PREFIX is stronger still — `^`-anchored with
 # nothing after it, so it always succeeds and can never be made to retry.
 bt_failed=0
-for spec in "400:>" "400:#" "400:*" "400:-" "400:|" "400:_" "400:\`" "400:1."; do
+# shellcheck disable=SC1111  # the “ is a hostile INPUT character, not a
+# shell quote: models autocorrect quotes and the normalizer must survive
+# a 400-long run of them without a retry-limit abort.
+for spec in "400:>" "400:#" "400:*" "400:-" "400:|" "400:_" "400:\`" "400:1." \
+            "400:•" "400:–" "400:—" "400:\"" "400:'" "400:(" "400:[" "400:<" "400:“"; do
   n=${spec%%:*}; ch=${spec#*:}
   run=$(awk -v n="$n" -v c="$ch" 'BEGIN{s="";for(i=0;i<n;i++)s=s c;print s}')
   for tail in "" "regression: none" "regression: src/foo.ts:12"; do
@@ -520,15 +524,29 @@ fi
 
 # V9. THE SUPERSET INVARIANT, differentially, over a cross product.
 #
-# Rounds 2 and 3 each fixed the shape they were looking at and silently stopped
-# matching shapes the ORIGINAL marker (`regression: \S+:[0-9]+`, still on
-# origin/main) did match — 190 and 162 of the 3200 cases below respectively.
-# Neither was caught by a test, because each round tested only what it had just
-# fixed. This compares against the historical baseline instead of a hand-listed
-# set of bodies, since a hand-listed set only contains the shapes its author
-# already thought of; the cross product covers the combinations nobody
-# enumerates, which is precisely how round 3 lost `- [ ] ` (a bullet it did
-# test, followed by a bracket it did not).
+# Rounds 2, 3 and 4 each fixed the shape they were looking at and silently
+# stopped matching shapes the ORIGINAL marker (`regression: \S+:[0-9]+`, still
+# on origin/main) did match. None was caught by a test, because each round
+# tested only what it had just fixed, and — the deeper failure — each round's
+# corpus could only express the shapes its own composition allowed.
+#
+# ROUND 5 WIDENED THE AXES for exactly that reason. Round 4 composed bodies as
+# `prefix + spelling + " " + wrap(path) + tail`, and EVERY prefix in the axis
+# ENDED WITH A SPACE, so two whole families were unreachable by construction no
+# matter how many entries the axes grew:
+#
+#   * a TIGHT bullet — `-regression: src/foo.ts:12` — which round 4 stopped
+#     matching and rounds 1 AND 3 both matched (~99 shapes, a two-way loss);
+#   * punctuation wrapping the WHOLE marker — `"regression: main.go:267"`,
+#     `(regression: main.go)`, `[regression: main.go]` — which round 1 matched
+#     (its `\S+` never looked left) and rounds 2, 3 and 4 all dropped.
+#
+# So the space between prefix and marker is an AXIS now, and so is the wrapping
+# around the marker as a whole, and the unicode bullets and dashes models
+# actually paste are in the prefix alphabet. Measured over these widened axes:
+# round 3 loses 3686 shapes vs the original (2686 undeclared), round 4 loses
+# 3430 (2430 undeclared), round 5 loses 1000 — every one of them a negation,
+# which is the single narrowing the label-position anchor exists to make.
 #
 # `lost` = matched by the original, not by the shipped marker — a regression.
 # `missed` = not matched at all, which also covers the shapes the original was
@@ -536,16 +554,21 @@ fi
 # the colon), so a pure superset check could not have caught them.
 ORIGINAL='regression: \S+:[0-9]+'
 v9=$(jq -n --arg blk "$blk" --arg mark "$mark" --arg new "$marker" --arg orig "$ORIGINAL" "$canon"'
-  ["", "  ", "- ", "* ", "+ ", "- [ ] ", "- [x] ", "- [X] ", "1. ", "1) ", "10. ",
-   "# ", "###### ", "> ", ">> ", "> > ", "> - ", "| ", "| - ", "  > 1. ", "> - [ ] "] as $pfx
+  ["", "  ", "-", "*", "+", "- [ ]", "- [x]", "- [X]", "1.", "1)", "10.",
+   "#", "###", "######", ">", ">>", "> >", "> -", "|", "| -", "  > 1.",
+   "> - [ ]", "\u2022", "\u2013", "\u2014"] as $pfx
+  | ["", " "] as $sp
   | ["regression:", "**regression:**", "**regression**:", "*regression:*",
      "*regression*:", "__regression:__", "__regression__:", "`regression:`"] as $spl
+  | ["WHOLE", "\"WHOLE\"", "\u0027WHOLE\u0027", "(WHOLE)", "[WHOLE]"] as $whl
   | ["PATH", "`PATH`", "**PATH**", "**`PATH`**", "[PATH](https://example.com/x)",
-     "\"PATH\"", "\u0027PATH\u0027", "(PATH)"] as $wrp
+     "\"PATH\"", "\u0027PATH\u0027", "(PATH)",
+     "\u201cPATH\u201d", "\u2018PATH\u2019", "<PATH>"] as $wrp
   | ["src/lib/main.go", "src/lib/main.go:267"] as $pth
-  | [ $pfx[] as $p | $spl[] as $s | $wrp[] as $w | $pth[] as $t
-      | $p + $s + " " + ($w | sub("PATH"; $t)) + " — no test covers the new branch" ]
-  | ([$pfx, $spl, $wrp, $pth] | map(length - (unique | length)) | add) as $dupes
+  | [ $pfx[] as $p | $sp[] as $x | $spl[] as $s | $whl[] as $h | $wrp[] as $w | $pth[] as $t
+      | $p + $x + ($h | sub("WHOLE"; $s + " " + ($w | sub("PATH"; $t))))
+        + " — no test covers the new branch" ]
+  | (length - (unique | length)) as $dupes
   | map({b: ., orig: test($orig; "i"), new: (canon | test($new; "i"))})
   | {total: length, dupes: $dupes,
      lost:   [.[] | select(.orig and (.new | not)) | .b],
@@ -553,16 +576,19 @@ v9=$(jq -n --arg blk "$blk" --arg mark "$mark" --arg new "$marker" --arg orig "$
 v9_total=$(printf '%s' "$v9" | jq -r '.total')
 v9_lost=$(printf '%s' "$v9" | jq -r '.lost | length')
 v9_missed=$(printf '%s' "$v9" | jq -r '.missed | length')
-# The corpus axes must hold DISTINCT entries. This is not pedantry. The
-# single-quoted path wrapper was first written with literal apostrophes inside
-# this single-quoted jq program, where the shell ate them and collapsed that
-# entry into a duplicate of the bare wrapper — so the single-quoted shape went
-# untested while `total` stayed at its expected 2688 and every case still
-# passed. A linter caught it (SC2026); a stable case count never would. The
-# apostrophes are spelled \u0027 for that reason, and this guard is the backstop.
+# The corpus must hold DISTINCT BODIES. Round 4 checked distinct AXIS ENTRIES,
+# which is strictly weaker — two different axis values can still compose into
+# the same body. This is not pedantry either way. The single-quoted path wrapper
+# was first written with literal apostrophes inside this single-quoted jq
+# program, where the shell ate them and collapsed that entry into a duplicate of
+# the bare wrapper — so the single-quoted shape went untested while `total`
+# stayed at its expected value and every case still passed. A linter caught it
+# (SC2026); a stable case count never would. Every quote and unicode character
+# is spelled \uXXXX for that reason, and this guard is the backstop: a corpus
+# that cannot detect its own collapse proves nothing.
 v9_dupes=$(printf '%s' "$v9" | jq -r '.dupes')
 if [ "$v9_dupes" -ne 0 ]; then
-  echo "✗ V9 corpus has $v9_dupes duplicate axis entries — a shape is silently untested"
+  echo "✗ V9 corpus has $v9_dupes duplicate BODIES — those shapes are silently untested"
   failed=1
 elif [ "$v9_lost" -eq 0 ] && [ "$v9_missed" -eq 0 ]; then
   echo "✓ V9 superset invariant holds over $v9_total cross-product shapes (0 lost, 0 missed)"
@@ -572,20 +598,27 @@ else
   failed=1
 fi
 
-# V9b. The reject side, over the same prefix × spelling matrix. The path-SHAPE
-# test is the sole admission gate: a marker that accepts prose flags every
-# comment containing the word, and a sweeper that cries wolf gets ignored.
+# V9b. The reject side, over the SAME widened axes — spacing, whole-marker
+# wrapping and the unicode prefixes included. The path-SHAPE test is the sole
+# admission gate: a marker that accepts prose flags every comment containing the
+# word, and a sweeper that cries wolf gets ignored. Running the reject corpus
+# over every axis the accept corpus gained is what keeps a widening honest.
 v9b=$(jq -n --arg blk "$blk" --arg mark "$mark" --arg new "$marker" "$canon"'
-  ["", "  ", "- ", "- [ ] ", "1. ", "### ", "> ", ">> ", "| ", "> - [ ] "] as $pfx
+  ["", "  ", "-", "- [ ]", "1.", "###", ">", ">>", "|", "> - [ ]",
+   "\u2022", "\u2014"] as $pfx
+  | ["", " "] as $sp
   | ["regression:", "**regression:**", "**regression**:", "`regression:`"] as $spl
+  | ["WHOLE", "\"WHOLE\"", "\u0027WHOLE\u0027", "(WHOLE)", "[WHOLE]"] as $whl
   | ["none", "nothing to report", "n/a", "N/A", "not applicable",
      "3.2 seconds slower", "12:30 elapsed"] as $empty
   | ["No regression: package.json is unchanged",
      "Not a regression: main.go:267 is covered",
      "the diff shows no regression: main.go:267 is covered",
      "See regression: main.go:267 for the earlier discussion"] as $neg
-  | [ $pfx[] as $p | ( ($spl[] as $s | $empty[] as $e | $p + $s + " " + $e),
-                       ($neg[] as $n | $p + $n) ) ]
+  | [ $pfx[] as $p | $sp[] as $x | $whl[] as $h
+      | ( ($spl[] as $s | $empty[] as $e
+           | $p + $x + ($h | sub("WHOLE"; $s + " " + $e))),
+          ($neg[] as $n | $p + $x + ($h | sub("WHOLE"; $n))) ) ]
   | {total: length, fired: [.[] | select(canon | test($new; "i"))]}')
 v9b_total=$(printf '%s' "$v9b" | jq -r '.total')
 v9b_fired=$(printf '%s' "$v9b" | jq -r '.fired | length')
@@ -599,32 +632,77 @@ fi
 
 fi  # normalizer extraction guard
 
-# V10. ONE definition of "label prefix", shared by the marker and the P-label
-# clause. Until round 4 SEVERITY_RE carried its own round-2-era prefix — a
-# bullet and nothing else — so a `[P2]` under a heading, in a numbered list, in
-# a blockquote, in a checkbox item or in a table row could not override a CLEAN
-# phrase, while the identical prefix in front of `regression:` could. Two
-# clauses disagreeing about what a label prefix looks like is how the next bug
-# gets in; normalizing before either clause runs leaves exactly one definition.
+# V10. TWO definitions of "label prefix", and that is the DESIGN — not the drift
+# round 4 read it as.
+#
+# Round 4 deleted SEVERITY_RE's own bullet prefix and routed the P-label clause
+# through the normalizer, reasoning that widening an ASSERTION test can only
+# ever flag more. That reasoning holds for FINDING_RE, which decides whether a
+# comment is examined at all. It is exactly backwards for SEVERITY_RE, which
+# admits nothing: it CANCELS CLEAN_RE. Widening a suppressor loses findings;
+# widening the thing that overrides a suppressor MANUFACTURES FALSE POSITIVES.
+#
+# Measured, 8 shapes out of 8 (V10f-V10m): a re-review that quotes, tabulates or
+# checks off the previous round's finding and then passes returned rc=0 under
+# round 3 and rc=1 under round 4. For the automerge gate that is worse than for
+# the operator sweep — a false finding DECLINES THE ARM on a clean PR, and a
+# gate that blocks passing PRs gets switched off, at which point it protects
+# nothing at all.
+#
+# So SEVERITY_RE reads the RAW body and allows a bullet and nothing else, while
+# the regression marker reads the NORMALIZED body and allows the full block
+# alphabet. They are allowed to disagree because they are not the same kind of
+# test: the marker carries its own admission gate — a path-shaped token — so it
+# cannot fire on quoted prose, and a bare `[P1]` is quoted constantly.
 V10_CLEAN='### Codex review
 
 No regressions found on the coverage axis.
 
 '
-expect_rc 1 "V10a heading P-label overrides CLEAN"   "${V10_CLEAN}### [P1] Token check is skippable — auth.py:31" 'github-actions[bot]'
-expect_rc 1 "V10b numbered P-label overrides CLEAN"  "${V10_CLEAN}1. [P2] Contract drift — send_request.go:462" 'github-actions[bot]'
-expect_rc 1 "V10c quoted P-label overrides CLEAN"    "${V10_CLEAN}> **P2** Contract drift — send_request.go:462" 'github-actions[bot]'
-expect_rc 1 "V10d checkbox P-label overrides CLEAN"  "${V10_CLEAN}- [ ] [P0] Credentials logged in plaintext — auth.py:88" 'github-actions[bot]'
-expect_rc 1 "V10e table P-label overrides CLEAN"     "${V10_CLEAN}| P0 — credentials are logged in plaintext" 'github-actions[bot]'
-expect_rc 0 "V10f quoted disclaimer stays CLEAN"     '### Codex review
+# MUST override: the bullet position codex actually emits, tight and spaced.
+expect_rc 1 "V10a bare P-label overrides CLEAN"      "${V10_CLEAN}[P1] Token check is skippable — auth.py:31" 'github-actions[bot]'
+expect_rc 1 "V10b bullet P-label overrides CLEAN"    "${V10_CLEAN}- [P2] Contract drift — send_request.go:462" 'github-actions[bot]'
+expect_rc 1 "V10c bullet bold P overrides CLEAN"     "${V10_CLEAN}- **P2** Contract drift — send_request.go:462" 'github-actions[bot]'
+expect_rc 1 "V10d bare bold P overrides CLEAN"       "${V10_CLEAN}**P1** unscoped token reaches push — auth.py:31" 'github-actions[bot]'
+expect_rc 1 "V10e bare P0-dash overrides CLEAN"      "${V10_CLEAN}P0 — credentials are logged in plaintext" 'github-actions[bot]'
+
+# MUST NOT override: the eight shapes round 4 flipped. Each body is a PASS that
+# recites an earlier finding and stamps a clean verdict.
+V10_QUOTED='### Codex review
+
+Re-reviewed after the fix. The previous round said:
+
+'
+V10_TAIL='
+
+All of that is now addressed. No issues found. VERDICT: CLEAN'
+expect_rc 0 "V10f quoted [P1] stays CLEAN"           "${V10_QUOTED}> [P1] Token check is skippable — auth.py:31${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10g quoted **P1** stays CLEAN"         "${V10_QUOTED}> **P1** Token check is skippable — auth.py:31${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10h quoted P1-dash stays CLEAN"        "${V10_QUOTED}> P1 — credentials are logged in plaintext${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10i numbered [P2] stays CLEAN"         "${V10_QUOTED}1. [P2] Contract drift — send_request.go:462${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10j heading bold P1 stays CLEAN"       "${V10_QUOTED}### **P1** Token check is skippable — auth.py:31${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10k table-row [P1] stays CLEAN"        "${V10_QUOTED}| [P1] Token check is skippable — auth.py:31 |${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10l checked-checkbox [P1] stays CLEAN" "${V10_QUOTED}- [x] [P1] Token check is skippable — auth.py:31${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10m nested-quote [P0] stays CLEAN"     "${V10_QUOTED}>> [P0] Credentials logged in plaintext — auth.py:88${V10_TAIL}" 'github-actions[bot]'
+
+# The disclaimer and empty-bucket cases, unchanged: a word before the label and
+# a bucket with nothing in it are rejected regardless of which body is read.
+expect_rc 0 "V10n quoted disclaimer stays CLEAN"     '### Codex review
 
 > No [P1] or [P2] issues found. VERDICT: CLEAN' 'github-actions[bot]'
-expect_rc 0 "V10g checkbox empty bucket stays CLEAN" '### Codex review
+expect_rc 0 "V10o checkbox empty bucket stays CLEAN" '### Codex review
 
 - [ ] P1: none
 - [x] P2: none
 
 VERDICT: CLEAN' 'github-actions[bot]'
+
+# The regression marker keeps the WIDE prefix as a CLEAN override, because it is
+# the assertion whose admission gate is a path shape rather than a bare label.
+# Round 3 already overrode CLEAN on `- regression: ...`; demoting the marker to
+# the raw body along with the rest of SEVERITY_RE would have lost that silently.
+expect_rc 1 "V10p bullet regression overrides CLEAN" "${V10_CLEAN}- regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
+expect_rc 1 "V10q checkbox regression overrides CLEAN" "${V10_CLEAN}- [ ] regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
 
 # V11. The path WRAPPERS and the two block prefixes round 3 lost outright,
 # driven end-to-end through the detector rather than through jq.
@@ -643,6 +721,39 @@ expect_rc 1 "V11l double-underscore          __regression__: src/foo.ts"       '
 expect_rc 1 "V11m marker in a code span      \`regression:\` src/foo.ts"       '`regression:` src/foo.ts — no test'
 expect_rc 0 "V11n checkbox negation          - [ ] No regression: main.go:267" '- [ ] No regression: main.go:267 is covered' 'github-actions[bot]'
 expect_rc 0 "V11o table-row empty bucket     | regression: n/a |"              '| regression: n/a |' 'github-actions[bot]'
+
+# V12 (round 5). The two shape families round 4's corpus could not express,
+# driven end-to-end through the detector. Tight bullets were matched by BOTH
+# round 1 and round 3 and lost in round 4; whole-marker wrapping was matched by
+# round 1 and lost in rounds 2, 3 and 4. The unicode prefixes were matched by
+# nobody until now.
+expect_rc 1 "V12a tight dash bullet         -regression: ..."          '-regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12b tight plus bullet         +regression: ..."          '+regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12c tight star bullet         *regression: ..."          '*regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12d tight blockquote          >regression: ..."          '>regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12e unicode bullet            • regression: ..."         '• regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12f unicode bullet tight      •regression: ..."          '•regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12g en dash prefix            – regression: ..."         '– regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12h em dash prefix            — regression: ..."         '— regression: src/foo.ts:12 — no test'
+expect_rc 1 "V12i whole marker double-quoted" '"regression: src/foo.ts:12" — no test'
+expect_rc 1 "V12j whole marker single-quoted" "'regression: src/foo.ts:12' — no test"
+expect_rc 1 "V12k whole marker parenthesized" '(regression: src/foo.ts:12) — no test'
+expect_rc 1 "V12l whole marker bracketed"      '[regression: src/foo.ts:12] — no test'
+expect_rc 1 "V12m whole marker smart-quoted"   '“regression: src/foo.ts:12” — no test'
+expect_rc 1 "V12n angle-bracketed path"        'regression: <src/foo.ts:12> — no test'
+expect_rc 1 "V12o smart-quoted path"           'regression: “src/foo.ts:12” — no test'
+
+# ...and the same widening against the reject side. Every axis added in round 5
+# is exercised on prose and empty buckets too.
+expect_rc 0 "V12p tight dash negation        -No regression: ..."      '-No regression: main.go:267 is covered' 'github-actions[bot]'
+expect_rc 0 "V12q unicode bullet negation    •No regression: ..."      '•No regression: main.go:267 is covered' 'github-actions[bot]'
+expect_rc 0 "V12r quoted whole negation"     '"No regression: main.go:267 is covered"' 'github-actions[bot]'
+expect_rc 0 "V12s paren whole negation"      '(the diff shows no regression: main.go:267)' 'github-actions[bot]'
+expect_rc 0 "V12t tight dash empty bucket    -regression: none"        '-regression: none' 'github-actions[bot]'
+expect_rc 0 "V12u quoted whole n/a"          '"regression: n/a"' 'github-actions[bot]'
+expect_rc 0 "V12v paren whole empty bucket"  '(regression: nothing to report)' 'github-actions[bot]'
+expect_rc 0 "V12w bracket whole time-of-day" '[regression: 12:30 elapsed]' 'github-actions[bot]'
+expect_rc 0 "V12x em dash seconds"           '— regression: 3.2 seconds slower' 'github-actions[bot]'
 
 echo
 if [ "$failed" -ne 0 ]; then
