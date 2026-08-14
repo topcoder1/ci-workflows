@@ -44,6 +44,14 @@
 #       follow-up hint — and rc STAYS 1 (advisory, never clears the gate)
 #  V10. vendored detector: a fixture with no timeline.json still reports the
 #       finding (the timeline read is a hint, never a dependency)
+#  V11. vendored detector: a cross-repo cross-reference is printed OWNER/REPO#N,
+#       never as a bare #N that points at an unrelated local PR
+#  V12. vendored detector: a same-repo cross-reference stays terse #N even when
+#       the event carries repository.full_name (over-correction guard)
+#  V13. vendored detector: a cross-repo xref whose event omits the repository
+#       object recovers the slug from html_url
+#  V14. vendored detector: slug comparison is case-insensitive, so `Owner/Repo`
+#       against owner/repo stays terse (second over-correction guard)
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_findings_gate.sh
@@ -549,6 +557,100 @@ if [ "$v10" -eq 1 ] && grep -q 'UNADDRESSED FINDINGS' <<<"$out10" \
   echo "✓ V10 a fixture with no timeline.json still reports the finding (hint is non-fatal)"
 else
   echo "✗ V10 rc=$v10 — a missing timeline must degrade to 'no hint', not change the verdict; got: $(tr '\n' ' ' <<<"$out10" | head -c 200)"
+  failed=1
+fi
+
+# ---------------------------------------------------------------------------
+# V11-V14. The follow-up hint must say WHICH REPO the follow-up lives in.
+#
+# A `cross-referenced` timeline event can originate in ANOTHER repository, and
+# .source.issue.number is local to THAT repo. Printing a bare "#213" therefore
+# reads as a PR in the repo being scanned — so an operator chasing the hint
+# lands on an unrelated local #213, which is worse than no hint at all: this
+# block exists to STOP redundant dispatch, and a wrong pointer causes it.
+#
+# The slug is resolved repository.full_name -> html_url -> scanned repo, and
+# each of those three branches gets a case; the two that must stay TERSE are
+# guards, and they matter more than the two that qualify.
+#
+#  V11 — the disambiguation itself. Note the negative assertion is anchored to
+#        the printed line shape, not to the substring "#213": "other/x#213"
+#        contains "#213", so a plain `! grep '#213'` would pass even against
+#        the unfixed script and pin nothing.
+#  V12 — the over-correction guard, and as with V4 it matters more than the
+#        case it guards. Nearly every real follow-up is same-repo; qualifying
+#        those too would push a slug onto every line of an already-dense hint.
+#        The fixture carries repository.full_name EQUAL to the scanned repo,
+#        which is the shape a real same-repo event has — a fix that qualifies
+#        whenever the field is merely present, rather than when it differs,
+#        passes V11 and fails here.
+#  V13 — the html_url fallback. repository is the documented field but not a
+#        guaranteed one, and an event that omits it is exactly where a bare
+#        number misleads most, so the slug is recovered from the URL before
+#        giving up and assuming same-repo.
+#  V14 — the second over-correction guard. GitHub slugs are case-insensitive,
+#        so an operator who types `Owner/Repo` must not get every local
+#        follow-up needlessly qualified.
+#
+# V13/V14 close a Codex P2 on the first cut of this change: V11/V12 alone
+# exercised only full_name at exact casing, leaving both other branches of the
+# resolution chain documented but unpinned.
+# ---------------------------------------------------------------------------
+printf '%s' '[
+  {"event":"cross-referenced","created_at":"2026-01-02T00:00:00Z",
+   "source":{"issue":{"number":213,"state":"closed","title":"fix landed in a sibling repo",
+             "repository":{"full_name":"other/elsewhere"},
+             "pull_request":{"merged_at":"2026-01-02T01:00:00Z"}}}},
+  {"event":"cross-referenced","created_at":"2026-01-02T00:00:00Z",
+   "source":{"issue":{"number":7,"state":"open","title":"local follow-up",
+             "repository":{"full_name":"o/r"},
+             "pull_request":{"merged_at":null}}}}
+]' > "$FX/timeline.json"
+set +e
+out11=$(bash "$CHECKER" --fixture "$FX" o/r 1 2>&1); v11=$?
+set -e
+if [ "$v11" -eq 1 ] && grep -q 'other/elsewhere#213' <<<"$out11" \
+   && ! grep -qE '^[[:space:]]+#213[[:space:]]' <<<"$out11"; then
+  echo "✓ V11 a cross-repo follow-up prints owner/repo#213, not a bare #213"
+else
+  echo "✗ V11 rc=$v11 — a cross-repo xref must be qualified; got: $(tr '\n' ' ' <<<"$out11" | head -c 200)"
+  failed=1
+fi
+if [ "$v11" -eq 1 ] && grep -qE '^[[:space:]]+#7[[:space:]]' <<<"$out11" \
+   && ! grep -q 'o/r#7' <<<"$out11"; then
+  echo "✓ V12 a same-repo follow-up stays terse #7 even with repository.full_name set"
+else
+  echo "✗ V12 rc=$v11 — same-repo xrefs must not be qualified; got: $(tr '\n' ' ' <<<"$out11" | head -c 200)"
+  failed=1
+fi
+
+# V13-V14. The other two branches of the slug-resolution chain: html_url when
+# the repository object is absent, and a case-differing same-repo slug.
+printf '%s' '[
+  {"event":"cross-referenced","created_at":"2026-01-02T00:00:00Z",
+   "source":{"issue":{"number":41,"state":"open","title":"fix in a third repo",
+             "html_url":"https://github.com/third/party/pull/41",
+             "pull_request":{"merged_at":null}}}},
+  {"event":"cross-referenced","created_at":"2026-01-02T00:00:00Z",
+   "source":{"issue":{"number":9,"state":"open","title":"local, slug typed differently",
+             "repository":{"full_name":"O/R"},
+             "pull_request":{"merged_at":null}}}}
+]' > "$FX/timeline.json"
+set +e
+out13=$(bash "$CHECKER" --fixture "$FX" o/r 1 2>&1); v13=$?
+set -e
+if [ "$v13" -eq 1 ] && grep -q 'third/party#41' <<<"$out13" \
+   && ! grep -qE '^[[:space:]]+#41[[:space:]]' <<<"$out13"; then
+  echo "✓ V13 a cross-repo xref with no repository object recovers its slug from html_url"
+else
+  echo "✗ V13 rc=$v13 — html_url must back-stop a missing repository object; got: $(tr '\n' ' ' <<<"$out13" | head -c 200)"
+  failed=1
+fi
+if [ "$v13" -eq 1 ] && grep -qE '^[[:space:]]+#9[[:space:]]' <<<"$out13" \
+   && ! grep -q 'O/R#9' <<<"$out13"; then
+  echo "✓ V14 a case-differing same-repo slug stays terse (comparison is case-insensitive)"
+else
+  echo "✗ V14 rc=$v13 — GitHub slugs are case-insensitive; \`Owner/Repo\` must not qualify; got: $(tr '\n' ' ' <<<"$out13" | head -c 200)"
   failed=1
 fi
 
