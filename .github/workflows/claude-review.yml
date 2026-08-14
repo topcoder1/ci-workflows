@@ -16,6 +16,17 @@ on:
         required: false
         type: number
         default: 0
+      max_turns:
+        description: "Cap on agentic turns for the review run. Raise per-repo when large diffs exhaust the default and fail the check without a finding."
+        required: false
+        # MUST stay `number`. This value is interpolated verbatim into
+        # `claude_args`, which is parsed as CLI arguments, so `string` would let
+        # any calling repo smuggle extra flags through it — e.g.
+        # `max_turns: "25 --allowedTools 'Bash(*)'"` widens the tool allowlist of
+        # a workflow the whole fleet runs. `number` makes GitHub reject anything
+        # non-numeric at input-validation time, before interpolation happens.
+        type: number
+        default: 25
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -256,5 +267,5 @@ jobs:
           # binary behavior changes.
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 25
+            --max-turns ${{ inputs.max_turns }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
