@@ -19,8 +19,14 @@ on:
       max_turns:
         description: "Cap on agentic turns for the review run. Raise per-repo when large diffs exhaust the default and fail the check without a finding."
         required: false
-        type: string
-        default: "25"
+        # MUST stay `number`. This value is interpolated verbatim into
+        # `claude_args`, which is parsed as CLI arguments, so `string` would let
+        # any calling repo smuggle extra flags through it — e.g.
+        # `max_turns: "25 --allowedTools 'Bash(*)'"` widens the tool allowlist of
+        # a workflow the whole fleet runs. `number` makes GitHub reject anything
+        # non-numeric at input-validation time, before interpolation happens.
+        type: number
+        default: 25
     secrets:
       ANTHROPIC_API_KEY:
         required: true
