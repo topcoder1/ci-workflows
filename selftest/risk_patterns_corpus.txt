@@ -90,6 +90,25 @@ RISKY: config/credentials.yml
 RISKY: credentials.py
 RISKY: .env
 RISKY: .env.production
+# Abbreviations + templates. Both gates use a suffix-open pattern
+# (GH ^(.*/)?\.env($|\..*), BB (^|/)\.env($|\..*)), so EVERY .env.<suffix>
+# is risky — no enumeration to fall out of date.
+#
+# These are pinned because callers' .github/risk-paths.yml files were narrowed
+# to ten exact names fleet-wide on 2026-05-24 (#74) and these abbreviations
+# fell through. That was inert for auto-merge precisely because this central
+# layer stayed broad — it is the backstop that made a 30-repo narrowing a
+# non-event. Do not "tidy" these patterns into an enumeration.
+RISKY: .env.prod
+RISKY: .env.dev
+RISKY: .env.ci
+RISKY: .env.aws
+RISKY: backend/.env.secret
+# Templates are RISKY too, deliberately: a docs-only .env.example diff still
+# takes the click. Carving them out was tried (#74) and abandoned — it cannot
+# be expressed caller-side either, since classify.mjs refuses `exclude:` under
+# `blocked`. Flipping these to SAFE is a policy change, not a cleanup.
+RISKY: .env.example
 RISKY: src/keychain_helpers.py
 
 # ── RISKY: containers + compose ────────────────────────────────────────────
