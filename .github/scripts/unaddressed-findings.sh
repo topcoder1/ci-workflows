@@ -671,20 +671,37 @@ check_pr() {
   # cannot be a response to one.
   since=$(printf '%s\n' "$all" | cut -f1 | sort | head -1)
 
-  followups=$(printf '%s' "$timeline" | jq -r --arg since "$since" '
+  # A cross-reference can ORIGINATE IN ANOTHER REPO, and .source.issue.number is
+  # local to that source repo — so a bare "#213" walks the operator to whatever
+  # #213 happens to be in the repo being scanned. Qualify the slug whenever the
+  # source repo differs; same-repo hits stay terse, because this hint is already
+  # dense and every scanned PR's followups are usually local.
+  #
+  # full_name is the documented field, but fall back to parsing html_url: an
+  # event that omits the repository object is exactly where a bare number
+  # misleads most. Slugs compare case-insensitively — GitHub treats them that
+  # way, and an operator typing `Owner/Repo` must not qualify every local hit.
+  followups=$(printf '%s' "$timeline" | jq -r --arg since "$since" --arg repo "$repo" '
     [ .[] | select(.event == "cross-referenced")
           | select(.source.issue.pull_request != null)
           | select(.created_at > $since) ]
-    | .[] | [(.source.issue.number | tostring),
-             (if .source.issue.pull_request.merged_at then "MERGED"
-              else ((.source.issue.state // "?") | ascii_upcase) end),
-             ((.source.issue.title // "") | gsub("\n"; " ") | .[0:80])] | @tsv' 2>/dev/null)
+    | .[]
+    | (.source.issue.repository.full_name
+       // (.source.issue.html_url // "" | split("/")
+           | if length > 4 then "\(.[3])/\(.[4])" else null end)
+       // $repo) as $src
+    | [(if ($src | ascii_downcase) == ($repo | ascii_downcase)
+        then "#\(.source.issue.number)"
+        else "\($src)#\(.source.issue.number)" end),
+       (if .source.issue.pull_request.merged_at then "MERGED"
+        else ((.source.issue.state // "?") | ascii_upcase) end),
+       ((.source.issue.title // "") | gsub("\n"; " ") | .[0:80])] | @tsv' 2>/dev/null)
 
   if [[ -n "$followups" ]]; then
     printf '  %spossible follow-up%s — later PR(s) reference this one; %sverify before redoing the work%s:\n' \
       "$BOLD" "$RESET" "$BOLD" "$RESET"
-    printf '%s\n' "$followups" | while IFS=$'\t' read -r num state title; do
-      printf '    #%s %s%s%s  %s\n' "$num" "$DIM" "$state" "$RESET" "$title"
+    printf '%s\n' "$followups" | while IFS=$'\t' read -r ref state title; do
+      printf '    %s %s%s%s  %s\n' "$ref" "$DIM" "$state" "$RESET" "$title"
     done
   fi
   return 1
