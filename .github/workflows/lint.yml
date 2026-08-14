@@ -24,6 +24,15 @@ name: Lint
 #   - ruff check on Python code (opt-in for callers, default OFF; always ON
 #     for this repo's own self-test runs). Scope defaults to src/ and tests/
 #     when present, else the repo root; override with ruff_paths.
+#   - ruff format --check on the SAME scope and pin (run_ruff_format, opt-in,
+#     default OFF). Separate from run_ruff because the two catch DISJOINT
+#     problems: a tree can pass every lint rule and still be format-dirty.
+#     That is not a hypothetical — webcrawl#429 found 10 of 12 files under
+#     scripts/ format-dirty while raising ZERO lint errors, so `ruff check`
+#     called that tree clean right up until formatting was finally gated. A
+#     fleet audit on 2026-08-14 found the same shape in 4 of the 7 repos that
+#     lint Python here (328 dirty files), because until now this workflow had
+#     no way to check formatting at all.
 #
 #     The local/CI parity this used to claim now runs the OTHER way, and the
 #     direction matters. This comment said "scope mirrors bb-preflight's local
@@ -137,8 +146,13 @@ on:
         required: false
         type: boolean
         default: false
+      run_ruff_format:
+        description: "Run `ruff format --check` on Python code. Default false (opt-in) — enabling it on a repo with pre-existing drift reddens the install PR, so reformat first, then turn this on. Independent of run_ruff: `ruff check` and `ruff format --check` catch DISJOINT problems, and a tree can satisfy every lint rule while being format-dirty. Shares ruff_paths and ruff_version with run_ruff so the two gates can never disagree about scope or rule set."
+        required: false
+        type: boolean
+        default: false
       ruff_paths:
-        description: "Space-separated list of paths for ruff check, relative to repo root. Default '' = auto-detect (src/ and tests/ when present, else '.')."
+        description: "Space-separated list of paths for ruff check and ruff format --check, relative to repo root. Default '' = auto-detect (src/ and tests/ when present, else '.')."
         required: false
         type: string
         default: ""
@@ -612,15 +626,21 @@ jobs:
     # enforce the same file set in both directions.
     # Self-test runs (pull_request/push on this repo) always run this job —
     # same inputs-stringify-to-'' pattern as the shellcheck job above.
-    if: ${{ format('{0}', inputs.run_ruff) == 'true' || (github.repository == 'topcoder1/ci-workflows' && format('{0}', inputs.run_ruff) == '') }}
+    if: ${{ format('{0}', inputs.run_ruff) == 'true' || format('{0}', inputs.run_ruff_format) == 'true' || (github.repository == 'topcoder1/ci-workflows' && format('{0}', inputs.run_ruff) == '' && format('{0}', inputs.run_ruff_format) == '') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Run ruff check
+      - name: Run ruff
         env:
           RUFF_PATHS: ${{ inputs.ruff_paths }}
           RUFF_VERSION: ${{ inputs.ruff_version || '0.15.10' }}
+          # Resolved here rather than in the job `if:` because the job now runs
+          # when EITHER gate is requested, so each invocation needs its own
+          # switch. Same self-test convention as the job condition: an unset
+          # input stringifies to '' and means "on" for this repo's own runs.
+          RUN_CHECK: ${{ format('{0}', inputs.run_ruff) == 'true' || (github.repository == 'topcoder1/ci-workflows' && format('{0}', inputs.run_ruff) == '') }}
+          RUN_FORMAT: ${{ format('{0}', inputs.run_ruff_format) == 'true' || (github.repository == 'topcoder1/ci-workflows' && format('{0}', inputs.run_ruff_format) == '') }}
         run: |
           set -euo pipefail
           DIRS=()
@@ -706,11 +726,12 @@ jobs:
           if [ "$RULESET_DECLARED" -eq 0 ] && [ -f pyproject.toml ]; then
             if ruff_select_declared pyproject.toml ""; then RULESET_DECLARED=1; fi
           fi
-          if [ "$RULESET_DECLARED" -eq 0 ]; then
+          # Rule selection governs `check` only — the formatter has no rule
+          # set — so this warns only when `check` is the gate being run.
+          if [ "$RUN_CHECK" = "true" ] && [ "$RULESET_DECLARED" -eq 0 ]; then
             echo "::warning::No explicit ruff rule selection found (no (extend-)select under [tool.ruff*] in pyproject.toml, nor in ruff.toml/.ruff.toml). This repo is enforcing ruff ${RUFF_VERSION}'s built-in defaults, which change between releases — the next ruff_version bump can add violations to code you did not touch. Declare one, e.g. [tool.ruff.lint] select = [\"E4\", \"E7\", \"E9\", \"F\"] (ruff's pre-0.16 defaults)."
           fi
 
-          echo "ruff check (v${RUFF_VERSION}): ${DIRS[*]}"
           # `pipx run --spec` (pipx is preinstalled on ubuntu runners)
           # resolves ruff into an isolated venv and runs its console script.
           # Deliberately NOT `python3 -m pip install ruff` + bare `ruff` —
@@ -719,5 +740,17 @@ jobs:
           # could execute code on the runner or fake a pass. This job must
           # never execute checkout content, the same property the prettier
           # job keeps with --ignore-scripts. (Codex review rounds 1-2.)
-          pipx run --spec "ruff==${RUFF_VERSION}" ruff check "${DIRS[@]}"
+          RC=0
+          if [ "$RUN_CHECK" = "true" ]; then
+            echo "ruff check (v${RUFF_VERSION}): ${DIRS[*]}"
+            pipx run --spec "ruff==${RUFF_VERSION}" ruff check "${DIRS[@]}" || RC=1
+          fi
+          # Run BOTH before exiting. Short-circuiting on the first failure
+          # would hide the formatter's findings behind a lint failure (or the
+          # reverse), so one red gate would take two fix cycles to clear.
+          if [ "$RUN_FORMAT" = "true" ]; then
+            echo "ruff format --check (v${RUFF_VERSION}): ${DIRS[*]}"
+            pipx run --spec "ruff==${RUFF_VERSION}" ruff format --check "${DIRS[@]}" || RC=1
+          fi
+          exit "$RC"
         shell: bash
