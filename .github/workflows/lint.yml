@@ -22,9 +22,21 @@ name: Lint
 #   - shellcheck on standalone shell scripts (opt-in for callers, default
 #     OFF; always ON for this repo's own self-test runs — see the job)
 #   - ruff check on Python code (opt-in for callers, default OFF; always ON
-#     for this repo's own self-test runs). Scope mirrors bb-preflight's
-#     local gate — src/ and tests/ when present, else the repo root — so
-#     the local preflight and CI enforce the same file set.
+#     for this repo's own self-test runs). Scope defaults to src/ and tests/
+#     when present, else the repo root; override with ruff_paths.
+#
+#     The local/CI parity this used to claim now runs the OTHER way, and the
+#     direction matters. This comment said "scope mirrors bb-preflight's local
+#     gate", but BOTH sides simply hardcoded src/+tests/ — which is not a
+#     mirror, only a coincidence that holds while every repo lints exactly that
+#     pair. webcrawl#430 broke it by widening its own ci.yml to
+#     `src/ tests/ scripts/`; scripts/ was then gated in CI and invisible
+#     locally. dotclaude#227 fixed it at the source: bb-preflight now DERIVES
+#     its scope and ruff version from what the target repo's workflows actually
+#     run (ruff_paths here, else the literal invocation), so parity is computed
+#     rather than assumed. Changing the default below no longer silently
+#     desyncs the local gate — but do not reintroduce a hardcoded pair on the
+#     preflight side to "match" it.
 #
 # Defaults chosen for "drop into an existing repo without breaking it":
 #   - actionlint runs WITHOUT shellcheck. Shellcheck integration in actionlint
@@ -121,7 +133,7 @@ on:
         type: string
         default: "."
       run_ruff:
-        description: "Run ruff check on Python code. Default false (opt-in). Scope mirrors bb-preflight's local gate: src/ and tests/ when present, else the repo root; override with ruff_paths."
+        description: "Run ruff check on Python code. Default false (opt-in). Scope defaults to src/ and tests/ when present, else the repo root; override with ruff_paths. bb-preflight derives its local scope from this input (or the repo's own ruff invocation), so the two stay in step without either side hardcoding a path list."
         required: false
         type: boolean
         default: false
