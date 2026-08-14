@@ -38,8 +38,19 @@
 #       V3-V5 anchor dropped)
 #   V7. vendored detector: negated prose and empty buckets ⇒ rc=0, bare and
 #       behind those same prefixes (the anchor's whole job)
-#   V8. the prefix loop does not backtrack catastrophically — a long run of
-#       `>` or `#` must not abort the regex engine
+#   V8. neither the normalizer nor the marker backtracks catastrophically —
+#       400-char runs of `>` `#` `*` `-` `|` `_` `` ` `` `1.` must not abort
+#       the regex engine (an abort reads as CLEAN and ARMS auto-merge)
+#   V9. SUPERSET INVARIANT, differential: every shape the ORIGINAL marker
+#       matched must still match, over the cross product of block prefix ×
+#       marker spelling × path wrapping × with/without `:LINE` (2688 shapes).
+#       V9b: negations and empty buckets still rejected across the same matrix
+#  V10. the P-label clause and the marker share ONE definition of "label
+#       prefix" — a `[P2]` under a heading / in a list / quote / checkbox /
+#       table row overrides a CLEAN phrase, disclaimers still do not
+#  V11. the wrappers and prefixes round 3 lost outright, end-to-end: bold,
+#       backtick-in-bold, markdown link, quoted, parenthesized paths; checkbox
+#       and table-row items; colon-outside-bold and code-span marker spellings
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_findings_gate.sh
@@ -459,34 +470,179 @@ expect_rc 0 "V7k  time of day              regression: 12:30 elapsed"       'reg
 expect_rc 0 "V7l  quoted empty bucket      > regression: none"              '> regression: none' 'github-actions[bot]'
 expect_rc 0 "V7m  heading empty bucket     ### regression: n/a"             '### regression: n/a' 'github-actions[bot]'
 
-# V8. The prefix loop must not backtrack catastrophically. Read the shipped
-# marker out of the detector rather than restating it — a copy here would pass
-# forever while the real one rotted.
+# ---------------------------------------------------------------------------
+# V8-V10 (round 4). The detector now NORMALIZES the body and then applies a
+# simple marker to the residue, instead of enumerating markdown's formatting
+# space inside one expression. Read all three pieces out of the detector rather
+# than restating them — a copy here would pass forever while the real one rots.
+# ---------------------------------------------------------------------------
+blk=$(sed -n "s/^_BLOCK_PREFIX='\(.*\)'\$/\1/p" "$CHECKER")
+mark=$(sed -n "s/^_MARKER_CANON='\(.*\)'\$/\1/p" "$CHECKER")
 marker=$(sed -n "s/^_REGRESSION_MARKER='\(.*\)'\$/\1/p" "$CHECKER")
-if [ -z "$marker" ]; then
-  echo "✗ V8 could not extract _REGRESSION_MARKER from $CHECKER"
+canon=$(sed -n 's/^ *\(def canon:.*\)$/\1/p' "$CHECKER")
+if [ -z "$blk" ] || [ -z "$mark" ] || [ -z "$marker" ] || [ -z "$canon" ]; then
+  echo "✗ V8-V10 could not extract the normalizer + marker from $CHECKER"
   failed=1
 else
-  bt_failed=0
-  for spec in "60:>" "60:#" "40:*" "200:>"; do
-    n=${spec%%:*}; ch=${spec#*:}
-    run=$(awk -v n="$n" -v c="$ch" 'BEGIN{s="";for(i=0;i<n;i++)s=s c;print s}')
+
+# V8. Nothing in the pipeline may backtrack catastrophically. An Oniguruma
+# retry-limit abort exits jq non-zero with an empty result, and the detector
+# sends jq's stderr to /dev/null — so the finding list comes back empty, the
+# gate reads CLEAN and ARMS AUTO-MERGE on hostile input. jq is driven directly
+# here because at detector level the abort and a genuine pass are the same rc
+# and the same output. Runs like these are ordinary in bot comments: quoted
+# replies nest, and a pasted conflict marker is seven `>`.
+#
+# The property being pinned is that every repetition consumes a FIXED number of
+# characters per iteration. _BLOCK_PREFIX is stronger still — `^`-anchored with
+# nothing after it, so it always succeeds and can never be made to retry.
+bt_failed=0
+for spec in "400:>" "400:#" "400:*" "400:-" "400:|" "400:_" "400:\`" "400:1."; do
+  n=${spec%%:*}; ch=${spec#*:}
+  run=$(awk -v n="$n" -v c="$ch" 'BEGIN{s="";for(i=0;i<n;i++)s=s c;print s}')
+  for tail in "" "regression: none" "regression: src/foo.ts:12"; do
     set +e
-    err=$(jq -rn --arg re "$marker" --arg b "${run}regression: none" \
-            '($b|test($re;"i"))' 2>&1 >/dev/null); rc=$?
+    err=$(jq -rn --arg blk "$blk" --arg mark "$mark" --arg re "$marker" \
+            --arg b "${run}${tail}" "$canon"' ($b|canon|test($re;"i"))' 2>&1 >/dev/null); rc=$?
     set -e
     if [ "$rc" -ne 0 ] || [ -n "$err" ]; then
-      echo "✗ V8 regex failed on ${n}x'${ch}' prefix run: ${err:-rc=$rc}"
+      echo "✗ V8 regex failed on ${n}x'${ch}' + '${tail}': ${err:-rc=$rc}"
       bt_failed=1
     fi
   done
-  if [ "$bt_failed" -eq 0 ]; then
-    echo "✓ V8 prefix loop survives long marker runs (no retry-limit abort)"
-  else
-    echo "  ↳ the loop backtracks: repeat SINGLE characters (>, #), not runs (>+, #{1,6})"
-    failed=1
-  fi
+done
+if [ "$bt_failed" -eq 0 ]; then
+  echo "✓ V8 normalizer + marker survive 400-char hostile runs (no retry-limit abort)"
+else
+  echo "  ↳ something backtracks: every repetition must consume a FIXED count"
+  failed=1
 fi
+
+# V9. THE SUPERSET INVARIANT, differentially, over a cross product.
+#
+# Rounds 2 and 3 each fixed the shape they were looking at and silently stopped
+# matching shapes the ORIGINAL marker (`regression: \S+:[0-9]+`, still on
+# origin/main) did match — 190 and 162 of the 3200 cases below respectively.
+# Neither was caught by a test, because each round tested only what it had just
+# fixed. This compares against the historical baseline instead of a hand-listed
+# set of bodies, since a hand-listed set only contains the shapes its author
+# already thought of; the cross product covers the combinations nobody
+# enumerates, which is precisely how round 3 lost `- [ ] ` (a bullet it did
+# test, followed by a bracket it did not).
+#
+# `lost` = matched by the original, not by the shipped marker — a regression.
+# `missed` = not matched at all, which also covers the shapes the original was
+# itself blind to (a pathless `main.go`, `**regression:**` with no space after
+# the colon), so a pure superset check could not have caught them.
+ORIGINAL='regression: \S+:[0-9]+'
+v9=$(jq -n --arg blk "$blk" --arg mark "$mark" --arg new "$marker" --arg orig "$ORIGINAL" "$canon"'
+  ["", "  ", "- ", "* ", "+ ", "- [ ] ", "- [x] ", "- [X] ", "1. ", "1) ", "10. ",
+   "# ", "###### ", "> ", ">> ", "> > ", "> - ", "| ", "| - ", "  > 1. ", "> - [ ] "] as $pfx
+  | ["regression:", "**regression:**", "**regression**:", "*regression:*",
+     "*regression*:", "__regression:__", "__regression__:", "`regression:`"] as $spl
+  | ["PATH", "`PATH`", "**PATH**", "**`PATH`**", "[PATH](https://example.com/x)",
+     "\"PATH\"", "\u0027PATH\u0027", "(PATH)"] as $wrp
+  | ["src/lib/main.go", "src/lib/main.go:267"] as $pth
+  | [ $pfx[] as $p | $spl[] as $s | $wrp[] as $w | $pth[] as $t
+      | $p + $s + " " + ($w | sub("PATH"; $t)) + " — no test covers the new branch" ]
+  | ([$pfx, $spl, $wrp, $pth] | map(length - (unique | length)) | add) as $dupes
+  | map({b: ., orig: test($orig; "i"), new: (canon | test($new; "i"))})
+  | {total: length, dupes: $dupes,
+     lost:   [.[] | select(.orig and (.new | not)) | .b],
+     missed: [.[] | select(.new | not) | .b]}')
+v9_total=$(printf '%s' "$v9" | jq -r '.total')
+v9_lost=$(printf '%s' "$v9" | jq -r '.lost | length')
+v9_missed=$(printf '%s' "$v9" | jq -r '.missed | length')
+# The corpus axes must hold DISTINCT entries. This is not pedantry. The
+# single-quoted path wrapper was first written with literal apostrophes inside
+# this single-quoted jq program, where the shell ate them and collapsed that
+# entry into a duplicate of the bare wrapper — so the single-quoted shape went
+# untested while `total` stayed at its expected 2688 and every case still
+# passed. A linter caught it (SC2026); a stable case count never would. The
+# apostrophes are spelled \u0027 for that reason, and this guard is the backstop.
+v9_dupes=$(printf '%s' "$v9" | jq -r '.dupes')
+if [ "$v9_dupes" -ne 0 ]; then
+  echo "✗ V9 corpus has $v9_dupes duplicate axis entries — a shape is silently untested"
+  failed=1
+elif [ "$v9_lost" -eq 0 ] && [ "$v9_missed" -eq 0 ]; then
+  echo "✓ V9 superset invariant holds over $v9_total cross-product shapes (0 lost, 0 missed)"
+else
+  echo "✗ V9 superset invariant BROKEN: $v9_lost lost vs the original, $v9_missed unmatched of $v9_total"
+  printf '%s' "$v9" | jq -r '(.lost + .missed) | unique | .[0:8][] | "    " + .'
+  failed=1
+fi
+
+# V9b. The reject side, over the same prefix × spelling matrix. The path-SHAPE
+# test is the sole admission gate: a marker that accepts prose flags every
+# comment containing the word, and a sweeper that cries wolf gets ignored.
+v9b=$(jq -n --arg blk "$blk" --arg mark "$mark" --arg new "$marker" "$canon"'
+  ["", "  ", "- ", "- [ ] ", "1. ", "### ", "> ", ">> ", "| ", "> - [ ] "] as $pfx
+  | ["regression:", "**regression:**", "**regression**:", "`regression:`"] as $spl
+  | ["none", "nothing to report", "n/a", "N/A", "not applicable",
+     "3.2 seconds slower", "12:30 elapsed"] as $empty
+  | ["No regression: package.json is unchanged",
+     "Not a regression: main.go:267 is covered",
+     "the diff shows no regression: main.go:267 is covered",
+     "See regression: main.go:267 for the earlier discussion"] as $neg
+  | [ $pfx[] as $p | ( ($spl[] as $s | $empty[] as $e | $p + $s + " " + $e),
+                       ($neg[] as $n | $p + $n) ) ]
+  | {total: length, fired: [.[] | select(canon | test($new; "i"))]}')
+v9b_total=$(printf '%s' "$v9b" | jq -r '.total')
+v9b_fired=$(printf '%s' "$v9b" | jq -r '.fired | length')
+if [ "$v9b_fired" -eq 0 ]; then
+  echo "✓ V9b negations and empty buckets still rejected across $v9b_total shapes"
+else
+  echo "✗ V9b the widened marker fired on $v9b_fired of $v9b_total prose shapes"
+  printf '%s' "$v9b" | jq -r '.fired[0:8][] | "    " + .'
+  failed=1
+fi
+
+fi  # normalizer extraction guard
+
+# V10. ONE definition of "label prefix", shared by the marker and the P-label
+# clause. Until round 4 SEVERITY_RE carried its own round-2-era prefix — a
+# bullet and nothing else — so a `[P2]` under a heading, in a numbered list, in
+# a blockquote, in a checkbox item or in a table row could not override a CLEAN
+# phrase, while the identical prefix in front of `regression:` could. Two
+# clauses disagreeing about what a label prefix looks like is how the next bug
+# gets in; normalizing before either clause runs leaves exactly one definition.
+V10_CLEAN='### Codex review
+
+No regressions found on the coverage axis.
+
+'
+expect_rc 1 "V10a heading P-label overrides CLEAN"   "${V10_CLEAN}### [P1] Token check is skippable — auth.py:31" 'github-actions[bot]'
+expect_rc 1 "V10b numbered P-label overrides CLEAN"  "${V10_CLEAN}1. [P2] Contract drift — send_request.go:462" 'github-actions[bot]'
+expect_rc 1 "V10c quoted P-label overrides CLEAN"    "${V10_CLEAN}> **P2** Contract drift — send_request.go:462" 'github-actions[bot]'
+expect_rc 1 "V10d checkbox P-label overrides CLEAN"  "${V10_CLEAN}- [ ] [P0] Credentials logged in plaintext — auth.py:88" 'github-actions[bot]'
+expect_rc 1 "V10e table P-label overrides CLEAN"     "${V10_CLEAN}| P0 — credentials are logged in plaintext" 'github-actions[bot]'
+expect_rc 0 "V10f quoted disclaimer stays CLEAN"     '### Codex review
+
+> No [P1] or [P2] issues found. VERDICT: CLEAN' 'github-actions[bot]'
+expect_rc 0 "V10g checkbox empty bucket stays CLEAN" '### Codex review
+
+- [ ] P1: none
+- [x] P2: none
+
+VERDICT: CLEAN' 'github-actions[bot]'
+
+# V11. The path WRAPPERS and the two block prefixes round 3 lost outright,
+# driven end-to-end through the detector rather than through jq.
+expect_rc 1 "V11a bold path                  regression: **src/foo.ts**"       'regression: **src/foo.ts:12** — no test'
+expect_rc 1 'V11b backtick-in-bold path      regression: **`src/foo.ts`**'     'regression: **`src/foo.ts`** — no test'
+expect_rc 1 "V11c markdown-link path         regression: [src/foo.ts:12](...)" 'regression: [src/foo.ts:12](https://example.com/x) — no test'
+expect_rc 1 "V11d double-quoted path         regression: \"src/foo.ts\""       'regression: "src/foo.ts" — no test'
+expect_rc 1 "V11e single-quoted path         regression: (single-quoted)"      "regression: 'src/foo.ts' — no test"
+expect_rc 1 "V11f parenthesized path         regression: (src/foo.ts:12)"      'regression: (src/foo.ts:12) — no test'
+expect_rc 1 "V11g checkbox item              - [ ] regression: ..."            '- [ ] regression: src/foo.ts:12 — no test'
+expect_rc 1 "V11h checked checkbox item      - [x] regression: ..."            '- [x] regression: src/foo.ts:12 — no test'
+expect_rc 1 "V11i table row                  | regression: ... |"              '| regression: src/foo.ts:12 — no test |'
+expect_rc 1 "V11j colon outside the bold     **regression**: src/foo.ts"       '**regression**: src/foo.ts — no test'
+expect_rc 1 "V11k single-asterisk emphasis   *regression:* src/foo.ts"         '*regression:* src/foo.ts — no test'
+expect_rc 1 "V11l double-underscore          __regression__: src/foo.ts"       '__regression__: src/foo.ts — no test'
+expect_rc 1 "V11m marker in a code span      \`regression:\` src/foo.ts"       '`regression:` src/foo.ts — no test'
+expect_rc 0 "V11n checkbox negation          - [ ] No regression: main.go:267" '- [ ] No regression: main.go:267 is covered' 'github-actions[bot]'
+expect_rc 0 "V11o table-row empty bucket     | regression: n/a |"              '| regression: n/a |' 'github-actions[bot]'
 
 echo
 if [ "$failed" -ne 0 ]; then

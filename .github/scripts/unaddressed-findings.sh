@@ -93,107 +93,135 @@ fi
 # matters more here than anywhere else now: with the header gone this is the
 # sole admission gate, so a lowercased `verdict: regression` that fails to match
 # is not a comment classified wrongly, it is a comment never examined at all.
-# The `regression:` marker matches its path by SHAPE, not by a `file:line`
-# literal. Demanding the `:LINE` suffix — via a `\S+` a backtick also breaks —
-# is what made this script report "no unaddressed findings" on
-# whois-api-llc/wxa-jake-ai#1054. claude[bot] posted, 3m41s after the last
-# commit and 1m23s before the merge:
+# --------------------------------------------------------------------------
+# The `regression:` marker: NORMALIZE, THEN TEST.
+#
+# The body is first reduced to a canonical form (`def canon:` in the jq program
+# below), and only then is a small expression applied to the residue. THREE
+# earlier attempts went the other way — one expression enumerating markdown's
+# formatting space — and each closed a hole while silently opening another:
+#
+#   round 1  `regression: \S+:[0-9]+`. Permissive about WRAPPING (its `\S+`
+#            reached a path inside bold, a markdown link, quotes or parens) but
+#            it demanded a `:LINE` suffix and could not skip a leading backtick.
+#            Missed wxa-jake-ai#1054 — see the burn note below.
+#   round 2  Path SHAPE + LABEL POSITION. Fixed #1054, and silently dropped the
+#            numbered, paren-numbered, heading and blockquote prefixes.
+#   round 3  Widened the prefix alphabet to a repeated single-character class.
+#            Fixed those four, and STILL matched less than round 1 on: every
+#            path wrapper except one backtick, checkbox list items, table rows.
+#
+# Measured against the round-4 corpus (tests/regression, 3200 label-position
+# shapes): round 2 lost 190 shapes round 1 matched, round 3 lost 162. The
+# formatting space is bigger than any alternation, so the next reviewer always
+# finds the next spelling. Normalizing first ends that: the alternation shrinks
+# to something readable and the marker itself fits on one line.
+#
+# canon runs PER LINE, in two anchored passes:
+#
+#   1. _BLOCK_PREFIX strips leading markdown block markers — indentation, `>`,
+#      `-`/`*`/`+`, `[ ]`/`[x]`/`[X]` checkboxes, `N.`/`N)` ordered items, `#`
+#      headings, and a `|` table cell — in any combination and any nesting, so
+#      `> - [ ] `, `| - `, `  > 1. ` and `###### ` all reduce to nothing.
+#   2. _MARKER_CANON rewrites every emphasis spelling of the marker word AND
+#      the opening wrapper punctuation in front of the path to one canonical
+#      `regression: `. It covers `**regression:**`, `**regression**:`,
+#      `*regression:*`, `__regression__:`, `` `regression:` `` and the path
+#      wrappers `` ` ``, `**`, `__`, `"`, `'`, `(` and `[` (so a markdown link,
+#      a quoted path and a backtick-inside-bold path all reduce alike).
+#
+# So the shipped marker only ever sees `regression: <path>` at the start of a
+# line, and both original intents survive intact:
+#
+#   PATH SHAPE — the sole admission gate. The run of non-space characters after
+#   the canonical marker must carry ONE of three signals: a `/`, a `.` followed
+#   by a LETTER (an extension), or a `:LINE` suffix on a LETTER-led token.
+#   Admits `main.go:267`, `docs/package.json:13`, `` `tests/ci/x.test.ts` ``,
+#   the extensionless `scripts/deploy` and the root-level `Dockerfile:12`;
+#   rejects `none`, `nothing to report`, `3.2 seconds slower` and `12:30`
+#   (a time, not a path — which is why the `:LINE` token must start with a
+#   letter). Without this gate a marker would flag every comment containing the
+#   word, and a sweeper that cries wolf gets ignored — strictly more expensive
+#   than the miss it fixes.
+#
+#   The `:LINE` signal is not decoration: it is what round 1 relied on
+#   exclusively, and dropping it would trade this bug for its mirror image —
+#   `regression: Dockerfile:12` and `regression: Makefile:8` are root-level
+#   extensionless files the other two signals cannot see. `n/a` is excluded BY
+#   NAME because it is the one empty-bucket token whose own slash satisfies the
+#   shape test; `_NOT_EMPTY` below already treats it as empty for the P-labels.
+#   Residual, deliberately: a root-level extensionless file with NO line number
+#   (`regression: Dockerfile — the base image is stale`) carries none of the
+#   three signals and is missed. It is indistinguishable from a bare word
+#   without an allowlist of famous filenames, and round 1 missed it too.
+#
+#   LABEL POSITION — the marker must OPEN its line, after nothing but block
+#   markers, which is the line format codex's own prompt mandates
+#   (`regression: <file:line> - <sentence>`). What the block alphabet excludes
+#   is WORDS, and that exclusion is the entire mechanism for rejecting NEGATED
+#   uses, which the shape test cannot see: "No regression: package.json is
+#   unchanged" (codex wrote exactly that reviewing round 2), "Not a regression:
+#   main.go:267 is covered", "the diff shows no regression: ...". Every negation
+#   phrasing puts a word between the line start and the marker, so all of them
+#   are answered at once — including quoted, numbered and checkboxed ones —
+#   without parsing English negation, which the note below explains does not
+#   converge.
+#
+# THE SUPERSET INVARIANT, which is what rounds 2 and 3 actually violated: if
+# round 1's marker matches an input, this one must match it too. It may match
+# strictly more — that is the point of every fix — but never less.
+# tests/regression/test_unaddressed_findings.py asserts it differentially over
+# the full cross product of block prefix × marker spelling × path wrapping ×
+# with/without `:LINE`, because a hand-listed set of bodies only ever contains
+# the shapes its author already thought of. It has exactly TWO declared
+# exceptions, both of them round 2's reason for existing and both enumerated in
+# that test: a WORD before the marker (the negations above), and a `:LINE`-like
+# token that is not a plausible path (`12:30 elapsed`). A divergence that is
+# neither is a regression, and the test names it.
+#
+# BACKTRACKING DISCIPLINE. An Oniguruma retry-limit abort is a SILENT FALSE
+# NEGATIVE here, not a slowdown: the jq calls below send stderr to /dev/null, so
+# the abort empties the finding list and the sweeper prints "no unaddressed
+# findings" — byte-identical to a genuine pass. Round 3 measured a `>+`/`#{1,6}`
+# prefix loop dying on 20 consecutive `>`, and runs like that are ordinary in
+# bot comments (nested quoted replies; a pasted conflict marker is seven).
+# Every repetition here therefore consumes a FIXED number of characters per
+# iteration, so the parse is unique and there is nothing to backtrack over.
+# _BLOCK_PREFIX is stronger still: it is `^`-anchored with NOTHING after it, so
+# it always succeeds and the engine never has a failing continuation to retry
+# against — it cannot backtrack at all, structurally rather than by tuning.
+#
+# THE BURN. whois-api-llc/wxa-jake-ai#1054: claude[bot] posted, 3m41s after the
+# last commit and 1m23s before the merge:
 #
 #   regression: `tests/ci/prod-model-health-author-scope.test.ts` — no test pins
 #   the cron schedule value `7,22,37,52 * * * *` ...
 #
-# The path was BACKTICKED and carried NO line number, so `\S+:[0-9]+` matched
-# nothing, the comment never reached CLEAN_RE, and the PR merged with the
-# finding live. Both deviations are ordinary: the path a finding names is often
-# a whole file rather than a line in one, and both bots write paths in code
-# spans.
+# The path was BACKTICKED and carried NO line number, so round 1's `\S+:[0-9]+`
+# matched nothing, the comment never reached CLEAN_RE, and the PR merged with
+# the finding live. Both deviations are ordinary: findings routinely name a
+# whole file rather than a line in one, and both bots write paths in code spans.
+# #1067 is the second live instance — the marker on its own line beneath a bold
+# header.
 #
-# The replacement still demands a PLAUSIBLE SOURCE PATH IN LABEL POSITION — two
-# independent constraints, and both are load-bearing. This is the sole
-# admission gate, so a marker that accepted any prose after `regression:` would
-# flag every comment containing the word; a sweeper that cries wolf gets
-# ignored, which costs strictly more than the miss it fixes.
-#
-#   1. PATH SHAPE. The unbroken run of non-space characters starting
-#      immediately after `regression:` must carry ONE of three signals: a `/`,
-#      a `.` followed by a LETTER (an extension), or a `:LINE` suffix on a
-#      token that starts with a letter. Admits `main.go:267`,
-#      `docs/package.json:13`, `.github/workflows/x.yml:96`,
-#      `` `tests/ci/x.test.ts` ``, the extensionless `scripts/deploy` and the
-#      root-level `Dockerfile:12`; rejects `regression: none`,
-#      `regression: nothing to report`, `regression: 3.2 seconds slower`.
-#
-#      The `:LINE` signal is not decoration — it is what the ORIGINAL marker
-#      relied on exclusively, so dropping it would have traded this bug for its
-#      mirror image: codex caught `regression: Dockerfile:12` and
-#      `regression: Makefile:8` going dark, root-level extensionless files that
-#      the old expression matched and the first two shapes do not. Requiring a
-#      leading letter keeps `12:30` (a time, not a path) out.
-#
-#      Residual, and deliberately so: a root-level extensionless file with NO
-#      line number (`regression: Dockerfile — the base image is stale`) carries
-#      none of the three signals and is missed. It is indistinguishable from a
-#      bare word without an allowlist of famous filenames, and the pre-fix
-#      marker missed it too — this change is strictly additive here.
-#      `n/a` is excluded BY NAME because it is the one empty-bucket token whose
-#      own slash satisfies the shape test — `_NOT_EMPTY` below already treats it
-#      as empty for the P-labels, and codex raised the inconsistency reviewing
-#      this change. The other empty tokens need no naming: they carry neither a
-#      slash nor a dotted extension, so the shape test rejects them already.
-#
-#   2. LABEL POSITION. The marker must OPEN its line, after nothing but
-#      MARKDOWN BLOCK MARKERS — the same rule LGTM and the `[P2]` labels follow
-#      below, and the line format codex's own prompt mandates
-#      (`regression: <file:line> - <sentence>`). Allowed prefixes, in any
-#      combination and any nesting, each optionally indented:
-#
-#        >   blockquote, nested as `>>` or `> >`
-#        -   bullet, also `*` and `+`
-#        1.  numbered list, also `1)`
-#        #   heading, `#` through `######`
-#        **  bold, around the word itself (`**regression:**`)
-#
-#      so `regression:`, `- regression:`, `1. regression:`, `### regression:`,
-#      `> regression:` and `> 1. **regression:**` all qualify. The FIRST cut of
-#      this anchor allowed only a bullet or bold and silently dropped the other
-#      four — a narrower version of the very bug it shipped alongside, in the
-#      fleet's only post-merge findings detector. Bots write findings as
-#      numbered lists and under headings routinely; two independent reviews
-#      caught the drop before it merged.
-#
-#      What the prefix alphabet deliberately excludes is WORDS, and that is the
-#      whole mechanism for rejecting NEGATED uses, which shape 1 cannot see:
-#      codex's review OF THIS CHANGE produced "No regression: package.json is
-#      unchanged", a clean summary CLEAN_RE does not recognise (it knows only
-#      the plural "No regressions found") and that SEVERITY_RE would then
-#      override anyway — a false "do not merge yet" on a pass. Every negation
-#      phrasing puts a word between the line start and the marker ("No ",
-#      "Not a ", "the diff shows no "), so all of them are answered at once —
-#      including quoted and numbered ones ("> No regression:", "1. No
-#      regression:") — without parsing English negation, which the note below
-#      explains does not converge.
-#
-#      The prefix loop repeats SINGLE characters (`>`, `#`) rather than runs
-#      (`>+`, `#{1,6}`), and holds trailing whitespace outside the loop. This is
-#      not style. A repeated group whose body also repeats is the classic
-#      `(a+)+` shape: a run of N markers has 2^(N-1) partitions, and Oniguruma
-#      walks them all before failing. Measured with `>+`/`#{1,6}` on this exact
-#      marker, a body of 20 `>` then `regression: none` aborts jq with "Regex
-#      failure: retry-limit-in-match over" — and because the jq calls below send
-#      stderr to /dev/null, the abort empties the finding list and the sweeper
-#      reports "no unaddressed findings". A silent false negative, in the
-#      detector whose entire job is to not have those. Repeating one character
-#      makes the parse unique: iterations equal marker characters, nothing to
-#      backtrack over. Runs of `>` are ordinary in bot comments (nested quoted
-#      replies; a pasted conflict marker is seven).
-#
-# Both observed burn bodies satisfy the anchor: #1054 opens with the marker,
-# #1067 puts it on its own line beneath a bold header.
-#
-# Backticks are optional and sit OUTSIDE the captured path; `:LINE` is optional.
 # Shared with SEVERITY_RE below so the admission gate and the clean-marker
 # override can never disagree about what a regression line looks like.
-_REGRESSION_MARKER='(^|\n)([[:space:]]*(>|[-*+]|[0-9]+[.)]|#))*[[:space:]]*\**regression:\**[[:space:]]*`?(?!n/a\b)(?=[^[:space:]`]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
+# --------------------------------------------------------------------------
+# A `-`/`*`/`+` bullet must be FOLLOWED BY WHITESPACE, which is markdown's own
+# rule and not a nicety: without it this pass eats the opening `**` of
+# `**P1** unscoped token ...` as two bullets, and SEVERITY_RE's `\*\*P[012]\*\*`
+# clause — which reads the normalized body — then no longer matches. That is a
+# live test in tests/regression, and it failed exactly this way while round 4
+# was being written. `>`, `#` and `|` need no such guard: none of them is an
+# emphasis character, and bots write `>text` and `#Heading` without the space.
+_BLOCK_PREFIX='^[[:blank:]]*(([>|#]|[-*+][[:blank:]]|\[[ xX]\]|[0-9]{1,9}[.)])[[:blank:]]*)*'
+# `\x27` is an apostrophe. Spelling it as an escape keeps this a single-quoted
+# shell string with no embedded quote, which is what lets the tests read these
+# values straight out of the file instead of keeping a second copy that rots.
+# shellcheck disable=SC2016  # a regex, not a shell expansion: the backticks
+# are code-span characters the normalizer strips.
+_MARKER_CANON='^[*_`]*regression[*_`]*:([[:blank:]]|[*_`"\x27(\[])*'
+_REGRESSION_MARKER='(^|\n)regression: (?!n/a\b)(?=[^[:space:]]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
 FINDING_RE="([Ff]lagged [0-9]+ issue|\bP[012]\b|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
 # With the header gone from FINDING_RE, CLEAN_RE no longer has to rescue every
 # codex pass — those now never match a finding marker in the first place. What
@@ -234,10 +262,20 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 # What counts as ASSERTED is decided by STRUCTURE, not by wording:
 #
 #   * a LABEL IN LABEL POSITION — `[P2]`, `**P2**` or `P2 —` opening its own
-#     line, optionally bulleted — or `P2:` anywhere. This is how codex emits
-#     findings ("- [P2] Title — file:lines"), and why the bracket form is
-#     anchored: "No [P1] or [P2] issues found" is a disclaimer in a label's
-#     clothes. A severity mid-sentence in prose is mentioned, not asserted.
+#     line — or `P2:` anywhere. This is how codex emits findings ("- [P2] Title
+#     — file:lines"), and why the bracket form is anchored: "No [P1] or [P2]
+#     issues found" is a disclaimer in a label's clothes. A severity
+#     mid-sentence in prose is mentioned, not asserted.
+#
+#     "Label position" means the SAME thing here as it does for the regression
+#     marker above, because it is now the same code: canon has already stripped
+#     the block markers by the time either clause runs. Until round 4 this
+#     clause carried its own round-2-era prefix — `([-*+][[:space:]]*)?`, a
+#     bullet and nothing else — so a `[P2]` under a heading, in a numbered list,
+#     in a blockquote, in a checkbox item or in a table row could not override a
+#     CLEAN phrase, while the identical prefix in front of `regression:` could.
+#     Two clauses in one file disagreeing about what a label prefix looks like
+#     is how the next bug gets in; there is now one definition, _BLOCK_PREFIX.
 #   * ...FOLLOWED BY CONTENT, since an empty bucket is in label position and
 #     means the opposite of one. The requirement is positive, so a bare "P1:"
 #     or "- [P1]" needs no phrase in any list; only buckets that are non-empty
@@ -276,7 +314,7 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 # and it is still missed — closing it means matching bare prose, which is the
 # trade this design deliberately refuses.
 _NOT_EMPTY='(?![[:blank:]]*(none|nothing|n/a|not applicable|no findings|no issues|(0|zero)[[:blank:]]+(finding|issue)s?)\b)[[:blank:]]*[^[:space:]]'
-SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]* issue|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
+SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]* issue|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
 
 # The "last commit" a finding is measured against must be a commit that could
 # plausibly ANSWER it — i.e. one carrying the author's changes. `auto-update-branch`
@@ -368,15 +406,30 @@ check_pr() {
   # the finding markers while actually reporting a FIX — counting those cost a
   # false positive on wxa-secrets#27. Inline comments stay author-agnostic: a
   # human's inline comment is a deliberate code-level finding either way.
+  #
+  # `canon` is the normalizer described at _BLOCK_PREFIX above: per line, strip
+  # markdown block markers, then reduce any emphasis spelling of `regression:`
+  # and the opening wrapper punctuation after it to one canonical form. Both
+  # passes are `^`-anchored, so each runs once per line with no scanning.
+  #
+  # FINDING_RE and SEVERITY_RE see the normalized body; CLEAN_RE deliberately
+  # sees the RAW one. Normalizing widens whatever it is applied to, and widening
+  # a SUPPRESSOR is the false-negative direction — `> LGTM` becoming a clean
+  # marker would be a quiet loss of coverage, which is the failure mode this
+  # whole file exists to prevent. Widening the two ASSERTION tests only ever
+  # flags more.
   local late_issue
   late_issue=$(printf '%s' "$issue" | jq -r --arg last "$last" \
                  --arg find "$FINDING_RE" --arg clean "$CLEAN_RE" \
-                 --arg sev "$SEVERITY_RE" '
+                 --arg sev "$SEVERITY_RE" \
+                 --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
+    def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
     [ .[] | select(.created_at > $last)
           | select(.user.login | endswith("[bot]"))
-          | select((.body // "") | test($find; "i"))
-          | select((((.body // "") | test($clean; "i")) | not)
-                   or ((.body // "") | test($sev; "i"))) ]
+          | select(((.body // "") | canon) as $body
+                   | ($body | test($find; "i"))
+                     and ((((.body // "") | test($clean; "i")) | not)
+                          or ($body | test($sev; "i")))) ]
     | .[] | [.created_at, .user.login, "-",
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
