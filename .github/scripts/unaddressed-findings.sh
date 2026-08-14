@@ -30,8 +30,8 @@
 #   bb-unaddressed-findings --fixture <dir> <owner/repo> <pr-number> # offline (tests)
 #
 # Fixture dir (testing seam) holds: meta.json (single PR object with
-# .merged_at + .last_commit), inline.json, issue.json — same shapes the REST
-# API returns.
+# .merged_at + .last_commit), inline.json, issue.json, and optionally
+# timeline.json — same shapes the REST API returns.
 #
 # Exit codes:
 #   0 — no unaddressed findings
@@ -636,6 +636,57 @@ check_pr() {
     printf '  %s%s%s  %s  %s%s%s\n    %s\n' \
       "$DIM" "$ts" "$RESET" "$who" "$DIM" "$path" "$RESET" "$body"
   done
+
+  # A fix can land in a LATER PR, which this detector cannot see: its whole
+  # signal is "no commit on THIS PR answered the finding", and that stays true
+  # forever once the follow-up merges elsewhere. So the report never expires,
+  # and each sweep re-dispatches work that is already done.
+  #
+  # 2026-08-09, inbox_superpilot#211: a Codex P2 posted 78s before merge was
+  # fixed by #213 (merged 29 min later, a test file the finding asked for).
+  # #211 still reads unaddressed. THREE sessions were dispatched from that
+  # report — #213 did the work, #214 re-did it byte-identically (its squash
+  # landed empty), and a third rediscovered #213 only after writing the test.
+  #
+  # The cross-reference is the cheap signal: any PR whose title or body mentions
+  # this one appears in its timeline. NOT the search API — a fine-grained PAT
+  # missing a permission returns silently-empty results there (CLAUDE.md,
+  # 2026-06-24), which would read as "no follow-up" and restore the false alarm.
+  #
+  # Deliberately ADVISORY: prints, never clears. A cross-reference proves a PR
+  # mentioned this one, not that the finding was fixed — auto-resolving on it
+  # would fail OPEN on the exact class this script exists to catch. Exit stays 1
+  # and the caller still verifies; it just no longer starts from scratch.
+  local timeline followups since
+  if [[ -n "$FIXTURE" ]]; then
+    timeline=$(cat "$FIXTURE/timeline.json" 2>/dev/null || echo '[]')
+  else
+    # Non-fatal, unlike the fetches above: this is a hint attached to a report
+    # that already stands on its own, so a timeline failure must not turn a
+    # correctly-detected finding into a hard error.
+    timeline=$(gh api "repos/$repo/issues/$pr/timeline" --paginate 2>/dev/null || echo '[]')
+  fi
+
+  # Oldest finding on the report. A cross-reference that predates every finding
+  # cannot be a response to one.
+  since=$(printf '%s\n' "$all" | cut -f1 | sort | head -1)
+
+  followups=$(printf '%s' "$timeline" | jq -r --arg since "$since" '
+    [ .[] | select(.event == "cross-referenced")
+          | select(.source.issue.pull_request != null)
+          | select(.created_at > $since) ]
+    | .[] | [(.source.issue.number | tostring),
+             (if .source.issue.pull_request.merged_at then "MERGED"
+              else ((.source.issue.state // "?") | ascii_upcase) end),
+             ((.source.issue.title // "") | gsub("\n"; " ") | .[0:80])] | @tsv' 2>/dev/null)
+
+  if [[ -n "$followups" ]]; then
+    printf '  %spossible follow-up%s — later PR(s) reference this one; %sverify before redoing the work%s:\n' \
+      "$BOLD" "$RESET" "$BOLD" "$RESET"
+    printf '%s\n' "$followups" | while IFS=$'\t' read -r num state title; do
+      printf '    #%s %s%s%s  %s\n' "$num" "$DIM" "$state" "$RESET" "$title"
+    done
+  fi
   return 1
 }
 
