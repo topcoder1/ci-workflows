@@ -545,8 +545,18 @@ fi
 # around the marker as a whole, and the unicode bullets and dashes models
 # actually paste are in the prefix alphabet. Measured over these widened axes:
 # round 3 loses 3686 shapes vs the original (2686 undeclared), round 4 loses
-# 3430 (2430 undeclared), round 5 loses 1000 — every one of them a negation,
-# which is the single narrowing the label-position anchor exists to make.
+# 3430 (2430 undeclared), round 5 loses 1000 which — OVER THIS ALPHABET — are
+# all negations, the single narrowing the label-position anchor exists to make.
+#
+# ROUND 6 SCOPES THAT CLAIM, because it was read as a universal one and is not.
+# The invariant holds over the ENUMERATED corpus below, not over markdown:
+# independent corpora put the out-of-alphabet residual at roughly 10,200 bodies
+# the original matched and the shipped marker misses, none of them negations —
+# unicode leads beyond the three listed, paren-wrapped ordered items, HTML tags,
+# strikethrough, leading colon/caret/tilde, zero-width space, BOM. That residual
+# is ACCEPTED: none is attested in real bot traffic, and each addition widens
+# FINDING_RE, which is the sole admission gate. See the detector's own
+# SUPERSET INVARIANT note for the full argument.
 #
 # `lost` = matched by the original, not by the shipped marker — a regression.
 # `missed` = not matched at all, which also covers the shapes the original was
@@ -697,12 +707,45 @@ expect_rc 0 "V10o checkbox empty bucket stays CLEAN" '### Codex review
 
 VERDICT: CLEAN' 'github-actions[bot]'
 
-# The regression marker keeps the WIDE prefix as a CLEAN override, because it is
-# the assertion whose admission gate is a path shape rather than a bare label.
-# Round 3 already overrode CLEAN on `- regression: ...`; demoting the marker to
-# the raw body along with the rest of SEVERITY_RE would have lost that silently.
+# ROUND 6: the regression marker overrides CLEAN with ROUND 3'S prefix alphabet
+# and no more, applied to the RAW body like every other severity signal.
+#
+# Round 5 left this one term reading canon's output, to keep round 3's
+# `- regression: ...` override alive. It kept that and bought the whole block
+# alphabet with it — 76 of 484 measured suppressor-side shapes flipped to a
+# false decline, 66 of them on one 9-prefix × 8-wrapping grid. The term now uses
+# `_REGRESSION_MARKER_RAW`, which is round 3's marker verbatim, so the override
+# set is round 3's exactly: V13 below measures both directions and requires
+# zero. V10p is the shape round 5 was protecting and it still passes.
 expect_rc 1 "V10p bullet regression overrides CLEAN" "${V10_CLEAN}- regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
-expect_rc 1 "V10q checkbox regression overrides CLEAN" "${V10_CLEAN}- [ ] regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
+expect_rc 1 "V10q star bullet regression overrides CLEAN" "${V10_CLEAN}* regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
+expect_rc 1 "V10r quote regression overrides CLEAN" "${V10_CLEAN}> regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
+expect_rc 1 "V10s numbered regression overrides CLEAN" "${V10_CLEAN}1. regression: src/foo.ts:12 — no test covers X" 'github-actions[bot]'
+expect_rc 1 "V10t backticked path overrides CLEAN" "${V10_CLEAN}regression: \`src/foo.ts\` — no test covers X" 'github-actions[bot]'
+
+# THE ROUND-5 FALSE POSITIVE, pinned so it cannot come back. Every one of these
+# is a PASS: a re-review that recites the previous round's regression line and
+# stamps a clean verdict. Each returned rc=0 under round 3, rc=1 under round 5.
+#
+# V10u is the sharpest of them and the reason this round exists. A CHECKED
+# checkbox is the universal notation for an ADDRESSED finding, so round 5
+# declined the merge precisely when the evidence said the finding was resolved.
+# For the automerge gate that is worse than for the operator sweep: a false
+# finding declines the arm on a clean PR, and a gate that blocks passing PRs
+# gets switched off, at which point it protects nothing at all.
+V10_QUOTED_REG='### Codex review
+
+Re-reviewed after the fix. The previous round said:
+
+'
+expect_rc 0 "V10u checked checkbox regression stays CLEAN" '- [x] regression: src/foo.ts:12 - fixed in 2a5937e
+No issues found. VERDICT: CLEAN' 'github-actions[bot]'
+expect_rc 0 "V10v open checkbox regression stays CLEAN"  "${V10_QUOTED_REG}- [ ] regression: src/foo.ts:12 — no test covers X${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10w table-row regression stays CLEAN"      "${V10_QUOTED_REG}| regression: src/foo.ts:12 — no test covers X |${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10x quoted-whole regression stays CLEAN"   "${V10_QUOTED_REG}\"regression: src/foo.ts:12 — no test covers X\"${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10y paren-whole regression stays CLEAN"    "${V10_QUOTED_REG}(regression: src/foo.ts:12 — no test covers X)${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10z unicode-bullet regression stays CLEAN" "${V10_QUOTED_REG}• regression: src/foo.ts:12 — no test covers X${V10_TAIL}" 'github-actions[bot]'
+expect_rc 0 "V10aa bold path regression stays CLEAN"     "${V10_QUOTED_REG}regression: **src/foo.ts:12** — no test covers X${V10_TAIL}" 'github-actions[bot]'
 
 # V11. The path WRAPPERS and the two block prefixes round 3 lost outright,
 # driven end-to-end through the detector rather than through jq.
@@ -754,6 +797,129 @@ expect_rc 0 "V12u quoted whole n/a"          '"regression: n/a"' 'github-actions
 expect_rc 0 "V12v paren whole empty bucket"  '(regression: nothing to report)' 'github-actions[bot]'
 expect_rc 0 "V12w bracket whole time-of-day" '[regression: 12:30 elapsed]' 'github-actions[bot]'
 expect_rc 0 "V12x em dash seconds"           '— regression: 3.2 seconds slower' 'github-actions[bot]'
+
+# ---------------------------------------------------------------------------
+# V13 (round 6). THE SUPPRESSOR-SIDE DIFFERENTIAL, measured rather than argued.
+#
+# The V10 cases above pin named shapes. This pins the PROPERTY: on the
+# suppressor side — "does a finding marker override a clean verdict" — the
+# shipped override must behave exactly as round 3 did, in BOTH directions.
+#
+#   new flags       shapes round 6 declines that round 3 armed  → false positives
+#   lost overrides  shapes round 3 declined that round 6 arms   → lost coverage
+#
+# Over the exact 20,240-shape grid below, round 5 — canon plus its normalized
+# marker, which is how it actually ran — scores 14,624 new flags and 0 lost. The
+# requirement here is ZERO on both counts. Round 3's marker is read out of the
+# detector's own `_REGRESSION_MARKER_RAW`, so this measures the shipped
+# expression rather than a copy that would rot.
+#
+# (An earlier draft of this comment said 27,968, a figure carried over from a
+# larger grid than the one below — larger than this grid's total, in fact. Round
+# 6 is the round about not shipping unmeasured claims, so it was re-measured.)
+#
+# Every body carries a clean verdict, which is what makes it a SUPPRESSOR-side
+# measurement: CLEAN_RE always fires, so the only question left is whether the
+# override cancels it.
+raw_marker=$(sed -n "s/^_REGRESSION_MARKER_RAW='\(.*\)'\$/\1/p" "$CHECKER")
+if [ -z "$raw_marker" ]; then
+  echo "✗ V13 could not extract _REGRESSION_MARKER_RAW from $CHECKER"
+  failed=1
+else
+# ROUND 3's marker, verbatim from commit 5bcc1ca — the historical baseline this
+# round is pinned against. It is restated here ON PURPOSE, unlike every other
+# expression in this file: a baseline read out of the shipped file would move
+# whenever the shipped file moves, and then it would measure nothing at all.
+R3_MARKER='(^|\n)([[:space:]]*(>|[-*+]|[0-9]+[.)]|#))*[[:space:]]*\**regression:\**[[:space:]]*`?(?!n/a\b)(?=[^[:space:]`]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
+if [ "$raw_marker" != "$R3_MARKER" ]; then
+  echo "✗ V13 _REGRESSION_MARKER_RAW is no longer round 3's marker verbatim —"
+  echo "  the parity this round ships is by REUSE, not by rederivation"
+  failed=1
+fi
+# Every quote and unicode character below is spelled \uXXXX, for the reason V9
+# records: written literally, the apostrophes get eaten by THIS single-quoted
+# shell string, the single-quoted entries collapse into duplicates of the bare
+# ones, and the corpus silently shrinks while its count stays put. Writing this
+# block the wrong way once, in this round, is how that note earned its keep.
+v13=$(jq -n --arg m6 "$raw_marker" --arg m3 "$R3_MARKER" '
+  ["", "-", "* ", "+ ", "- [ ] ", "- [x] ", "- [X] ", "1. ", "1) ", "  ",
+   "# ", "### ", "> ", ">> ", "> - ", "| ", "| - ", "> - [ ] ", "> - [x] ",
+   "\u2022 ", "\u2022", "\u2013 ", "\u2014 "] as $pfx
+  | ["regression:", "**regression:**", "**regression**:", "`regression:`",
+     "~~regression:~~"] as $spl
+  | ["WHOLE", "\"WHOLE\"", "\u0027WHOLE\u0027", "(WHOLE)", "[WHOLE]",
+     "\u201cWHOLE\u201d", "\u2018WHOLE\u2019", "<WHOLE>"] as $whl
+  | ["PATH", "`PATH`", "**PATH**", "**`PATH`**", "[PATH](https://example.com/x)",
+     "\"PATH\"", "\u0027PATH\u0027", "(PATH)", "\u201cPATH\u201d", "<PATH>",
+     "~~PATH~~"] as $wrp
+  | ["src/foo.ts", "src/foo.ts:12"] as $pth
+  | "### Codex review\n\nPrevious round:\n\n" as $head
+  | "\n\nAll of that is now addressed. No issues found. VERDICT: CLEAN" as $tail
+  | [ $pfx[] as $p | $spl[] as $s | $whl[] as $h | $wrp[] as $w | $pth[] as $t
+      | $head + $p
+        + ($h | sub("WHOLE"; $s + " " + ($w | sub("PATH"; $t)))) + $tail ]
+  | map({r3: test($m3; "i"), r6: test($m6; "i")})
+  | {total: length,
+     new:  [.[] | select(.r6 and (.r3 | not))] | length,
+     lost: [.[] | select(.r3 and (.r6 | not))] | length}')
+v13_total=$(printf '%s' "$v13" | jq -r '.total')
+v13_new=$(printf '%s' "$v13" | jq -r '.new')
+v13_lost=$(printf '%s' "$v13" | jq -r '.lost')
+if [ "$v13_new" -eq 0 ] && [ "$v13_lost" -eq 0 ]; then
+  echo "✓ V13 suppressor-side parity with round 3 over $v13_total shapes (0 new, 0 lost)"
+else
+  echo "✗ V13 suppressor-side parity BROKEN: $v13_new new false positives, $v13_lost lost overrides, of $v13_total"
+  failed=1
+fi
+
+# V13b. The override marker carries its own prefix loop now, so it needs its own
+# backtracking guard — the V8 loop above drives the NORMALIZED pipeline and
+# would not see this expression at all. Same stakes: a retry-limit abort exits
+# jq non-zero with an empty result, stderr goes to /dev/null, and the gate reads
+# CLEAN and ARMS on hostile input.
+#
+# The property: each alternative in `([[:space:]]*(>|[-*+]|[0-9]+[.)]|#))*`
+# either consumes exactly one character or is a digit run TERMINATED by `[.)]`,
+# which a digit cannot be — so no iteration has a choice to make. The loop round
+# 3 was measured dying on was the earlier `(>+|#{1,6}|...)` shape, not this one.
+bt6_failed=0
+# shellcheck disable=SC1111  # hostile INPUT characters, not shell quotes.
+for spec in "400:>" "400:#" "400:*" "400:-" "400:+" "400:|" "400:1." "400: " \
+            "400:\`" "400:_" "400:•" "400:—" "400:\"" "400:(" "400:[" "400:“" \
+            "133: > 1." "200:> " "200: 1"; do
+  n=${spec%%:*}; ch=${spec#*:}
+  run=$(awk -v n="$n" -v c="$ch" 'BEGIN{s="";for(i=0;i<n;i++)s=s c;print s}')
+  for tail in "" "regression: none" "regression: src/foo.ts:12"; do
+    set +e
+    err=$(jq -rn --arg re "$raw_marker" --arg b "${run}${tail}" \
+            '($b|test($re;"i"))' 2>&1 >/dev/null); rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] || [ -n "$err" ]; then
+      echo "✗ V13b raw override marker failed on ${n}x'${ch}' + '${tail}': ${err:-rc=$rc}"
+      bt6_failed=1
+    fi
+  done
+done
+if [ "$bt6_failed" -eq 0 ]; then
+  echo "✓ V13b raw override marker survives 400-char hostile runs (no retry-limit abort)"
+else
+  failed=1
+fi
+
+# V13c. The ROUTING, asserted structurally. The behavioural cases above would
+# also pass if someone re-normalized this term and then re-narrowed it some
+# other way; this pins which body each test actually reads.
+if grep -q '($raw | test($rmark; "i"))' "$CHECKER" \
+   && grep -q '($body | test($find; "i"))' "$CHECKER" \
+   && grep -q '($raw | test($sev; "i"))' "$CHECKER" \
+   && grep -q '($raw | test($clean; "i"))' "$CHECKER"; then
+  echo "✓ V13c routing: marker+severity+clean read RAW, FINDING_RE reads the normalized body"
+else
+  echo "✗ V13c routing changed — the override term or the admission gate moved bodies"
+  failed=1
+fi
+
+fi  # raw-marker extraction guard
 
 echo
 if [ "$failed" -ne 0 ]; then

@@ -118,10 +118,13 @@ fi
 # Measured against the round-5 corpus (tests/regression, 44,000 accept shapes ×
 # 17,250 reject shapes): round 3 loses 3686 shapes round 1 matched, of which
 # 2686 are undeclared narrowings; round 4 loses 3430, of which 2430 are
-# undeclared; round 5 loses 1000, ALL of them negations — the one narrowing the
-# label-position anchor exists to make. Round 4's own corpus reported zero,
-# because it composed every body as `prefix + spelling + " " + wrap(path)` with
-# every prefix ending in a space, so neither defect was expressible in it.
+# undeclared; round 5 loses 1000 which — OVER THAT ALPHABET — are all negations,
+# the one narrowing the label-position anchor exists to make. Every number here
+# describes the enumerated corpus, not markdown: see THE SUPERSET INVARIANT
+# below for the families the alphabet does not reach, and for what is being
+# accepted by leaving them out. Round 4's own corpus reported zero, because it
+# composed every body as `prefix + spelling + " " + wrap(path)` with every
+# prefix ending in a space, so neither defect was expressible in it.
 #
 # The formatting space is bigger than any alternation, so the next reviewer
 # always finds the next spelling. Normalizing first ends that: the alternation
@@ -193,12 +196,36 @@ fi
 # twin silently lost a wrapper to shell quoting while its case count stayed
 # exactly where it was expected to be.
 #
-# It has exactly TWO declared exceptions, both of them round 2's reason for
-# existing and both enumerated in that test: a WORD before the marker (the
-# negations above), and a `:LINE`-like token that is not a plausible path
-# (`12:30 elapsed`). A divergence that is neither is a regression, and the test
-# names it. A tag is for a narrowing someone argued for — never for making a red
-# test go green.
+# IT IS ASSERTED OVER AN ENUMERATED CORPUS, NOT UNIVERSALLY. That distinction is
+# the correction round 6 owes anyone who read the previous wording, which said
+# "exactly TWO declared exceptions" flatly and led a reviewer to treat the
+# invariant as a property of the marker rather than of the test's alphabet.
+# Inside the corpus the claim stands: the divergences carry exactly two declared
+# tags, both of them round 2's reason for existing — a WORD before the marker
+# (the negations above), and a `:LINE`-like token that is not a plausible path
+# (`12:30 elapsed`). A divergence inside the corpus that is neither is a
+# regression, and the test names it. A tag is for a narrowing someone argued for
+# — never for making a red test go green.
+#
+# OUTSIDE the corpus the invariant does not hold, and saying so is cheaper than
+# discovering it again. Independent corpora put the residual at roughly 10,200
+# bodies round 1 matched and this marker misses, and NONE of them are negations.
+# They are whole families the block alphabet and the wrapper classes do not
+# enumerate: unicode leads beyond the three listed (small square, triangle
+# bullet, hyphen bullet, middot, guillemet, arrow, and the warning and cross
+# emoji), paren-wrapped ordered items such as `(1)`, HTML tags such as
+# `<summary>` and `<b>`, strikethrough `~~`, a leading colon, caret or tilde, a
+# zero-width space, and a BOM.
+#
+# ACCEPTED RESIDUAL, deliberately — this list is a boundary, not a to-do. Two
+# reasons, and the second is the load-bearing one. None of these families is
+# attested in the harvested bot traffic this detector runs against. And every
+# addition widens FINDING_RE, which is the SOLE admission gate: the only thing
+# standing between this sweeper and flagging every comment that contains the
+# word. An unmatched shape costs one unswept finding; an admission gate that
+# starts accepting prose costs a sweeper nobody reads, which this file argues
+# twice over is the more expensive failure. Add a family only when a real body
+# turns up that needed it.
 #
 # BACKTRACKING DISCIPLINE. An Oniguruma retry-limit abort is a SILENT FALSE
 # NEGATIVE here, not a slowdown: the jq calls below send stderr to /dev/null, so
@@ -255,8 +282,18 @@ _BLOCK_PREFIX='^[[:blank:]]*(([>|#•–—]|[-*+]|\[[ xX]\]|[0-9]{1,9}[.)])[[:b
 # `[regression: main.go](url)` are all shapes round 1 matched (its `\S+` never
 # looked left) and rounds 2, 3 and 4 all silently dropped, because none of them
 # could express an opening wrapper in front of the marker word at all. Smart
-# quotes and `<`/`>` are in both classes for the same reason: a model that
+# quotes and `<` are in both classes for the same reason: a model that
 # autocorrects `"` to `“` is not writing a different finding.
+#
+# Only the OPENING half of each bracket pair is a member — `(`, `[` and `<`,
+# with no `)`, `]` or `>` anywhere in either class. (An earlier version of this
+# comment said `<`/`>`, describing a class the file has never shipped.) Both
+# positions the class occupies sit IN FRONT of something — the marker word and
+# the path — so a closing bracket never reaches it: the path run
+# `[A-Za-z0-9_./@+-]+` simply stops at one and leaves it in the tail, where
+# nothing needs to strip it. All FOUR smart quotes are listed rather than the
+# two opening ones because autocorrection picks a half from surrounding context
+# and gets it wrong often enough to matter.
 # shellcheck disable=SC2016,SC1112  # a regex, not a shell expansion: the
 # backticks are code-span characters the normalizer strips, and the four smart
 # quotes are CHARACTER-CLASS MEMBERS — punctuation a model wrote around a path,
@@ -266,6 +303,62 @@ _BLOCK_PREFIX='^[[:blank:]]*(([>|#•–—]|[-*+]|\[[ xX]\]|[0-9]{1,9}[.)])[[:b
 _MARKER_CANON='^[*_`"\x27(\[<“”‘’]*regression[*_`]*:([[:blank:]]|[*_`"\x27(\[<“”‘’])*'
 _REGRESSION_MARKER='(^|\n)regression: (?!n/a\b)(?=[^[:space:]]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
 FINDING_RE="([Ff]lagged [0-9]+ issue|\bP[012]\b|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
+# THE SAME MARKER, IN RAW-BODY FORM. Used in exactly one place: the CLEAN
+# override in the jq select below. Never in FINDING_RE.
+#
+# Round 5 applied the marker ABOVE to the normalized body as its own
+# clean-override term, on the reasoning that demoting it to RAW alongside
+# SEVERITY_RE would lose round 3's `- regression: src/foo.ts:12` override. The
+# trap is real — that marker delegates ALL prefix handling to canon, so on a raw
+# body it sees `- regression:` and matches nothing. The conclusion drawn from it
+# was wrong: pointing the term at canon's output hands a SUPPRESSOR-CANCELLING
+# test the entire block alphabet, which is precisely the widening the note above
+# SEVERITY_RE says manufactures false positives.
+#
+# Measured, round 3 vs round 5, over bodies that carry a clean verdict: 76 of
+# 484 suppressor-side shapes flipped from rc=0 to rc=1, and on a 9-prefix ×
+# 8-whole-marker-wrapping grid over "a quoted previous regression line above a
+# clean verdict" round 3 flags 6 of 72 while round 5 flags 72 of 72 — 66 new
+# false positives from one term. The sharpest instance, confirmed end-to-end
+# through both twins including the automerge gate:
+#
+#   - [x] regression: src/foo.ts:12 - fixed in 2a5937e
+#   No issues found. VERDICT: CLEAN
+#
+# A CHECKED checkbox is the universal notation for an ADDRESSED finding, so
+# round 5 declined the merge exactly when the evidence said the finding was
+# resolved. Round 5's own deviation note called the widening "marginal
+# (checkbox, table-pipe, tight bullet, wrapped paths)"; only 20 of the 76 fall
+# in those classes — 44 are whole-marker wrapping and 12 are unicode block
+# markers, so 74% of the deviation sat outside its own declaration.
+#
+# So the override term gets its own raw-capable spelling instead: ROUND 3'S
+# MARKER, VERBATIM out of commit 5bcc1ca, which carried its prefix alternation
+# INTERNALLY and therefore needs no normalizer. Reusing it rather than deriving
+# one is what makes the parity EXACT rather than argued — `- regression:` still
+# overrides, `- [x] regression:` no longer does, and the differential in
+# tests/regression/test_unaddressed_findings.py reports new-flags and
+# lost-overrides against round 3 as zero in both directions.
+#
+# It is a SEVERITY signal, so it now reads the same body every other severity
+# signal reads, and the routing note in the jq select has one fewer exception in
+# it. FINDING_RE keeps reading the NORMALIZED body: that is the admission gate,
+# where widening is safe, and it is where round 5's two genuine wins live
+# (wxa-jake-ai#1054 and #1067, both still flagged).
+#
+# BACKTRACKING: its prefix loop is `([[:space:]]*(>|[-*+]|[0-9]+[.)]|#))*`. Each
+# alternative either consumes exactly one character or is a digit run TERMINATED
+# by `[.)]`, which a digit cannot be — so each iteration's extent is fixed by
+# the input rather than chosen, and there is no partition to enumerate. The loop
+# round 3 was measured dying on was the earlier `(>+|#{1,6}|...)` shape, which
+# this is not. Re-measured here at 400-plus characters, in both twins.
+#
+# shellcheck disable=SC2016  # a regex, not a shell expansion: the backticks are
+# the OPTIONAL code-span character round 3 stepped over in front of a path
+# (`regression: `main.go``, the #1054 shape) and a member of the negated class
+# that keeps the lookahead off it. Silenced on this line only, like the
+# _MARKER_CANON directive above, rather than by a repo-wide setting.
+_REGRESSION_MARKER_RAW='(^|\n)([[:space:]]*(>|[-*+]|[0-9]+[.)]|#))*[[:space:]]*\**regression:\**[[:space:]]*`?(?!n/a\b)(?=[^[:space:]`]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
 # With the header gone from FINDING_RE, CLEAN_RE no longer has to rescue every
 # codex pass — those now never match a finding marker in the first place. What
 # still reaches it is the LOOSE `\bP[012]\b` alternative, which a clean summary
@@ -371,12 +464,16 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 # and it is still missed — closing it means matching bare prose, which is the
 # trade this design deliberately refuses.
 _NOT_EMPTY='(?![[:blank:]]*(none|nothing|n/a|not applicable|no findings|no issues|(0|zero)[[:blank:]]+(finding|issue)s?)\b)[[:blank:]]*[^[:space:]]'
-# Tested against the RAW body. `${_REGRESSION_MARKER}` is deliberately NOT
-# spliced in here any more: it is the one severity signal that must keep seeing
-# the NORMALIZED body, so it is applied as its own term in the jq select below.
-# Splicing it in would have silently narrowed the marker override to bodies
-# whose `regression:` line carries no prefix at all — round 3 overrode CLEAN on
-# `- regression: src/foo.ts:12` and round 5 must not lose that.
+# Tested against the RAW body — every clause here, and the regression marker
+# too. The marker is still applied as its OWN term in the jq select below rather
+# than spliced into this string, but in its `_REGRESSION_MARKER_RAW` spelling:
+# `${_REGRESSION_MARKER}` delegates its prefix handling to canon and matches
+# nothing on a raw body, which is the constraint round 5 read as "this one
+# signal must see the normalized body". The answer is the other way round — give
+# the override term the prefix-carrying marker round 3 shipped, and it reads RAW
+# like everything else here while still overriding `- regression: src/foo.ts:12`.
+# Keeping it a separate term is only so the two spellings stay legible; it is
+# semantically one more alternative in this alternation.
 SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]* issue|VERDICT: REGRESSION)"
 
 # The "last commit" a finding is measured against must be a commit that could
@@ -490,15 +587,19 @@ check_pr() {
   #     but a test that cancels a suppressor flags more by MANUFACTURING false
   #     positives, and eight measured shapes flipped a passing re-review that
   #     merely QUOTED its previous `[P1]` into "do not merge yet".
-  #   $body (normalized) — the regression marker, as its own override term. It
-  #     is the one severity signal whose admission gate is a path shape rather
-  #     than a bare label, so it cannot fire on quoted prose, and round 3
-  #     already overrode CLEAN on `- regression: src/foo.ts:12`. Demoting it to
-  #     RAW along with the rest of SEVERITY_RE would have been a silent loss.
+  #   RAW — the regression marker, as its own override term, in its
+  #     `_REGRESSION_MARKER_RAW` spelling. It is a severity signal, so it reads
+  #     the body every severity signal reads; there is no third rule. Round 5
+  #     pointed this one term at the NORMALIZED body to keep round 3's
+  #     `- regression: ...` override, and bought that one shape by handing a
+  #     suppressor-cancelling test the whole block alphabet — 76 of 484 measured
+  #     suppressor-side shapes flipped to a false "do not merge yet", including
+  #     a CHECKED checkbox recording a fix. The raw spelling keeps the override
+  #     and drops the widening: exact parity with round 3, measured both ways.
   local late_issue
   late_issue=$(printf '%s' "$issue" | jq -r --arg last "$last" \
                  --arg find "$FINDING_RE" --arg clean "$CLEAN_RE" \
-                 --arg sev "$SEVERITY_RE" --arg rmark "$_REGRESSION_MARKER" \
+                 --arg sev "$SEVERITY_RE" --arg rmark "$_REGRESSION_MARKER_RAW" \
                  --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
     def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
     [ .[] | select(.created_at > $last)
@@ -508,7 +609,7 @@ check_pr() {
                    | ($body | test($find; "i"))
                      and ((($raw | test($clean; "i")) | not)
                           or ($raw | test($sev; "i"))
-                          or ($body | test($rmark; "i")))) ]
+                          or ($raw | test($rmark; "i")))) ]
     | .[] | [.created_at, .user.login, "-",
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
