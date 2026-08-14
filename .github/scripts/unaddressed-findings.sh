@@ -141,18 +141,51 @@ fi
 #      this change. The other empty tokens need no naming: they carry neither a
 #      slash nor a dotted extension, so the shape test rejects them already.
 #
-#   2. LABEL POSITION. The marker must OPEN its line, optionally bulleted or
-#      bolded — the same rule LGTM and the `[P2]` labels follow below, and the
-#      line format codex's own prompt mandates (`regression: <file:line> -
-#      <sentence>`). This rejects NEGATED uses, which shape 1 cannot see:
+#   2. LABEL POSITION. The marker must OPEN its line, after nothing but
+#      MARKDOWN BLOCK MARKERS — the same rule LGTM and the `[P2]` labels follow
+#      below, and the line format codex's own prompt mandates
+#      (`regression: <file:line> - <sentence>`). Allowed prefixes, in any
+#      combination and any nesting, each optionally indented:
+#
+#        >   blockquote, nested as `>>` or `> >`
+#        -   bullet, also `*` and `+`
+#        1.  numbered list, also `1)`
+#        #   heading, `#` through `######`
+#        **  bold, around the word itself (`**regression:**`)
+#
+#      so `regression:`, `- regression:`, `1. regression:`, `### regression:`,
+#      `> regression:` and `> 1. **regression:**` all qualify. The FIRST cut of
+#      this anchor allowed only a bullet or bold and silently dropped the other
+#      four — a narrower version of the very bug it shipped alongside, in the
+#      fleet's only post-merge findings detector. Bots write findings as
+#      numbered lists and under headings routinely; two independent reviews
+#      caught the drop before it merged.
+#
+#      What the prefix alphabet deliberately excludes is WORDS, and that is the
+#      whole mechanism for rejecting NEGATED uses, which shape 1 cannot see:
 #      codex's review OF THIS CHANGE produced "No regression: package.json is
 #      unchanged", a clean summary CLEAN_RE does not recognise (it knows only
 #      the plural "No regressions found") and that SEVERITY_RE would then
-#      override anyway — a false "do not merge yet" on a pass. Anchoring
-#      answers every negation phrasing at once ("No regression:", "Not a
-#      regression:", "the diff shows no regression: main.go:267 is covered")
-#      without parsing English negation, which the note below explains does not
-#      converge.
+#      override anyway — a false "do not merge yet" on a pass. Every negation
+#      phrasing puts a word between the line start and the marker ("No ",
+#      "Not a ", "the diff shows no "), so all of them are answered at once —
+#      including quoted and numbered ones ("> No regression:", "1. No
+#      regression:") — without parsing English negation, which the note below
+#      explains does not converge.
+#
+#      The prefix loop repeats SINGLE characters (`>`, `#`) rather than runs
+#      (`>+`, `#{1,6}`), and holds trailing whitespace outside the loop. This is
+#      not style. A repeated group whose body also repeats is the classic
+#      `(a+)+` shape: a run of N markers has 2^(N-1) partitions, and Oniguruma
+#      walks them all before failing. Measured with `>+`/`#{1,6}` on this exact
+#      marker, a body of 20 `>` then `regression: none` aborts jq with "Regex
+#      failure: retry-limit-in-match over" — and because the jq calls below send
+#      stderr to /dev/null, the abort empties the finding list and the sweeper
+#      reports "no unaddressed findings". A silent false negative, in the
+#      detector whose entire job is to not have those. Repeating one character
+#      makes the parse unique: iterations equal marker characters, nothing to
+#      backtrack over. Runs of `>` are ordinary in bot comments (nested quoted
+#      replies; a pasted conflict marker is seven).
 #
 # Both observed burn bodies satisfy the anchor: #1054 opens with the marker,
 # #1067 puts it on its own line beneath a bold header.
@@ -160,7 +193,7 @@ fi
 # Backticks are optional and sit OUTSIDE the captured path; `:LINE` is optional.
 # Shared with SEVERITY_RE below so the admission gate and the clean-marker
 # override can never disagree about what a regression line looks like.
-_REGRESSION_MARKER='(^|\n)[[:space:]]*([-*+][[:space:]]*)?\**regression:\**[[:space:]]*`?(?!n/a\b)(?=[^[:space:]`]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
+_REGRESSION_MARKER='(^|\n)([[:space:]]*(>|[-*+]|[0-9]+[.)]|#))*[[:space:]]*\**regression:\**[[:space:]]*`?(?!n/a\b)(?=[^[:space:]`]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
 FINDING_RE="([Ff]lagged [0-9]+ issue|\bP[012]\b|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
 # With the header gone from FINDING_RE, CLEAN_RE no longer has to rescue every
 # codex pass — those now never match a finding marker in the first place. What

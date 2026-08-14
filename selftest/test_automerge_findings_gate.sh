@@ -33,6 +33,13 @@
 #   V5. vendored detector: root-level extensionless `Dockerfile:12` ⇒ rc=1
 #       (the shape the OLD marker caught — the fix must not trade one for the
 #       other)
+#   V6. vendored detector: every markdown prefix in label position ⇒ rc=1
+#       (bullet, `1.`, `1)`, `###`, `>`, nested and combined; the four the
+#       V3-V5 anchor dropped)
+#   V7. vendored detector: negated prose and empty buckets ⇒ rc=0, bare and
+#       behind those same prefixes (the anchor's whole job)
+#   V8. the prefix loop does not backtrack catastrophically — a long run of
+#       `>` or `#` must not abort the regex engine
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_findings_gate.sh
@@ -371,6 +378,114 @@ if [ "$v5" -eq 1 ]; then
 else
   echo "✗ V5 vendored detector rc=$v5 on 'regression: Dockerfile:12' — expected 1; the widening traded one blind spot for another"
   failed=1
+fi
+
+# ---------------------------------------------------------------------------
+# V6-V8. Markdown list, heading and blockquote prefixes in LABEL POSITION.
+#
+# The V3-V5 fix widened the path shape and, to reject negated prose, anchored
+# the marker to the start of its line. That anchor allowed only a `-`/`*`/`+`
+# bullet and `**` bold — and silently dropped four prefixes the ORIGINAL
+# unanchored marker matched, all of which real bot findings use: `1.` and `1)`
+# numbered lists, `###` headings, and `>` blockquotes. A narrower version of the
+# same blind spot, in the gate's sole admission test.
+#
+# V6 pins the shapes that must be admitted, V7 the prose that must not — the
+# anchor's whole job, re-checked with the wider prefix alphabet, including the
+# negations wearing those same prefixes ("> No regression:", "1. No
+# regression:"). The mechanism is that block markers are not WORDS: every
+# negation phrasing puts a word between line start and marker.
+#
+# V8 pins the loop SHAPE. `([[:space:]]*(>+|#{1,6}|...))*` — a repeated group
+# whose body also repeats — is the classic `(a+)+`: a run of N markers has
+# 2^(N-1) partitions and Oniguruma walks them all. With `>+`/`#{1,6}` in place,
+# 20 `>` then `regression: none` aborts jq with "Regex failure:
+# retry-limit-in-match over". The detector sends jq's stderr to /dev/null, so
+# that abort empties the finding list and the gate reads CLEAN — it would arm
+# auto-merge on hostile input. jq is driven directly here because at detector
+# level the abort and a genuine pass are the same rc and the same output.
+# ---------------------------------------------------------------------------
+mk_issue() {  # $1 = body, $2 = login (default claude[bot])
+  jq -n --arg b "$1" --arg u "${2:-claude[bot]}" \
+    '[{created_at:"2026-01-01T01:00:00Z",user:{login:$u},body:$b}]' > "$FX/issue.json"
+}
+expect_rc() {  # $1 = expected rc, $2 = case name, $3 = body, $4 = login
+  mk_issue "$3" "${4:-claude[bot]}"
+  set +e
+  bash "$CHECKER" --fixture "$FX" o/r 1 >/dev/null 2>&1; local got=$?
+  set -e
+  if [ "$got" -eq "$1" ]; then
+    echo "✓ $2"
+  else
+    echo "✗ $2 — rc=$got, expected $1"
+    failed=1
+  fi
+}
+
+# V6. MUST ACCEPT: every markdown prefix a bot may put in front of the marker.
+expect_rc 1 "V6a  bare                     regression: src/foo.ts:12"        'regression: src/foo.ts:12'
+expect_rc 1 "V6b  dash bullet              - regression: ..."               '- regression: src/foo.ts:12'
+expect_rc 1 "V6c  star bullet + bold       * **regression:** ..."           '* **regression:** src/foo.ts:12'
+expect_rc 1 "V6d  numbered list            1. regression: ..."              '1. regression: src/foo.ts:12'
+expect_rc 1 "V6e  paren-numbered list      1) regression: ..."              '1) regression: src/foo.ts:12'
+expect_rc 1 "V6f  heading                  ### regression: ..."             '### regression: src/foo.ts:12'
+expect_rc 1 "V6g  blockquote               > regression: ..."               '> regression: src/foo.ts:12'
+expect_rc 1 "V6h  nested blockquote        >> regression: ..."              '>> regression: src/foo.ts:12'
+expect_rc 1 "V6i  spaced nested quote      > > regression: ..."             '> > regression: src/foo.ts:12'
+expect_rc 1 "V6j  quote+number+bold        > 1. **regression:** ..."        '> 1. **regression:** src/foo.ts:12'
+expect_rc 1 "V6k  indented bullet          '  - regression: ...'"           '  - regression: src/foo.ts:12'
+expect_rc 1 "V6l  h1                       # regression: ..."               '# regression: src/foo.ts:12'
+expect_rc 1 "V6m  h6                       ###### regression: ..."          '###### regression: src/foo.ts:12'
+expect_rc 1 "V6n  prefix mid-body          header\n\n### regression: ..."   '**Second pass**
+
+### regression: src/foo.ts:12'
+expect_rc 1 "V6o  #1054 backticked pathless" 'regression: `tests/ci/prod-model-health-author-scope.test.ts` — no test pins the cron value'
+expect_rc 1 "V6p  root extensionless       regression: Dockerfile:12"       'regression: Dockerfile:12 - the base image is stale'
+expect_rc 1 "V6q  root extensionless       regression: Makefile:8"          'regression: Makefile:8 - the target is no longer built'
+
+# V7. MUST REJECT: negated prose and empty buckets, bare and behind the new
+# prefixes. Bot login, since these ride the issue-comment path.
+expect_rc 0 "V7a  negation                 No regression: package.json ..."  'No regression: package.json is unchanged' 'github-actions[bot]'
+expect_rc 0 "V7b  negation                 Not a regression: main.go:267 ..." 'Not a regression: main.go:267 is covered' 'github-actions[bot]'
+expect_rc 0 "V7c  mid-sentence negation    ...shows no regression: main.go:267" 'the diff shows no regression: main.go:267 is covered' 'github-actions[bot]'
+expect_rc 0 "V7d  quoted negation          > No regression: ..."            '> No regression: package.json is unchanged' 'github-actions[bot]'
+expect_rc 0 "V7e  numbered negation        1. No regression: ..."           '1. No regression: package.json is unchanged' 'github-actions[bot]'
+expect_rc 0 "V7f  heading negation         ### Not a regression: ..."       '### Not a regression: main.go:267 is covered' 'github-actions[bot]'
+expect_rc 0 "V7g  empty bucket             regression: none"                'regression: none' 'github-actions[bot]'
+expect_rc 0 "V7h  empty bucket             regression: n/a"                 'regression: n/a' 'github-actions[bot]'
+expect_rc 0 "V7i  empty bucket             regression: nothing to report"   'regression: nothing to report' 'github-actions[bot]'
+expect_rc 0 "V7j  not a path               regression: 3.2 seconds slower"  'regression: 3.2 seconds slower' 'github-actions[bot]'
+expect_rc 0 "V7k  time of day              regression: 12:30 elapsed"       'regression: 12:30 elapsed' 'github-actions[bot]'
+expect_rc 0 "V7l  quoted empty bucket      > regression: none"              '> regression: none' 'github-actions[bot]'
+expect_rc 0 "V7m  heading empty bucket     ### regression: n/a"             '### regression: n/a' 'github-actions[bot]'
+
+# V8. The prefix loop must not backtrack catastrophically. Read the shipped
+# marker out of the detector rather than restating it — a copy here would pass
+# forever while the real one rotted.
+marker=$(sed -n "s/^_REGRESSION_MARKER='\(.*\)'\$/\1/p" "$CHECKER")
+if [ -z "$marker" ]; then
+  echo "✗ V8 could not extract _REGRESSION_MARKER from $CHECKER"
+  failed=1
+else
+  bt_failed=0
+  for spec in "60:>" "60:#" "40:*" "200:>"; do
+    n=${spec%%:*}; ch=${spec#*:}
+    run=$(awk -v n="$n" -v c="$ch" 'BEGIN{s="";for(i=0;i<n;i++)s=s c;print s}')
+    set +e
+    err=$(jq -rn --arg re "$marker" --arg b "${run}regression: none" \
+            '($b|test($re;"i"))' 2>&1 >/dev/null); rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] || [ -n "$err" ]; then
+      echo "✗ V8 regex failed on ${n}x'${ch}' prefix run: ${err:-rc=$rc}"
+      bt_failed=1
+    fi
+  done
+  if [ "$bt_failed" -eq 0 ]; then
+    echo "✓ V8 prefix loop survives long marker runs (no retry-limit abort)"
+  else
+    echo "  ↳ the loop backtracks: repeat SINGLE characters (>, #), not runs (>+, #{1,6})"
+    failed=1
+  fi
 fi
 
 echo
