@@ -80,7 +80,10 @@ trap 'rm -rf "$T"' EXIT
 # whether a maintainer keeps it on two lines or one — a -A line window here
 # would false-fail on a correct one-line consolidation, and this comment used
 # to promise no such window while the line below it had one.
-S1_SELECT=$(tr '\n' ' ' < "$CHECKER" | grep -oE 'select\(\.in_reply_to_id == null[^]]*\]' | head -1)
+# `|| true`: under `set -o pipefail` a no-match grep exits 1, which would ABORT
+# the suite here instead of letting S1 report ✗ — an empty S1_SELECT is a
+# finding for S1 to print, not a reason to stop testing.
+S1_SELECT=$(tr '\n' ' ' < "$CHECKER" | grep -oE 'select\(\.in_reply_to_id == null[^]]*\]' | head -1 || true)
 if grep -q 'in_reply_to_id == null' "$CHECKER" \
    && grep -qF '(.user.login | . == null or endswith("[bot]"))' "$CHECKER" \
    && printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+or[[:space:]]+\(\.user\.login \|' \
