@@ -57,8 +57,18 @@
 #       window on every run
 #   A5. an unreadable timeline fails CLOSED (an unreadable anchor is not an
 #       absent one — same posture as the three sibling reads)
-#   A6. a PR with no ready/reopen event behaves exactly as before the fix
-#       (empty c4 must not poison the anchor set)
+#   A6. a PR with no ready/reopen event and an aged-out creation behaves
+#       exactly as before the fix (empty c4 must not poison the anchor set)
+#   A7. THE `opened` DOOR (review round 2): a recently-CREATED PR with old
+#       commits and no ready event sleeps the remainder — `opened` is in
+#       the same review-lane `types:` list, so a branch whose commits idled
+#       before the PR was opened non-draft is #1512 through a different
+#       door; c5 (creation time, from the event payload) anchors it
+#   A8. over-correction guard for c5: an aged-out creation time does not
+#       hold the gate shut (same point-in-time rule as A2)
+#   S3. structural: PR_CREATED_AT is bound from the event payload in the
+#       step's env block — c5 reads an env var, and an unbound var is an
+#       empty c5 forever, silently reverting A7 to the pre-fix behavior
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_quiet_anchor.sh
@@ -114,6 +124,20 @@ else
   failed=1
 fi
 
+# S3. The c5 anchor reads $PR_CREATED_AT, and the run block is deliberately
+# ${{ }}-free — so the binding lives in the step's env block, and dropping
+# it there leaves c5 empty on every run: A7 silently reverts to pre-fix
+# behavior with nothing red. Pin the binding in the WORKFLOW, not the
+# extracted shell.
+# shellcheck disable=SC2016  # the ${{ }} is the literal workflow-expression
+# text being searched for, not a shell expansion this test wants performed.
+if grep -q 'PR_CREATED_AT: ${{ github.event.pull_request.created_at }}' "$WF"; then
+  echo "✓ S3 PR_CREATED_AT is bound from the event payload in the step env"
+else
+  echo "✗ S3 PR_CREATED_AT env binding missing — c5 is empty forever and the opened trigger is unanchored"
+  failed=1
+fi
+
 # ---------------------------------------------------------------------------
 # Stub environment — same shape as test_automerge_findings_gate.sh.
 #
@@ -131,7 +155,7 @@ if [ "$1" = "-u" ] && [ "$2" = "-d" ]; then
   case "$3" in
     2026-01-01T00:00:00Z) echo 1000000 ;;
     2026-01-01T02:00:00Z) echo 1006800 ;;
-    *) echo "date-stub: unmapped timestamp '$3'" >&2; exit 1 ;;
+    *) echo "date-stub: unmapped timestamp '$3' — new fixture timestamps must be added to the case map in this stub (see the fake-clock note above the stub in this file)" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -196,11 +220,12 @@ EOF
   echo '[]' > "$CASE/timeline.json"
   echo 0 > "$CASE/checker_rc"
 }
-exec_gate() {
+exec_gate() {  # $1 = quiet minutes, $2 = PR_CREATED_AT (optional; empty = unset-like)
   set +e
   PATH="$T/bin:$PATH" T_DIR="$CASE" T_NOW="$CASE/now" \
     GITHUB_OUTPUT="$CASE/output" GITHUB_REPOSITORY="o/r" \
     PR=1 PR_URL="https://example.invalid/pr/1" QUIET_MINUTES="$1" \
+    PR_CREATED_AT="${2:-}" \
     bash "$T/qf.sh" > "$CASE/stdout" 2>&1
   RC=$?
   set -e
@@ -247,14 +272,16 @@ else
 fi
 
 # A3. `reopened` re-fires the review lanes on the same `types:` list, so it is a
-# review trigger too and must anchor identically.
+# review trigger too and must anchor identically — including the arm at the
+# end: asserting only the sleep would pass a gate that waited correctly and
+# then failed to write clear=1 (review round 2's catch on this very case).
 new_case
 timeline_with reopened 2026-01-01T02:00:00Z
 exec_gate 20
-if [ "$RC" -eq 0 ] && grep -q '^1000$' "$CASE/sleep.log"; then
-  echo "✓ A3 a recent reopened anchors the clock the same way"
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && grep -q '^1000$' "$CASE/sleep.log"; then
+  echo "✓ A3 a recent reopened anchors the clock the same way (and still arms)"
 else
-  echo "✗ A3 reopened did not anchor — rc=$RC sleeps=[$(tr '\n' ' ' < "$CASE/sleep.log")]"
+  echo "✗ A3 reopened did not anchor+arm — rc=$RC sleeps=[$(tr '\n' ' ' < "$CASE/sleep.log")] output=[$(tr '\n' ' ' < "$CASE/output")]"
   failed=1
 fi
 
@@ -296,18 +323,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# A6. A PR opened non-draft and never reopened has no such event. `max // empty`
-# yields nothing, the empty line is stripped, and the anchor set is exactly what
-# it was before the fix. Pins that the added read cannot poison the common case.
+# A6. A PR with no ready/reopen event and an AGED-OUT creation time. `max //
+# empty` yields no c4, c5 has aged out, the empty line is stripped, and the
+# anchor set decides exactly as before the fix. Pins that the added reads
+# cannot poison the common case (a mature PR's labeled/synchronize re-runs).
 # ---------------------------------------------------------------------------
 new_case
 echo '[]' > "$CASE/timeline.json"
-exec_gate 20
+exec_gate 20 2026-01-01T00:00:00Z
 if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && grep -q '^reason=quiet+clean$' "$CASE/output" \
    && [ ! -s "$CASE/sleep.log" ]; then
-  echo "✓ A6 no ready/reopen event leaves the pre-fix anchor set intact"
+  echo "✓ A6 no ready/reopen event + aged-out creation leaves the pre-fix decision intact"
 else
-  echo "✗ A6 an empty timeline changed the outcome — rc=$RC output=[$(tr '\n' ' ' < "$CASE/output")] sleeps=[$(tr '\n' ' ' < "$CASE/sleep.log")]"
+  echo "✗ A6 the added anchors changed the outcome — rc=$RC output=[$(tr '\n' ' ' < "$CASE/output")] sleeps=[$(tr '\n' ' ' < "$CASE/sleep.log")]"
+  failed=1
+fi
+
+# ---------------------------------------------------------------------------
+# A7. THE `opened` DOOR (review round 2, the incomplete-fix finding). Commits
+# idle since T0; the PR is CREATED non-draft at T1 = now-200s; no ready or
+# reopen event exists because the PR was never a draft. `opened` fires the
+# review lanes and this gate in the same instant — without c5 the gate reads
+# only pre-aged anchors and arms immediately, #1512 through a different door.
+# With c5 the creation time IS the anchor: sleep the 1000s remainder.
+# ---------------------------------------------------------------------------
+new_case
+echo '[]' > "$CASE/timeline.json"
+exec_gate 20 2026-01-01T02:00:00Z
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && grep -q '^1000$' "$CASE/sleep.log"; then
+  echo "✓ A7 a recently-created PR (opened trigger) anchors on creation: slept the 1000s remainder"
+else
+  echo "✗ A7 the opened door is unanchored — rc=$RC sleeps=[$(tr '\n' ' ' < "$CASE/sleep.log")] output=[$(tr '\n' ' ' < "$CASE/output")]"
+  echo "     commits idled before a non-draft open ⇒ the gate arms as the review lanes start"
+  failed=1
+fi
+
+# ---------------------------------------------------------------------------
+# A8. Over-correction guard for c5, same rule as A2: creation time is a
+# point-in-time value, so once it ages out it must not delay any later run.
+# (A6 already covers this composed with an empty timeline; this pins it with
+# a ready event present, so the two immutable anchors age out independently.)
+# ---------------------------------------------------------------------------
+new_case
+timeline_with ready_for_review 2026-01-01T00:00:00Z
+exec_gate 20 2026-01-01T00:00:00Z
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ ! -s "$CASE/sleep.log" ]; then
+  echo "✓ A8 aged-out creation + aged-out ready event do not hold the gate shut"
+else
+  echo "✗ A8 an old creation time still delayed the arm — rc=$RC sleeps=[$(tr '\n' ' ' < "$CASE/sleep.log")]"
   failed=1
 fi
 

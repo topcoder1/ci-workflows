@@ -1035,11 +1035,14 @@ jobs:
       #      is a deliberate code-level finding), the newest top-level
       #      [bot] comment that is not this workflow's own marker comment
       #      or pr-classify chatter (a gate that counts its own sticky
-      #      comment as review activity never opens), and the newest
-      #      `ready_for_review`/`reopened` event — the trigger that STARTS
-      #      a round of review, without which the clock is pre-expired on
-      #      exactly the event that begins one (wxa_vpn#1512; see c4 in
-      #      read_anchor for the measurement). Sleeping here is
+      #      comment as review activity never opens), the newest
+      #      `ready_for_review`/`reopened` event, and the PR's own creation
+      #      time — the triggers that START a round of review, without
+      #      which the clock is pre-expired on exactly the events that
+      #      begin one (wxa_vpn#1512; see c4/c5 above read_anchor for the
+      #      measurement — `opened` is in the same `types:` list, so a
+      #      branch whose commits idled before the PR was opened non-draft
+      #      is the same hole through a different door). Sleeping here is
       #      safe: callers run concurrency cancel-in-progress per PR, so a
       #      new push replaces this run and restarts the clock, and the
       #      arm below binds --match-head-commit so a moved head can never
@@ -1084,6 +1087,10 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           QUIET_MINUTES: ${{ inputs.findings_quiet_minutes }}
+          # The c5 anchor (see read_anchor). From the event payload rather
+          # than an API read; immutable, so a later labeled/synchronize
+          # re-run sees the same fixed value aged out.
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
         run: |
           set -euo pipefail
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
@@ -1136,15 +1143,45 @@ jobs:
           # These are POINT-IN-TIME event timestamps, not "now", so a later
           # `labeled` run re-reads the same fixed value and sees it age out
           # normally — the gate cannot be held shut by its own re-runs. A
-          # PR opened non-draft and never reopened has no such event, `max`
-          # yields empty, and the anchor set is exactly what it is today.
+          # PR opened non-draft and never reopened contributes no c4; its
+          # `opened` trigger is anchored by c5 (creation time) below.
           #
           # Fail-closed like every sibling read: `issues/{n}/timeline` is
           # already load-bearing in this job (the detector fetched below
           # reads issues/{n}/comments fatally), so an unreadable timeline
           # is an unreadable anchor, not an absent one.
+          #
+          # c4 and c5 are IMMUTABLE, so they are resolved ONCE, outside the
+          # wait loop — historical timeline events and the PR's creation
+          # time cannot change while this run sleeps, and a long timeline
+          # costs --paginate round-trips on every wake if read in-loop. The
+          # one way a NEW review trigger can appear mid-sleep is a fresh
+          # ready_for_review event, and that event's own run replaces this
+          # one via the callers' cancel-in-progress concurrency groups, so
+          # nothing is missed by not re-reading.
+          #
+          # c5 — the PR's creation time — anchors the `opened` trigger:
+          # it is in the same review-lane `types:` list as ready_for_review,
+          # so a branch whose commits idled before the PR was opened
+          # NON-draft arrives with c1 pre-aged and would otherwise arm at
+          # the instant the reviews start — wxa_vpn#1512's hole through a
+          # different door. It comes from the event payload (no API read);
+          # an empty value (defensive — every pull_request payload carries
+          # created_at) simply contributes no anchor.
+          timeline=$(retry gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/timeline?per_page=100" --paginate) || {
+            echo "::error::could not read the PR timeline (the ready/reopen anchor) after retries — refusing to arm auto-merge (fail closed)."
+            exit 1
+          }
+          c4=$(printf '%s' "$timeline" | jq -rs '[(add // [])[]
+                | select(.event == "ready_for_review" or .event == "reopened")
+                | .created_at] | max // empty') || {
+            echo "::error::could not parse the PR timeline — refusing to arm auto-merge (fail closed)."
+            exit 1
+          }
+          c5="${PR_CREATED_AT:-}"
+
           read_anchor() {
-            local commits inline issue timeline c1 c2 c3 c4
+            local commits inline issue c1 c2 c3
             commits=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits?per_page=100" --paginate) || return 1
             c1=$(printf '%s' "$commits" | jq -rs '[(add // [])[] | select((.parents | length) < 2) | .commit.committer.date] | max // empty') || return 1
             inline=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments?per_page=100" --paginate) || return 1
@@ -1154,18 +1191,14 @@ jobs:
                   | select(((.user.login // "") | endswith("[bot]")))
                   | select(((.body // "") | test("<!-- (claude-author-automerge|pr-classify)")) | not)
                   | .created_at] | max // empty') || return 1
-            timeline=$(retry gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/timeline?per_page=100" --paginate) || return 1
-            c4=$(printf '%s' "$timeline" | jq -rs '[(add // [])[]
-                  | select(.event == "ready_for_review" or .event == "reopened")
-                  | .created_at] | max // empty') || return 1
-            printf '%s\n%s\n%s\n%s\n' "$c1" "$c2" "$c3" "$c4" | grep -v '^$' | sort | tail -1
+            printf '%s\n%s\n%s\n%s\n%s\n' "$c1" "$c2" "$c3" "$c4" "$c5" | grep -v '^$' | sort | tail -1
           }
 
           waited=0
           cap=$(( QUIET_S * 3 ))
           while :; do
             anchor=$(read_anchor) || {
-              echo "::error::could not read the quiet-period anchors (commits/comments) after retries — refusing to arm auto-merge (fail closed)."
+              echo "::error::could not read the quiet-period anchors (commits/inline/issue comments) after retries — refusing to arm auto-merge (fail closed)."
               exit 1
             }
             # SHAPE, not just emptiness — an error body that leaks through
