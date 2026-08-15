@@ -75,12 +75,16 @@ trap 'rm -rf "$T"' EXIT
 # `and`, no comment can satisfy both (a reply is not a non-reply), late_inline
 # is always empty, and the sweep passes every PR. R3/R5 catch that at runtime;
 # S1 is the structural claim, so it must not certify a shape it did not check.
-# Each piece is grepped INDEPENDENTLY, not through a -A line window: the
-# window broke as soon as the arms spanned a different number of lines.
+# LAYOUT-INDEPENDENT on purpose: the select is read with newlines folded to
+# spaces (`tr`), so the connector test sees the whole expression regardless of
+# whether a maintainer keeps it on two lines or one — a -A line window here
+# would false-fail on a correct one-line consolidation, and this comment used
+# to promise no such window while the line below it had one.
+S1_SELECT=$(tr '\n' ' ' < "$CHECKER" | grep -oE 'select\(\.in_reply_to_id == null[^]]*\]' | head -1)
 if grep -q 'in_reply_to_id == null' "$CHECKER" \
    && grep -qF '(.user.login | . == null or endswith("[bot]"))' "$CHECKER" \
-   && grep -A1 'in_reply_to_id == null$' "$CHECKER" | grep -q '^[[:space:]]*or (\.user\.login |' \
-   && ! grep -q 'in_reply_to_id == null.*\band\b' "$CHECKER"; then
+   && printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+or[[:space:]]+\(\.user\.login \|' \
+   && ! printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+and\b'; then
   echo "✓ S1 narrowing is 'not a reply OR (unknown author OR bot)' — one login pipeline, joined by or"
 else
   echo "✗ S1 narrowing shape missing or rewritten — expected 'in_reply_to_id == null' joined by 'or' to ONE login pipeline '(.user.login | . == null or endswith(\"[bot]\"))'"

@@ -655,7 +655,7 @@ check_pr() {
                      and ((($raw | test($clean; "i")) | not)
                           or ($raw | test($sev; "i"))
                           or ($raw | test($rmark; "i")))) ]
-    | .[] | [.created_at, (.user.login // "-"), "-",
+    | .[] | [.created_at, .user.login, "-",
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
   local all
