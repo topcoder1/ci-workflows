@@ -83,20 +83,47 @@ trap 'rm -rf "$T"' EXIT
 # `|| true`: under `set -o pipefail` a no-match grep exits 1, which would ABORT
 # the suite here instead of letting S1 report ✗ — an empty S1_SELECT is a
 # finding for S1 to print, not a reason to stop testing.
-S1_SELECT=$(tr '\n' ' ' < "$CHECKER" | grep -oE 'select\(\.in_reply_to_id == null[^]]*\]' | head -1 || true)
-# Three conditions, each with a DISTINCT job — do not fold one into another:
+#
+# The extract runs from the reply-select's opener to ITS OWN terminator,
+# `"))) ]` — endswith("[bot]") closes with `")`, the pipeline `)`, the select
+# `)`, then the array `]`. Both anchors are UNIQUE in the file (S1b below
+# pins that), so a sed capture between them is exact. Two shapes were tried
+# and rejected: `[^]]*\]` stopped INSIDE `"[bot]"` at the first `]` and the
+# connector tests ran against a fragment (round 8's catch); a paren-walking
+# `[^)]*(\)[^)]*)*` overshot into late_issue's select and S1 would have been
+# quietly inspecting the WRONG select — the greedy trap in the other
+# direction. Uniqueness of both anchors is what makes this one exact.
+S1_SELECT=$(tr '\n' ' ' < "$CHECKER" \
+  | sed -nE 's/.*(select\(\.in_reply_to_id == null.*"\)\)\) \]).*/\1/p' | head -1 || true)
+# S1b. The exactness of that extract rests on both anchors being unique. If a
+# second `select(.in_reply_to_id == null` or a second `"))) ]` ever appears,
+# the capture silently widens and S1 tests a superset — so pin the counts.
+if [ "$(grep -c 'select(.in_reply_to_id == null' "$CHECKER")" -eq 1 ] \
+   && [ "$(tr '\n' ' ' < "$CHECKER" | grep -oF '"))) ]' | wc -l | tr -d ' ')" -eq 1 ]; then
+  echo "✓ S1b the extract's opener and terminator are each unique in the checker"
+else
+  echo "✗ S1b the extract anchors are no longer unique — S1_SELECT may span the wrong select"
+  failed=1
+fi
+# Three conditions, each with a DISTINCT job — do not fold one into another.
+# ALL THREE read S1_SELECT, never $CHECKER: the prose above the select quotes
+# the pipeline verbatim, so a file-wide grep would keep passing on the COMMENT
+# after the real select was rewritten (round 8's third catch).
 #   (a) the login pipeline's exact inner spelling: type-guard FIRST, then the
 #       bot test. Inner order is load-bearing (a non-string reaching endswith
 #       is the swallowed type error); `type != "string"` rather than `== null`
 #       so a non-null non-string login takes the safe path too.
 #   (b) the OUTER connector between the reply test and that pipeline is `or`,
-#       read from the newline-folded select so layout cannot matter.
+#       read from the newline-folded select so layout cannot matter. The `\|`
+#       is ERE's escaped literal pipe (the `|` in `.user.login |`) — verified
+#       on BSD grep, GNU grep and ugrep to match a literal and NOT to split
+#       into an empty alternation.
 #   (c) and it is not `and` — with `and` no comment can satisfy "is a reply"
 #       and "is not a reply", late_inline is always empty, and every PR passes.
 # (S1_SELECT being non-empty already proves the reply test is present, so
 # there is no separate substring check — one that only restated (b) invited a
 # reader to drop (b) as redundant, and (b) is the connector check.)
-if grep -qF '(.user.login | type != "string" or endswith("[bot]"))' "$CHECKER" \
+if printf '%s' "$S1_SELECT" | grep -qF '(.user.login | type != "string" or endswith("[bot]"))' \
    && printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+or[[:space:]]+\(\.user\.login \|' \
    && ! printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+and\b'; then
   echo "✓ S1 narrowing is 'not a reply OR (non-string author OR bot)' — one login pipeline, joined by or"
@@ -220,6 +247,16 @@ run_case 1 "R7 a null-user issue comment does not silence a bot finding (rc=1)" 
 # count and unknown authors therefore do).
 run_case 0 "R8 a null-user issue comment alone is not a finding (rc=0)" '[]' '[
   {"created_at":"'"$AFTER"'","user":null,
+   "body":"- [P1] Token check is skippable — auth.py:31"}]'
+
+# R9. The top-level mirror of R2c: an INTEGER login on an issue comment must
+# not abort the jq and silence a genuine bot finding beside it. `// ""` only
+# rescued null/false, so an integer sailed into endswith — same swallowed
+# type error as R7, through a different value.
+run_case 1 "R9 a non-string-login issue comment does not silence a bot finding (rc=1)" '[]' '[
+  {"created_at":"'"$AFTER"'","user":{"login":12345},
+   "body":"thanks, closing the loop"},
+  {"created_at":"'"$AFTER"'","user":{"login":"github-actions[bot]"},
    "body":"- [P1] Token check is skippable — auth.py:31"}]'
 
 echo
