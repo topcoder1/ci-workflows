@@ -46,6 +46,12 @@
 #       reply" — REST omits the field, but a cached/proxied payload may
 #       null it) ⇒ still flagged; pins that a `has()` rewrite cannot split
 #       the two spellings
+#   R7. TOP-LEVEL crash guard: one null-user issue comment must not abort
+#       the jq program and silence every other top-level finding (with
+#       stderr discarded, that abort read as "no findings" — exit 0)
+#   R8. direction pin: a null-user TOP-LEVEL comment falls to that path's
+#       default (only KNOWN bots count), the mirror of R2b on the inline
+#       path (default is to count, so unknown authors do)
 #
 # Run from the repo root:
 #   bash selftest/test_findings_reply_narrowing.sh
@@ -60,10 +66,13 @@ trap 'rm -rf "$T"' EXIT
 # A rewrite to `has("in_reply_to_id") | not` would split absent from null (R5
 # and R6 pin the behavior, this names the intended spelling); dropping the bot
 # escape would eat R2 silently on fixtures that never exercise bot replies;
-# dropping the unknown-author arm would eat R2b the same way.
+# dropping the unknown-author arm would eat R2b the same way. Each arm is
+# grepped INDEPENDENTLY, not through a -A line window: the window broke as
+# soon as the arms spanned a different number of lines, and R1-R6 already
+# prove the arms sit in the same select — this only names the spelling.
 if grep -q 'in_reply_to_id == null' "$CHECKER" \
-   && grep -A2 'in_reply_to_id == null' "$CHECKER" | grep -q '\.user\.login == null' \
-   && grep -A2 'in_reply_to_id == null' "$CHECKER" | grep -q 'endswith("\[bot\]")'; then
+   && grep -qF '(.user.login == null)' "$CHECKER" \
+   && grep -qF '(.user.login | endswith("[bot]"))' "$CHECKER"; then
   echo "✓ S1 narrowing is 'not a reply OR unknown author OR a bot' (all three arms present)"
 else
   echo "✗ S1 narrowing shape missing or rewritten — expected in_reply_to_id == null, a login == null arm, and a [bot] escape"
@@ -77,22 +86,27 @@ AFTER='2026-01-01T01:00:00Z'
 printf '{"merged_at": null, "last_commit": "%s"}' "$LAST" > "$FX/meta.json"
 echo '[]' > "$FX/issue.json"
 
-# Runs the checker on an inline.json fixture and asserts the exit code.
-# Leaves the report in $OUT so callers can additionally assert on its CONTENT
-# (R4 does) without hand-rolling a second harness.
-run_case() {  # $1 expected-rc, $2 name, $3 inline-json
+# Runs the checker on inline.json (+ optional issue.json) fixtures and asserts
+# the exit code. ALWAYS returns 0: this file runs under `set -e`, so a nonzero
+# return from a bare `run_case` call would abort the suite at the first
+# failing case and silently skip every later one — the per-case verdict lives
+# in `failed` (the suite's exit), and the report stays in $OUT so callers can
+# additionally assert on its CONTENT (R4b does) without hand-rolling a second
+# harness.
+run_case() {  # $1 expected-rc, $2 name, $3 inline-json, $4 issue-json (optional)
   printf '%s' "$3" > "$FX/inline.json"
+  printf '%s' "${4:-[]}" > "$FX/issue.json"
   set +e
   OUT=$(bash "$CHECKER" --fixture "$FX" o/r 1 2>&1); RC=$?
   set -e
   if [ "$RC" -eq "$1" ]; then
     echo "✓ $2"
-    return 0
+  else
+    echo "✗ $2 — rc=$RC, expected $1"
+    printf '%s\n' "$OUT" | head -4 | sed 's/^/    /'
+    failed=1
   fi
-  echo "✗ $2 — rc=$RC, expected $1"
-  printf '%s\n' "$OUT" | head -4 | sed 's/^/    /'
-  failed=1
-  return 1
+  return 0
 }
 
 # R1. THE #1523 SHAPE.
@@ -120,20 +134,21 @@ run_case 1 "R3 a human TOP-LEVEL inline comment still counts (rc=1)" '[
 
 # R4. Mixed: replies must not mask (or appear beside) the real finding.
 # Exit code through the shared harness; the report-content assertions read
-# the $OUT it leaves behind.
-if run_case 1 "R4 mixed thread flags (rc=1)" '[
+# the $OUT it leaves behind and run UNCONDITIONALLY — gating them on R4's
+# verdict would silently skip the only content check exactly when the
+# checker misbehaves, which is when its report matters most.
+run_case 1 "R4 mixed thread flags (rc=1)" '[
   {"created_at":"'"$AFTER"'","user":{"login":"topcoder1"},"path":"infra/x.yml",
    "in_reply_to_id":9,"body":"Fixed in 38774043."},
   {"created_at":"'"$AFTER"'","user":{"login":"claude[bot]"},"path":"docker-compose.yml",
-   "body":"The compose rationale is now inverted by the trust change."}]'; then
-  if printf '%s' "$OUT" | grep -q "compose rationale" \
-     && ! printf '%s' "$OUT" | grep -q "Fixed in 38774043"; then
-    echo "✓ R4b report names the bot finding and omits the human replies"
-  else
-    echo "✗ R4b report must name the bot line and omit the replies:"
-    printf '%s\n' "$OUT" | head -6 | sed 's/^/    /'
-    failed=1
-  fi
+   "body":"The compose rationale is now inverted by the trust change."}]'
+if printf '%s' "$OUT" | grep -q "compose rationale" \
+   && ! printf '%s' "$OUT" | grep -q "Fixed in 38774043"; then
+  echo "✓ R4b report names the bot finding and omits the human replies"
+else
+  echo "✗ R4b report must name the bot line and omit the replies:"
+  printf '%s\n' "$OUT" | head -6 | sed 's/^/    /'
+  failed=1
 fi
 
 # R5. Legacy shape: no in_reply_to_id field anywhere (old fixtures, and REST
@@ -149,6 +164,24 @@ run_case 1 "R6 explicit in_reply_to_id:null keeps today's behavior (rc=1)" '[
   {"created_at":"'"$AFTER"'","user":{"login":"topcoder1"},"path":"deploy.yml",
    "in_reply_to_id":null,
    "body":"Real bug here."}]'
+
+# R7. THE CRASH CASE, on the TOP-LEVEL path: one null-user comment anywhere
+# in the issue-comment list must not silence the OTHER findings. Pre-guard,
+# `null | endswith` was a jq type error, stderr was discarded, late_issue
+# came back empty and a genuine bot P1 in the same list vanished — exit 0.
+run_case 1 "R7 a null-user issue comment does not silence a bot finding (rc=1)" '[]' '[
+  {"created_at":"'"$AFTER"'","user":null,
+   "body":"thanks, closing the loop"},
+  {"created_at":"'"$AFTER"'","user":{"login":"github-actions[bot]"},
+   "body":"- [P1] Token check is skippable — auth.py:31"}]'
+
+# R8. Direction pin for the same guard: a null-user TOP-LEVEL comment falls
+# to this path's default — top-level counts only KNOWN bots, so an unknown
+# author does not count (the mirror of R2b, where inline's default is to
+# count and unknown authors therefore do).
+run_case 0 "R8 a null-user issue comment alone is not a finding (rc=0)" '[]' '[
+  {"created_at":"'"$AFTER"'","user":null,
+   "body":"- [P1] Token check is skippable — auth.py:31"}]'
 
 echo
 if [ "$failed" -eq 0 ]; then

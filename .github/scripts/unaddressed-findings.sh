@@ -594,6 +594,16 @@ check_pr() {
   # code-level finding; the one inline exclusion is human REPLIES, per the
   # reply rule above.
   #
+  # The `// ""` on the login below is load-bearing twice over. A comment
+  # whose author account was deleted/suspended arrives with `.user: null`,
+  # and `null | endswith(...)` is a jq TYPE ERROR — with stderr discarded
+  # that would abort the whole program, empty late_issue, and silence EVERY
+  # top-level finding on the PR because one unrelated comment lost its
+  # author (exit 0, the fail direction this detector must never take). With
+  # the guard, an unknown author simply falls to this path's DEFAULT: it is
+  # not a known bot, so it does not count — the mirror of the inline path,
+  # whose default is to count and whose unknown authors therefore do.
+  #
   # `canon` is the normalizer described at _BLOCK_PREFIX above: per line, strip
   # markdown block markers, then reduce any emphasis spelling of `regression:`
   # and the opening wrapper punctuation after it to one canonical form. Both
@@ -630,14 +640,14 @@ check_pr() {
                  --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
     def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
     [ .[] | select(.created_at > $last)
-          | select(.user.login | endswith("[bot]"))
+          | select((.user.login // "") | endswith("[bot]"))
           | select(((.body // "") | canon) as $body
                    | ((.body // "")) as $raw
                    | ($body | test($find; "i"))
                      and ((($raw | test($clean; "i")) | not)
                           or ($raw | test($sev; "i"))
                           or ($raw | test($rmark; "i")))) ]
-    | .[] | [.created_at, .user.login, "-",
+    | .[] | [.created_at, (.user.login // "-"), "-",
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
   local all
