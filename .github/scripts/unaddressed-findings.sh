@@ -568,16 +568,22 @@ check_pr() {
   # in_reply_to_id, 0/14 genuine bot findings did. BOT replies still count: a
   # reviewer bot answering a thread with "still broken after the fix" is a
   # live finding, and keeping them cost zero false positives in that corpus.
-  # Accepted residual: a human typing a NEW finding into an existing thread is
-  # skipped — the operator wrote it, so the operator already knows it, and the
-  # alternative re-flags every resolved thread on every sweep, which is the
-  # cry-wolf failure this file argues twice over is the more expensive one.
+  # A reply whose author is UNKNOWN (deleted/suspended account -> .user null)
+  # also still counts: the exclusion drops only a KNOWN-human reply, because
+  # reading an absent login as "not a bot" would silently convert an unknown
+  # author into a false negative — the fail direction this detector must
+  # never take. Accepted residual: a human typing a NEW finding into an
+  # existing thread is skipped — the operator wrote it, so the operator
+  # already knows it, and the alternative re-flags every resolved thread on
+  # every sweep, which is the cry-wolf failure this file argues twice over is
+  # the more expensive one.
   local late_inline
   late_inline=$(printf '%s' "$inline" | jq -r --arg last "$last" '
     [ .[] | select(.created_at > $last)
           | select(.in_reply_to_id == null
-                   or ((.user.login // "") | endswith("[bot]"))) ]
-    | .[] | [.created_at, .user.login, (.path // "-"),
+                   or (.user.login == null)
+                   or (.user.login | endswith("[bot]"))) ]
+    | .[] | [.created_at, (.user.login // "-"), (.path // "-"),
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
   # Top-level findings count only from review BOTS. Humans post round-summary
