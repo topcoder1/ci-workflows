@@ -1149,7 +1149,13 @@ jobs:
           # Fail-closed like every sibling read: `issues/{n}/timeline` is
           # already load-bearing in this job (the detector fetched below
           # reads issues/{n}/comments fatally), so an unreadable timeline
-          # is an unreadable anchor, not an absent one.
+          # is an unreadable anchor, not an absent one. What fail-closed
+          # covers is READABILITY — the fetch and the parse. A matching
+          # event that carries `created_at: null` (never observed from the
+          # API) is readable but UNDATABLE, and an undatable event simply
+          # contributes no anchor: c4 carries a timestamp, not an
+          # existence claim, and a clock cannot be anchored to an event
+          # with no time.
           #
           # c4 and c5 are IMMUTABLE, so they are resolved ONCE, outside the
           # wait loop — historical timeline events and the PR's creation

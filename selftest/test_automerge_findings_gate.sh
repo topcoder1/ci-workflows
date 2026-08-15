@@ -227,9 +227,14 @@ EOF
 }
 exec_gate() {
   set +e
+  # PR_CREATED_AT pinned empty: the c5 anchor belongs to
+  # test_automerge_quiet_anchor.sh; an ambient value exported in a
+  # developer's shell would otherwise activate it here and fail the
+  # zero-sleep cases nondeterministically.
   PATH="$T/bin:$PATH" T_DIR="$CASE" T_NOW="$CASE/now" \
     GITHUB_OUTPUT="$CASE/output" GITHUB_REPOSITORY="o/r" \
     PR=1 PR_URL="https://example.invalid/pr/1" QUIET_MINUTES="$1" \
+    PR_CREATED_AT="" \
     bash "$T/qf.sh" > "$CASE/stdout" 2>&1
   RC=$?
   set -e
