@@ -84,13 +84,24 @@ trap 'rm -rf "$T"' EXIT
 # the suite here instead of letting S1 report ✗ — an empty S1_SELECT is a
 # finding for S1 to print, not a reason to stop testing.
 S1_SELECT=$(tr '\n' ' ' < "$CHECKER" | grep -oE 'select\(\.in_reply_to_id == null[^]]*\]' | head -1 || true)
-if grep -q 'in_reply_to_id == null' "$CHECKER" \
-   && grep -qF '(.user.login | . == null or endswith("[bot]"))' "$CHECKER" \
+# Three conditions, each with a DISTINCT job — do not fold one into another:
+#   (a) the login pipeline's exact inner spelling: type-guard FIRST, then the
+#       bot test. Inner order is load-bearing (a non-string reaching endswith
+#       is the swallowed type error); `type != "string"` rather than `== null`
+#       so a non-null non-string login takes the safe path too.
+#   (b) the OUTER connector between the reply test and that pipeline is `or`,
+#       read from the newline-folded select so layout cannot matter.
+#   (c) and it is not `and` — with `and` no comment can satisfy "is a reply"
+#       and "is not a reply", late_inline is always empty, and every PR passes.
+# (S1_SELECT being non-empty already proves the reply test is present, so
+# there is no separate substring check — one that only restated (b) invited a
+# reader to drop (b) as redundant, and (b) is the connector check.)
+if grep -qF '(.user.login | type != "string" or endswith("[bot]"))' "$CHECKER" \
    && printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+or[[:space:]]+\(\.user\.login \|' \
    && ! printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+and\b'; then
-  echo "✓ S1 narrowing is 'not a reply OR (unknown author OR bot)' — one login pipeline, joined by or"
+  echo "✓ S1 narrowing is 'not a reply OR (non-string author OR bot)' — one login pipeline, joined by or"
 else
-  echo "✗ S1 narrowing shape missing or rewritten — expected 'in_reply_to_id == null' joined by 'or' to ONE login pipeline '(.user.login | . == null or endswith(\"[bot]\"))'"
+  echo "✗ S1 narrowing shape missing or rewritten — expected 'in_reply_to_id == null' joined by 'or' to ONE login pipeline '(.user.login | type != \"string\" or endswith(\"[bot]\"))'"
   failed=1
 fi
 
@@ -139,6 +150,16 @@ run_case 1 "R2 a BOT reply in a thread still counts (rc=1)" '[
 # R2b. Unknown-author reply counts (deleted/suspended account -> .user null).
 run_case 1 "R2b a reply with a null .user still counts (rc=1)" '[
   {"created_at":"'"$AFTER"'","user":null,"path":"infra/x.yml",
+   "in_reply_to_id":3787072809,
+   "body":"The retry loop still deadlocks when the queue is empty."}]'
+
+# R2c. NON-null NON-string login (an integer id via a caching proxy or a
+# schema change) — same safe path as R2b: it cannot be a known bot, so it is
+# an unknown author and counts. Pre-guard this was `null-safe` but not
+# type-safe: an integer reached `endswith`, the jq type error was swallowed,
+# and every inline finding on the PR vanished (exit 0).
+run_case 1 "R2c a reply with a non-string login still counts (rc=1)" '[
+  {"created_at":"'"$AFTER"'","user":{"login":12345},"path":"infra/x.yml",
    "in_reply_to_id":3787072809,
    "body":"The retry loop still deadlocks when the queue is empty."}]'
 

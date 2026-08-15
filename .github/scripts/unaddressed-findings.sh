@@ -585,12 +585,18 @@ check_pr() {
   # send null into `endswith`, a jq TYPE ERROR that `2>/dev/null` swallows:
   # late_inline comes back empty and every inline finding on the PR silently
   # vanishes (exit 0). Inside one pipeline the short-circuit is structural:
-  # `. == null` guards `endswith` no matter how the outer arms are arranged.
+  # the type test guards `endswith` no matter how the outer arms are
+  # arranged. It is `type != "string"` rather than `. == null` so a NON-null
+  # non-string login (an integer id from a caching proxy, a schema change)
+  # takes the same safe path: anything that is not a string cannot be a
+  # known bot, so it is an unknown author, and unknown authors COUNT here.
+  # Same guard shape as late_issue's `// ""` below, same reason, opposite
+  # default (there, unknown does not count).
   local late_inline
   late_inline=$(printf '%s' "$inline" | jq -r --arg last "$last" '
     [ .[] | select(.created_at > $last)
           | select(.in_reply_to_id == null
-                   or (.user.login | . == null or endswith("[bot]"))) ]
+                   or (.user.login | type != "string" or endswith("[bot]"))) ]
     | .[] | [.created_at, (.user.login // "-"), (.path // "-"),
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
@@ -655,8 +661,15 @@ check_pr() {
                      and ((($raw | test($clean; "i")) | not)
                           or ($raw | test($sev; "i"))
                           or ($raw | test($rmark; "i")))) ]
-    | .[] | [.created_at, .user.login, "-",
+    | .[] | [.created_at, (.user.login // "-"), "-",
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
+  # `(.user.login // "-")` on BOTH output lines is an OUTPUT CONVENTION, not
+  # a null guard: the two @tsv rows land in the same report, so a missing
+  # login must render the same way in each ("-", never jq'\''s "null"). It is
+  # unreachable on this path today (the select above admits only string
+  # logins) and load-bearing on late_inline (unknown authors count there);
+  # keeping it symmetric means extending this path later cannot desync the
+  # report. The GUARDS are the two selects, not this.
 
   local all
   all=$(printf '%s\n%s' "$late_inline" "$late_issue" | grep -v '^$' || true)
