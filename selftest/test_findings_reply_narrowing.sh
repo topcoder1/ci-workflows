@@ -136,18 +136,21 @@ run_case 1 "R3 a human TOP-LEVEL inline comment still counts (rc=1)" '[
 # Exit code through the shared harness; the report-content assertions read
 # the $OUT it leaves behind and run UNCONDITIONALLY — gating them on R4's
 # verdict would silently skip the only content check exactly when the
-# checker misbehaves, which is when its report matters most.
+# checker misbehaves, which is when its report matters most. $OUT is bound
+# to R4_OUT immediately, so a case inserted between R4 and R4b later cannot
+# silently redirect the content assertions at someone else's report.
 run_case 1 "R4 mixed thread flags (rc=1)" '[
   {"created_at":"'"$AFTER"'","user":{"login":"topcoder1"},"path":"infra/x.yml",
    "in_reply_to_id":9,"body":"Fixed in 38774043."},
   {"created_at":"'"$AFTER"'","user":{"login":"claude[bot]"},"path":"docker-compose.yml",
    "body":"The compose rationale is now inverted by the trust change."}]'
-if printf '%s' "$OUT" | grep -q "compose rationale" \
-   && ! printf '%s' "$OUT" | grep -q "Fixed in 38774043"; then
+R4_OUT=$OUT
+if printf '%s' "$R4_OUT" | grep -q "compose rationale" \
+   && ! printf '%s' "$R4_OUT" | grep -q "Fixed in 38774043"; then
   echo "✓ R4b report names the bot finding and omits the human replies"
 else
   echo "✗ R4b report must name the bot line and omit the replies:"
-  printf '%s\n' "$OUT" | head -6 | sed 's/^/    /'
+  printf '%s\n' "$R4_OUT" | head -6 | sed 's/^/    /'
   failed=1
 fi
 
