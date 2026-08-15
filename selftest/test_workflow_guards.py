@@ -18,35 +18,76 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # test_bb_automerge_risk_patterns.sh is deliberately absent: it resolves
 # bb-automerge.py from the local ~/.claude/templates checkout and imports
 # `requests`, neither of which exists on this repo's CI runner. Run it
-# manually on a workstation.
-@pytest.mark.parametrize(
-    "script",
-    [
-        "selftest/test_automerge_base_gate.sh",
-        "selftest/test_automerge_findings_gate.sh",
-        "selftest/test_automerge_hold_gate.sh",
-        "selftest/test_automerge_risk_patterns.sh",
-        "selftest/test_automerge_riskfile_gate.sh",
-        "selftest/test_bot_skip_commit_authorship.sh",
-        "selftest/test_classify_bracket_guard.sh",
-        "selftest/test_classify_env_globs.sh",
-        "selftest/test_classify_exclude.sh",
-        "selftest/test_classify_list_shape.sh",
-        "selftest/test_classify_nocase.sh",
-        "selftest/test_codex_verdict_gate.sh",
-        "selftest/test_pr_files_listing.sh",
-        "selftest/test_prettier_scope_failsafe.sh",
-        "selftest/test_prettier_symlink_filter.sh",
-        "selftest/test_ruff_ruleset_warning.sh",
-        "selftest/test_safe_paths_risk_tier_hold.sh",
-        "selftest/test_safe_paths_unsafe_overrides.sh",
-    ],
-)
+# manually on a workstation. (Its absence is a named exemption in
+# _UNLISTED_OK below, which is what keeps this list honest.)
+_SHELL_SELFTESTS = [
+    "selftest/test_automerge_base_gate.sh",
+    "selftest/test_automerge_findings_gate.sh",
+    "selftest/test_automerge_hold_gate.sh",
+    "selftest/test_automerge_quiet_anchor.sh",
+    "selftest/test_automerge_risk_patterns.sh",
+    "selftest/test_automerge_riskfile_gate.sh",
+    "selftest/test_bot_skip_commit_authorship.sh",
+    "selftest/test_classify_bracket_guard.sh",
+    "selftest/test_classify_env_globs.sh",
+    "selftest/test_classify_exclude.sh",
+    "selftest/test_classify_list_shape.sh",
+    "selftest/test_classify_nocase.sh",
+    # These two shipped unlisted (#152 and #160) and ran in CI never —
+    # the completeness guard below found both on its first execution.
+    "selftest/test_claude_review_max_turns_type.sh",
+    "selftest/test_codex_verdict_gate.sh",
+    "selftest/test_pr_files_listing.sh",
+    "selftest/test_prettier_scope_failsafe.sh",
+    "selftest/test_prettier_symlink_filter.sh",
+    "selftest/test_ruff_format_gate.sh",
+    "selftest/test_ruff_ruleset_warning.sh",
+    "selftest/test_safe_paths_risk_tier_hold.sh",
+    "selftest/test_safe_paths_unsafe_overrides.sh",
+]
+
+
+@pytest.mark.parametrize("script", _SHELL_SELFTESTS)
 def test_shell_selftest(script):
     proc = subprocess.run(
         ["bash", script], cwd=REPO_ROOT, capture_output=True, text=True
     )
     assert proc.returncode == 0, f"{script} failed:\n{proc.stdout}\n{proc.stderr}"
+
+
+# A selftest that exists on disk but is missing from the parametrize list
+# above passes locally forever and runs in CI never — the "CI-enforced
+# rather than run-manually-only documentation" claim in this module's
+# docstring quietly stops being true, one file at a time. That is not
+# hypothetical: test_automerge_quiet_anchor.sh shipped in this very PR,
+# passed 14/14 on the workstation, and was invisible to the Tests (Python)
+# job until this guard's companion list entry was added.
+#
+# Exemptions are named, with the reason a reader needs: an entry here is a
+# decision, never a leftover.
+_UNLISTED_OK = {
+    # Resolves bb-automerge.py from the local ~/.claude/templates checkout
+    # and imports `requests`; neither exists on this repo's CI runner.
+    "selftest/test_bb_automerge_risk_patterns.sh",
+}
+
+
+def test_every_shell_selftest_is_listed():
+    on_disk = {
+        f"selftest/{p.name}"
+        for p in (REPO_ROOT / "selftest").glob("test_*.sh")
+    }
+    listed = set(_SHELL_SELFTESTS) | _UNLISTED_OK
+    unlisted = sorted(on_disk - listed)
+    assert not unlisted, (
+        "selftest .sh file(s) exist but are not run by CI — add them to the "
+        f"parametrize list (or _UNLISTED_OK, with a reason): {unlisted}"
+    )
+    # The inverse direction: a listed file that no longer exists fails the
+    # parametrized run itself with a bash error, so only the stale-exemption
+    # half needs pinning here.
+    stale_exempt = sorted(e for e in _UNLISTED_OK if not (REPO_ROOT / e).exists())
+    assert not stale_exempt, f"_UNLISTED_OK entries no longer on disk: {stale_exempt}"
 
 
 def test_codex_verdict_gate_is_wired_and_opt_in():

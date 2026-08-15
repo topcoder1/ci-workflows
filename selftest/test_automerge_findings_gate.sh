@@ -117,8 +117,12 @@ else
   echo "✓ S3 run block is interpolation-free (env vars only)"
 fi
 
-# S4. All three anchor reads paginate.
-for ep in 'pulls/${PR}/commits?per_page=100' 'pulls/${PR}/comments?per_page=100' 'issues/${PR}/comments?per_page=100'; do
+# S4. All FOUR anchor reads paginate. The timeline read is the review-trigger
+# anchor (wxa_vpn#1512); its behaviour is pinned in test_automerge_quiet_anchor.sh,
+# but it belongs in this loop because the loop's claim is "every anchor read
+# paginates" — a list that enumerates three of four silently stops being that.
+for ep in 'pulls/${PR}/commits?per_page=100' 'pulls/${PR}/comments?per_page=100' \
+          'issues/${PR}/comments?per_page=100' 'issues/${PR}/timeline?per_page=100'; do
   if grep -F "$ep" "$T/qf.sh" | grep -q -- '--paginate'; then
     echo "✓ S4 anchor read paginates: $ep"
   else
@@ -173,6 +177,14 @@ case "$*" in
     cat "$T_DIR/commits.json"; exit 0 ;;
   *pulls/*/comments*)
     cat "$T_DIR/inline.json"; exit 0 ;;
+  *issues/*/timeline*)
+    # The review-trigger anchor (wxa_vpn#1512). Empty here on purpose: the
+    # cases in THIS file are about the quiet/findings decision, and an empty
+    # timeline is the pre-fix anchor set exactly. Its own behaviour — a recent
+    # ready_for_review must anchor, an old one must not, unrelated events must
+    # not, an unreadable read must fail closed — is pinned in
+    # selftest/test_automerge_quiet_anchor.sh.
+    echo '[]'; exit 0 ;;
   *contents/.github/scripts/unaddressed-findings.sh*)
     base64 < "$T_DIR/checker_stub.sh"; exit 0 ;;
   *issues/*/comments*--jq*)
@@ -215,9 +227,14 @@ EOF
 }
 exec_gate() {
   set +e
+  # PR_CREATED_AT pinned empty: the c5 anchor belongs to
+  # test_automerge_quiet_anchor.sh; an ambient value exported in a
+  # developer's shell would otherwise activate it here and fail the
+  # zero-sleep cases nondeterministically.
   PATH="$T/bin:$PATH" T_DIR="$CASE" T_NOW="$CASE/now" \
     GITHUB_OUTPUT="$CASE/output" GITHUB_REPOSITORY="o/r" \
     PR=1 PR_URL="https://example.invalid/pr/1" QUIET_MINUTES="$1" \
+    PR_CREATED_AT="" \
     bash "$T/qf.sh" > "$CASE/stdout" 2>&1
   RC=$?
   set -e
