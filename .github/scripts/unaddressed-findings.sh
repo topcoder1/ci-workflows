@@ -18,8 +18,9 @@
 # `create_inline_comment` + `gh pr comment`, so a finding can never block a
 # merge. Detection is the available lever.
 #
-# Signal: an INLINE review comment newer than the newest commit. Inline comments
-# are reserved for "issues you're 80%+ sure are real bugs" (claude-review.yml
+# Signal: an INLINE review comment newer than the newest commit (human threaded
+# REPLIES excluded — see the reply rule in check_pr). Inline comments are
+# reserved for "issues you're 80%+ sure are real bugs" (claude-review.yml
 # prompt), so they carry far less noise than top-level summaries — the bot posts
 # a top-level line on every run, including "No issues found". Top-level comments
 # count only when they match a finding marker and no clean marker.
@@ -454,8 +455,9 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 # Residual gap: a bot that asserts a finding ONLY in unstructured prose while
 # also emitting a clean marker, no VERDICT: REGRESSION and no `regression:`
 # line. Codex itemizes and stamps a trailer, so this is narrow — but do NOT
-# assume claude[bot] findings always arrive as inline comments (which this
-# filter never touches: author-agnostic, no clean-marker check at all). On
+# assume claude[bot] findings always arrive as inline comments (which never see
+# CLEAN_RE or the severity override; their only filter is the human-reply
+# exclusion in check_pr). On
 # wxa-jake-ai#1054 claude[bot] posted its finding TOP-LEVEL, as a `regression:`
 # line, with zero inline comments on the PR. The top-level path is load-bearing
 # for both bots. A live instance of the residual gap: the codex comment on that
@@ -554,18 +556,37 @@ check_pr() {
   # each as an independent input and the per-page results concatenate, so no
   # reduction is needed for those.
 
-  # Inline comments strictly newer than the newest commit.
+  # Inline comments strictly newer than the newest commit. Author-agnostic at
+  # TOP LEVEL — a human's own inline comment on the diff is a deliberate
+  # code-level finding, same as a bot's. HUMAN THREADED REPLIES are the one
+  # exclusion: replying to a finding's thread is how a fix is RECORDED
+  # ("Fixed in <sha>"), and that reply necessarily post-dates the commit it
+  # cites, so every resolution round trips the newer-than-last-commit signal
+  # and the report re-flags resolved threads forever. Measured on wxa_vpn#1523:
+  # the report's top three hits were the PR's own "Fixed in 38774043" replies,
+  # posted 7-12s after the fix commit — 5/5 false positives carried
+  # in_reply_to_id, 0/14 genuine bot findings did. BOT replies still count: a
+  # reviewer bot answering a thread with "still broken after the fix" is a
+  # live finding, and keeping them cost zero false positives in that corpus.
+  # Accepted residual: a human typing a NEW finding into an existing thread is
+  # skipped — the operator wrote it, so the operator already knows it, and the
+  # alternative re-flags every resolved thread on every sweep, which is the
+  # cry-wolf failure this file argues twice over is the more expensive one.
   local late_inline
   late_inline=$(printf '%s' "$inline" | jq -r --arg last "$last" '
-    [ .[] | select(.created_at > $last) ]
+    [ .[] | select(.created_at > $last)
+          | select(.in_reply_to_id == null
+                   or ((.user.login // "") | endswith("[bot]"))) ]
     | .[] | [.created_at, .user.login, (.path // "-"),
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
   # Top-level findings count only from review BOTS. Humans post round-summary
   # comments ("REVIEW-LOOP: round 7 — 1 finding, fixed in 2a5937e") that match
   # the finding markers while actually reporting a FIX — counting those cost a
-  # false positive on wxa-secrets#27. Inline comments stay author-agnostic: a
-  # human's inline comment is a deliberate code-level finding either way.
+  # false positive on wxa-secrets#27. Top-level inline comments stay
+  # author-agnostic — a human's own comment on the diff is a deliberate
+  # code-level finding; the one inline exclusion is human REPLIES, per the
+  # reply rule above.
   #
   # `canon` is the normalizer described at _BLOCK_PREFIX above: per line, strip
   # markdown block markers, then reduce any emphasis spelling of `regression:`
