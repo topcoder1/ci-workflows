@@ -577,12 +577,20 @@ check_pr() {
   # already knows it, and the alternative re-flags every resolved thread on
   # every sweep, which is the cry-wolf failure this file argues twice over is
   # the more expensive one.
+  #
+  # The null test and the bot test are ONE pipeline expression on the login
+  # (`. == null or endswith`), not two sibling arms of the outer `or`. As
+  # siblings the null-safety was POSITIONAL — it held only because the null
+  # arm happened to be evaluated first, and swapping them in a refactor would
+  # send null into `endswith`, a jq TYPE ERROR that `2>/dev/null` swallows:
+  # late_inline comes back empty and every inline finding on the PR silently
+  # vanishes (exit 0). Inside one pipeline the short-circuit is structural:
+  # `. == null` guards `endswith` no matter how the outer arms are arranged.
   local late_inline
   late_inline=$(printf '%s' "$inline" | jq -r --arg last "$last" '
     [ .[] | select(.created_at > $last)
           | select(.in_reply_to_id == null
-                   or (.user.login == null)
-                   or (.user.login | endswith("[bot]"))) ]
+                   or (.user.login | . == null or endswith("[bot]"))) ]
     | .[] | [.created_at, (.user.login // "-"), (.path // "-"),
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 

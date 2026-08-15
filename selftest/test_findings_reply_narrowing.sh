@@ -26,8 +26,9 @@
 # skipped — the operator wrote it, so the operator already knows it.
 #
 # Cases (all through the vendored twin's own --fixture seam):
-#   S1. structural: the narrowing keys on in_reply_to_id == null OR unknown
-#       author OR bot login
+#   S1. structural: the narrowing keys on in_reply_to_id == null OR (one
+#       login pipeline: null OR bot) — the connector is `or`, and the null
+#       test guards `endswith` structurally, not by arm order
 #   R1. THE #1523 SHAPE: human reply "Fixed in <sha>" after the last commit
 #       ⇒ rc=0, no unaddressed findings
 #   R2. over-correction guard: a BOT reply after the last commit ⇒ rc=1
@@ -62,20 +63,27 @@ failed=0
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 
-# S1. Structural pin: the exclusion must be the null-or-unknown-or-bot shape.
+# S1. Structural pin: the exclusion must be the null-or-(unknown-or-bot) shape.
 # A rewrite to `has("in_reply_to_id") | not` would split absent from null (R5
 # and R6 pin the behavior, this names the intended spelling); dropping the bot
 # escape would eat R2 silently on fixtures that never exercise bot replies;
-# dropping the unknown-author arm would eat R2b the same way. Each arm is
-# grepped INDEPENDENTLY, not through a -A line window: the window broke as
-# soon as the arms spanned a different number of lines, and R1-R6 already
-# prove the arms sit in the same select — this only names the spelling.
+# dropping the unknown-author test would eat R2b the same way. Two more things
+# it pins, both review catches: the null test and the bot test must be ONE
+# pipeline on the login (`. == null or endswith`) so null-safety is structural
+# rather than dependent on which sibling arm is evaluated first; and the
+# connector between the reply test and the login pipeline must be `or` — with
+# `and`, no comment can satisfy both (a reply is not a non-reply), late_inline
+# is always empty, and the sweep passes every PR. R3/R5 catch that at runtime;
+# S1 is the structural claim, so it must not certify a shape it did not check.
+# Each piece is grepped INDEPENDENTLY, not through a -A line window: the
+# window broke as soon as the arms spanned a different number of lines.
 if grep -q 'in_reply_to_id == null' "$CHECKER" \
-   && grep -qF '(.user.login == null)' "$CHECKER" \
-   && grep -qF '(.user.login | endswith("[bot]"))' "$CHECKER"; then
-  echo "✓ S1 narrowing is 'not a reply OR unknown author OR a bot' (all three arms present)"
+   && grep -qF '(.user.login | . == null or endswith("[bot]"))' "$CHECKER" \
+   && grep -A1 'in_reply_to_id == null$' "$CHECKER" | grep -q '^[[:space:]]*or (\.user\.login |' \
+   && ! grep -q 'in_reply_to_id == null.*\band\b' "$CHECKER"; then
+  echo "✓ S1 narrowing is 'not a reply OR (unknown author OR bot)' — one login pipeline, joined by or"
 else
-  echo "✗ S1 narrowing shape missing or rewritten — expected in_reply_to_id == null, a login == null arm, and a [bot] escape"
+  echo "✗ S1 narrowing shape missing or rewritten — expected 'in_reply_to_id == null' joined by 'or' to ONE login pipeline '(.user.login | . == null or endswith(\"[bot]\"))'"
   failed=1
 fi
 
