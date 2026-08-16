@@ -18,8 +18,9 @@
 # `create_inline_comment` + `gh pr comment`, so a finding can never block a
 # merge. Detection is the available lever.
 #
-# Signal: an INLINE review comment newer than the newest commit. Inline comments
-# are reserved for "issues you're 80%+ sure are real bugs" (claude-review.yml
+# Signal: an INLINE review comment newer than the newest commit (human threaded
+# REPLIES excluded — see the reply rule in check_pr). Inline comments are
+# reserved for "issues you're 80%+ sure are real bugs" (claude-review.yml
 # prompt), so they carry far less noise than top-level summaries — the bot posts
 # a top-level line on every run, including "No issues found". Top-level comments
 # count only when they match a finding marker and no clean marker.
@@ -454,8 +455,9 @@ CLEAN_RE='(No issues found|Skipped:|Bugbot is not enab|Coverage Floor|claude-aut
 # Residual gap: a bot that asserts a finding ONLY in unstructured prose while
 # also emitting a clean marker, no VERDICT: REGRESSION and no `regression:`
 # line. Codex itemizes and stamps a trailer, so this is narrow — but do NOT
-# assume claude[bot] findings always arrive as inline comments (which this
-# filter never touches: author-agnostic, no clean-marker check at all). On
+# assume claude[bot] findings always arrive as inline comments (which never see
+# CLEAN_RE or the severity override; their only filter is the human-reply
+# exclusion in check_pr). On
 # wxa-jake-ai#1054 claude[bot] posted its finding TOP-LEVEL, as a `regression:`
 # line, with zero inline comments on the PR. The top-level path is load-bearing
 # for both bots. A live instance of the residual gap: the codex comment on that
@@ -554,18 +556,70 @@ check_pr() {
   # each as an independent input and the per-page results concatenate, so no
   # reduction is needed for those.
 
-  # Inline comments strictly newer than the newest commit.
+  # Inline comments strictly newer than the newest commit. Author-agnostic at
+  # TOP LEVEL — a human's own inline comment on the diff is a deliberate
+  # code-level finding, same as a bot's. HUMAN THREADED REPLIES are the one
+  # exclusion: replying to a finding's thread is how a fix is RECORDED
+  # ("Fixed in <sha>"), and that reply necessarily post-dates the commit it
+  # cites, so every resolution round trips the newer-than-last-commit signal
+  # and the report re-flags resolved threads forever. Measured on wxa_vpn#1523:
+  # the report's top three hits were the PR's own "Fixed in 38774043" replies,
+  # posted 7-12s after the fix commit — 5/5 false positives carried
+  # in_reply_to_id, 0/14 genuine bot findings did. BOT replies still count: a
+  # reviewer bot answering a thread with "still broken after the fix" is a
+  # live finding, and keeping them cost zero false positives in that corpus.
+  # A reply whose author is UNKNOWN (deleted/suspended account -> .user null)
+  # also still counts: the exclusion drops only a KNOWN-human reply, because
+  # reading an absent login as "not a bot" would silently convert an unknown
+  # author into a false negative — the fail direction this detector must
+  # never take. Accepted residual: a human typing a NEW finding into an
+  # existing thread is skipped — the operator wrote it, so the operator
+  # already knows it, and the alternative re-flags every resolved thread on
+  # every sweep, which is the cry-wolf failure this file argues twice over is
+  # the more expensive one.
+  #
+  # The null test and the bot test are ONE pipeline expression on the login
+  # (`. == null or endswith`), not two sibling arms of the outer `or`. As
+  # siblings the null-safety was POSITIONAL — it held only because the null
+  # arm happened to be evaluated first, and swapping them in a refactor would
+  # send null into `endswith`, a jq TYPE ERROR that `2>/dev/null` swallows:
+  # late_inline comes back empty and every inline finding on the PR silently
+  # vanishes (exit 0). Inside one pipeline the short-circuit is structural:
+  # the type test guards `endswith` no matter how the outer arms are
+  # arranged. It is `type != "string"` rather than `. == null` so a NON-null
+  # non-string login (an integer id from a caching proxy, a schema change)
+  # takes the same safe path: anything that is not a string cannot be a
+  # known bot, so it is an unknown author, and unknown authors COUNT here.
+  # Same `type` guard as late_issue's below, same reason, opposite default
+  # (there, unknown does not count).
   local late_inline
   late_inline=$(printf '%s' "$inline" | jq -r --arg last "$last" '
-    [ .[] | select(.created_at > $last) ]
-    | .[] | [.created_at, .user.login, (.path // "-"),
+    [ .[] | select(.created_at > $last)
+          | select(.in_reply_to_id == null
+                   or (.user.login | type != "string" or endswith("[bot]"))) ]
+    | .[] | [.created_at, (.user.login // "-"), (.path // "-"),
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
 
   # Top-level findings count only from review BOTS. Humans post round-summary
   # comments ("REVIEW-LOOP: round 7 — 1 finding, fixed in 2a5937e") that match
   # the finding markers while actually reporting a FIX — counting those cost a
-  # false positive on wxa-secrets#27. Inline comments stay author-agnostic: a
-  # human's inline comment is a deliberate code-level finding either way.
+  # false positive on wxa-secrets#27. Top-level inline comments stay
+  # author-agnostic — a human's own comment on the diff is a deliberate
+  # code-level finding; the one inline exclusion is human REPLIES, per the
+  # reply rule above.
+  #
+  # The `type == "string" and` on the login below is load-bearing. A comment
+  # whose author account was deleted/suspended arrives with `.user: null`,
+  # and `null | endswith(...)` is a jq TYPE ERROR — with stderr discarded
+  # that would abort the whole program, empty late_issue, and silence EVERY
+  # top-level finding on the PR because one unrelated comment lost its
+  # author (exit 0, the fail direction this detector must never take). It is
+  # a TYPE test rather than `// ""` because `//` only rescues null/false: an
+  # integer login (a caching proxy, a schema change) sails through `//` into
+  # `endswith` and is the same swallowed abort. With the guard, an unknown
+  # or non-string author simply falls to this path's DEFAULT: it is not a
+  # known bot, so it does not count — the mirror of the inline path, whose
+  # default is to count and whose unknown authors therefore do.
   #
   # `canon` is the normalizer described at _BLOCK_PREFIX above: per line, strip
   # markdown block markers, then reduce any emphasis spelling of `regression:`
@@ -603,15 +657,22 @@ check_pr() {
                  --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
     def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
     [ .[] | select(.created_at > $last)
-          | select(.user.login | endswith("[bot]"))
+          | select(.user.login | type == "string" and endswith("[bot]"))
           | select(((.body // "") | canon) as $body
                    | ((.body // "")) as $raw
                    | ($body | test($find; "i"))
                      and ((($raw | test($clean; "i")) | not)
                           or ($raw | test($sev; "i"))
                           or ($raw | test($rmark; "i")))) ]
-    | .[] | [.created_at, .user.login, "-",
+    | .[] | [.created_at, (.user.login // "-"), "-",
              ((.body // "") | gsub("\n"; " ") | .[0:90])] | @tsv' 2>/dev/null)
+  # `(.user.login // "-")` on BOTH output lines is an OUTPUT CONVENTION, not
+  # a null guard: the two @tsv rows land in the same report, so a missing
+  # login must render the same way in each ("-", never jq'\''s "null"). It is
+  # unreachable on this path today (the select above admits only string
+  # logins) and load-bearing on late_inline (unknown authors count there);
+  # keeping it symmetric means extending this path later cannot desync the
+  # report. The GUARDS are the two selects, not this.
 
   local all
   all=$(printf '%s\n%s' "$late_inline" "$late_issue" | grep -v '^$' || true)
