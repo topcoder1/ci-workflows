@@ -37,6 +37,7 @@ _SHELL_SELFTESTS = [
     # the completeness guard below found both on its first execution.
     "selftest/test_claude_review_max_turns_type.sh",
     "selftest/test_claude_review_lost_findings_guard.sh",
+    "selftest/test_claude_review_cost_guardrails.sh",
     "selftest/test_codex_verdict_gate.sh",
     "selftest/test_findings_reply_narrowing.sh",
     "selftest/test_pr_files_listing.sh",

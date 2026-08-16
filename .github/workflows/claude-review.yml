@@ -27,6 +27,14 @@ on:
         # non-numeric at input-validation time, before interpolation happens.
         type: number
         default: 25
+      max_budget_usd:
+        description: "Hard per-run spend ceiling in USD, passed as --max-budget-usd. Fleet baseline per review (2026-08, Sonnet 4.6, longest-runs-biased sample n=39): median $0.61, p90 $1.06, max $2.68; the Aug-14 subagent fan-out regression ran $3-7. A budget stop FAILS the check with a message naming this input - raise it per-repo only for legitimately huge diffs."
+        required: false
+        # MUST stay `number` for exactly the reason max_turns must (see
+        # above): the value is interpolated verbatim into `claude_args`.
+        # Guarded by selftest/test_claude_review_cost_guardrails.sh.
+        type: number
+        default: 3
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -36,6 +44,36 @@ jobs:
     name: Claude Review
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
+    # Wall-clock backstop for the whole job (install + review + guard). The
+    # review step carries its own, tighter `timeout-minutes` below; this one
+    # only has to outlast it plus the guard, so a hung install or a wedged
+    # post-step can't hold a REQUIRED check open for GitHub's 6h default.
+    timeout-minutes: 35
+    env:
+      # THE CLAUDE CODE CLI IS PINNED. The pre-install step below used to
+      # take `install.sh`'s default (= latest), so every CLI release reached
+      # a REQUIRED check on ~49 repos with no review. Three fleet incidents in
+      # twelve days came through that channel: 2026-08-04 the CLI's default
+      # model flipped opus-4-8 -> sonnet-5 (fleet review spend ~$50 -> ~$700
+      # /day until --model was pinned); 2026-08-14 the bundled multi-agent
+      # `/code-review` skill fanned out subagents that --max-turns never
+      # bounds ($3-7 per review, ci-workflows#165); 2026-08-16 2.1.233's
+      # tool-output offload put a 166 KB `gh pr diff` in a file the allowlist
+      # can't read (wxa_vpn#1564 red on --max-turns). The pin is the
+      # rollback lever: revert this ONE line and the fleet is back on the
+      # last known-good build within one @main resolution.
+      #
+      # Bumping the pin (manual PR to this repo, like every change here):
+      #   1. bump the version below;
+      #   2. merge, then watch the next 5 `review / Claude Review` runs
+      #      across the fleet - `total_cost_usd` in the run log should stay
+      #      <= ~$1.50 and duration <= ~10 min (baseline p90 $1.06 / 7 min);
+      #      the guard step also warns on any run over the soft threshold;
+      #   3. anything else -> revert the pin.
+      # Floor: --max-budget-usd enforcement (subagent spend counted, running
+      # subagents stopped) needs >= 2.1.217; the pre-install step refuses to
+      # review on any other version than the pin.
+      CLAUDE_CODE_VERSION: "2.1.233"
     permissions:
       contents: read
       pull-requests: write # action posts inline comments
@@ -195,24 +233,41 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
+          # The version actually on disk, "" when there is no binary yet.
+          # `claude --version` prints e.g. "2.1.233 (Claude Code)".
+          installed_version() {
+            [ -x "$HOME/.local/bin/claude" ] || { echo ""; return; }
+            "$HOME/.local/bin/claude" --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+          }
           # install.sh intermittently exits 0 WITHOUT placing the binary (#1290),
           # which used to fail the whole review job on a coin-flip. Retry up to
-          # 3 times, then fall back to npm, before giving up.
+          # 3 times, then fall back to npm, before giving up. `install.sh
+          # [stable|latest|VERSION]` hands the target to `claude install`; a
+          # binary of any OTHER version counts as a failed attempt too - see
+          # CLAUDE_CODE_VERSION at the job level for why the pin is load-bearing.
           for attempt in 1 2 3; do
-            curl -fsSL https://claude.ai/install.sh | bash || true
-            [ -x "$HOME/.local/bin/claude" ] && break
-            echo "::warning::Claude install attempt ${attempt}/3 produced no binary; retrying..."
+            curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION" || true
+            [ "$(installed_version)" = "$CLAUDE_CODE_VERSION" ] && break
+            echo "::warning::Claude install attempt ${attempt}/3 produced no ${CLAUDE_CODE_VERSION} binary (got '$(installed_version)'); retrying..."
             sleep $((attempt * 5))
           done
-          if [ ! -x "$HOME/.local/bin/claude" ]; then
-            echo "::warning::install.sh failed 3× — falling back to npm (@anthropic-ai/claude-code)"
-            npm install -g @anthropic-ai/claude-code || true
-            if command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
+          if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::warning::install.sh failed 3× — falling back to npm (@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION})"
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" || true
+            if command -v claude >/dev/null 2>&1; then
               ln -sf "$(command -v claude)" "$HOME/.local/bin/claude"
             fi
           fi
           if [ ! -x "$HOME/.local/bin/claude" ]; then
             echo "::error::Claude Code binary not at $HOME/.local/bin/claude after 3 install attempts + npm fallback — check upstream issue #1290"
+            exit 1
+          fi
+          # FAIL CLOSED on an unpinned binary: an unexpected version means
+          # the fleet is back on the floating channel that caused the Aug-04,
+          # Aug-14 and Aug-16 incidents, and below 2.1.217 --max-budget-usd
+          # would silently stop bounding subagent spend.
+          if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::error::Claude Code '$(installed_version)' installed but the pin is ${CLAUDE_CODE_VERSION} — refusing to review on an unpinned binary (the pin is the fleet's rollback lever; bump CLAUDE_CODE_VERSION in claude-review.yml deliberately, never here)"
             exit 1
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -231,6 +286,12 @@ jobs:
       - name: Claude Code Review
         id: claude
         if: ${{ steps.bot_check.outputs.skipped != 'true' }}
+        # Wall-clock ceiling for the review itself. Legit reviews run 0.5-10
+        # min (fleet baseline p90 ~7 min; the longest on record 18 min); the
+        # Aug-14 fan-out ran 25-134 min and one run 629 min. Step-level, not
+        # job-level, so a timed-out review still reaches the lost-findings
+        # guard below, which recovers whatever was posted before the cut.
+        timeout-minutes: 30
         # Pinned to v1.0.112 (2026-05-04) — v1.0.113/.114 (2026-05-06) ship a
         # regression where the action's setup step fails to install the Claude
         # Code native binary, causing every Claude Review across the fleet to
@@ -300,9 +361,21 @@ jobs:
           # versions (2.1.227 lists `Task`, its tool_use blocks say `Agent`).
           # Verified on 2.1.227 `-p`: the four tools disappear from the init
           # tool list. Guarded by selftest/test_claude_review_lost_findings_guard.sh.
+          #
+          # --max-budget-usd: the one bound that is NAME-INDEPENDENT. The turn
+          # cap counts parent turns and the deny-list matches tool names (the
+          # subagent tool has already been `Task` and `Agent`); a renamed or
+          # new fan-out tool reopens both silently. The CLI's own spend cap
+          # counts subagent spend too and stops running subagents when it is
+          # reached (Claude Code >= 2.1.217, hence the pin's floor). Sized
+          # from the fleet baseline in the input's description; a budget stop
+          # is `subtype: error_max_budget_usd`, `is_error: true`, which the
+          # action fails on and the guard below names explicitly. Guarded by
+          # selftest/test_claude_review_cost_guardrails.sh.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns ${{ inputs.max_turns }}
+            --max-budget-usd ${{ inputs.max_budget_usd }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Task,Agent,Skill,Workflow"
 
@@ -376,9 +449,17 @@ jobs:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
           REVIEW_BOT: claude[bot]
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
         run: |
           set -uo pipefail
           INLINE_TOOL="mcp__github_inline_comment__create_inline_comment"
+          # Soft per-run spend threshold (USD). Not a gate: above it the run
+          # stays green with a warning. Sized above the fleet baseline
+          # (p90 $1.06, max $2.68 - see the max_budget_usd input) so a normal
+          # week prints nothing and a regression like Aug-14 ($3-7/run) prints
+          # on every run from its first hour, in the run log AND the run's
+          # annotations, without a cron, a PAT, or an Admin API key.
+          SOFT_COST_USD=2
           T=$(mktemp -d)
           trap 'rm -rf "$T"' EXIT
           note() { echo "review-guard: $*"; }
@@ -407,8 +488,28 @@ jobs:
             SUBAGENT_CALLS=$(jq '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
                    | select(.type == "tool_use" and (.name == "Task" or .name == "Agent" or .name == "Skill" or .name == "Workflow"))] | length' "$EXECUTION_FILE" 2>/dev/null) || SUBAGENT_CALLS=0
             note "transcript: inline-comment calls=${INLINE_CALLS} (errored=${INLINE_ERR}) subagent/skill calls=${SUBAGENT_CALLS} permission denials=${DENIED_N}${DENIED_TOOLS:+ (${DENIED_TOOLS})}"
+
+            # ---- 1b. spend: the CLI's own accounting on the result object ----
+            # A run the CLI stopped at --max-budget-usd reports
+            # `subtype: error_max_budget_usd` (is_error: true, no final
+            # message): the review is INCOMPLETE and must never read as green,
+            # so this fails here too - naming the cap and the caller input
+            # that raises it - even if a future action version treats a
+            # budget stop as success. Reads from the transcript only, so this
+            # verdict is deterministic, unlike the API reads below.
+            RESULT_SUBTYPE=$(jq -r '[.[] | objects | select(.type == "result")] | last | .subtype // "" | strings' "$EXECUTION_FILE" 2>/dev/null) || RESULT_SUBTYPE=""
+            RESULT_COST=$(jq -r '[.[] | objects | select(.type == "result")] | last | .total_cost_usd // 0 | numbers' "$EXECUTION_FILE" 2>/dev/null) || RESULT_COST=0
+            RESULT_COST=${RESULT_COST:-0}
+            note "transcript: result subtype=${RESULT_SUBTYPE:-?} total_cost_usd=${RESULT_COST} (soft threshold \$${SOFT_COST_USD}, hard cap \$${MAX_BUDGET_USD:-?})"
+            if [ "$RESULT_SUBTYPE" = "error_max_budget_usd" ]; then
+              echo "::error::review-guard: the CLI stopped this review at the \$${MAX_BUDGET_USD:-?} spend cap (total_cost_usd=${RESULT_COST}) - the review is INCOMPLETE. A legitimately huge diff: raise this repo's \`max_budget_usd\` caller input. Otherwise this is a per-run spend regression (the Aug-14 subagent fan-out shape, ci-workflows#165) - check the Claude Code pin before touching the cap."
+              exit 1
+            fi
+            if awk -v c="$RESULT_COST" -v t="$SOFT_COST_USD" 'BEGIN { exit !((c + 0) > (t + 0)) }'; then
+              warn "spend: total_cost_usd=${RESULT_COST} exceeds the \$${SOFT_COST_USD} soft threshold (fleet baseline p90 \$1.06, max \$2.68). One is a big diff; several across the fleet in a day is the Aug-14 regression signature - compare recent runs' total_cost_usd before assuming the diff."
+            fi
           else
-            warn "no readable transcript at '${EXECUTION_FILE:-<unset>}' - denial digest and findings recovery unavailable"
+            warn "no readable transcript at '${EXECUTION_FILE:-<unset>}' - denial digest, spend check and findings recovery unavailable"
           fi
 
           # ---- 2. FACT: inline review comments the bot posted this run -------
