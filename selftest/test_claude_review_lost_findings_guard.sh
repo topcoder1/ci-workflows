@@ -272,6 +272,7 @@ run_guard() {
         PATH="$T/bin:$PATH" \
         REPO="whois-api-llc/wxa-graph" PR="403" STARTED_AT="$SINCE" \
         REVIEW_BOT="claude[bot]" RUN_URL="https://example.test/run/1" GITHUB_RUN_ID="31925279662" \
+        MAX_BUDGET_USD="${MAX_BUDGET_USD:-3}" \
         EXECUTION_FILE="${EXECUTION_FILE:-}" \
         GH_PULLS_JSON="${GH_PULLS_JSON:-$T/none.json}" GH_ISSUES_JSON="${GH_ISSUES_JSON:-$T/none.json}" \
         GH_PULLS_FAIL="${GH_PULLS_FAIL:-0}" GH_ISSUES_FAIL="${GH_ISSUES_FAIL:-0}" GH_POST_FAIL="${GH_POST_FAIL:-0}" \
@@ -555,6 +556,59 @@ if [ "$RC" -eq 1 ] && posted && posted_has "Nothing beyond the summary was recov
   pass "S17b a final message that merely restates the summary is NOT recovery: job still fails"
 else
   fail "S17b (rc=$RC):"; sed 's/^/    /' "$T/out.s17b.txt"
+fi
+
+# --- S19: the CLI stopped the run at --max-budget-usd -> the review is incomplete, FAIL ----
+# Real shape from Claude Code 2.1.222 `-p --max-budget-usd 0.0005`: the result
+# object is `subtype: error_max_budget_usd`, `is_error: true`, `result: null`.
+# The action fails on is_error itself today; the guard fails on the subtype so
+# a future action version that reads a budget stop as success cannot green a
+# half-review. The verdict comes from the transcript alone, so no GitHub read
+# happens first (a 502 there must not turn this into a fail-safe exit 0).
+jq -nc '[
+  {type: "system", subtype: "init"},
+  {type: "assistant", message: {content: [{type: "tool_use", id: "tu_diff", name: "Bash", input: {command: "gh pr diff 403"}}]}},
+  {type: "result", subtype: "error_max_budget_usd", is_error: true, num_turns: 4, total_cost_usd: 3.0412, result: null, permission_denials: []}
+]' > "$T/x19.json"
+EXECUTION_FILE="$T/x19.json" GH_PULLS_FAIL=1 GH_ISSUES_FAIL=1 MAX_BUDGET_USD=3 run_guard s19
+if [ "$RC" -eq 1 ] && ! posted \
+   && grep -qF '::error::review-guard: the CLI stopped this review at the $3 spend cap (total_cost_usd=3.0412)' "$T/out.s19.txt" \
+   && grep -qF 'raise this repo'"'"'s `max_budget_usd` caller input' "$T/out.s19.txt" \
+   && grep -qF "result subtype=error_max_budget_usd total_cost_usd=3.0412" "$T/out.s19.txt" \
+   && ! grep -q "gh api" "$T/gh.log"; then
+  pass "S19 subtype error_max_budget_usd: FAILS (exit 1) naming the cap and the max_budget_usd input, before any GitHub read"
+else
+  fail "S19 (rc=$RC):"; sed 's/^/    /' "$T/out.s19.txt"; sed 's/^/    gh: /' "$T/gh.log"
+fi
+
+# --- S20: over the soft threshold but under the cap -> WARN, stay green ------------------------
+# The Aug-14 fan-out ran $3-7 per review while every check stayed green; a
+# clean run over $2 must show up in the log/annotations without failing.
+issue_json "No issues found. Diff is small and contained." > "$T/i20.json"
+jq -nc '[
+  {type: "system", subtype: "init"},
+  {type: "result", subtype: "success", is_error: false, num_turns: 9, total_cost_usd: 2.5, result: "No issues found.", permission_denials: []}
+]' > "$T/x20.json"
+EXECUTION_FILE="$T/x20.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i20.json" run_guard s20
+if [ "$RC" -eq 0 ] && ! posted \
+   && grep -qF '::warning::review-guard: spend: total_cost_usd=2.5 exceeds the $2 soft threshold' "$T/out.s20.txt"; then
+  pass "S20 total_cost_usd 2.5 (> soft \$2, < cap): warning printed, exit 0, no comment"
+else
+  fail "S20 (rc=$RC):"; sed 's/^/    /' "$T/out.s20.txt"
+fi
+
+# --- S21: a normal run prints the spend line and no warning ---------------------------------
+jq -nc '[
+  {type: "system", subtype: "init"},
+  {type: "result", subtype: "success", is_error: false, num_turns: 9, total_cost_usd: 0.61, result: "No issues found.", permission_denials: []}
+]' > "$T/x21.json"
+EXECUTION_FILE="$T/x21.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i20.json" run_guard s21
+if [ "$RC" -eq 0 ] && ! posted \
+   && grep -qF "result subtype=success total_cost_usd=0.61" "$T/out.s21.txt" \
+   && ! grep -q "review-guard: spend:" "$T/out.s21.txt"; then
+  pass "S21 total_cost_usd 0.61: spend noted, no warning, exit 0"
+else
+  fail "S21 (rc=$RC):"; sed 's/^/    /' "$T/out.s21.txt"
 fi
 
 echo

@@ -12,8 +12,25 @@ Runs Anthropic's [`claude-code-action@v1`](https://github.com/anthropics/claude-
 
 - `review_focus` (string, optional) — appended to the base review prompt for project-specific guidance
 - `checkout_depth` (number, default `0`) — git fetch-depth (0 = full history)
+- `max_turns` (number, default `25`) — cap on agentic turns; raise per-repo when large diffs exhaust it
+- `max_budget_usd` (number, default `3`) — hard per-run spend ceiling (`--max-budget-usd`, counts subagent spend). Fleet baseline per review: median $0.61 / p90 $1.06 / max $2.68. A budget stop **fails** the check with a message naming this input; raise it per-repo only for legitimately huge diffs.
 
 **Required secret:** `ANTHROPIC_API_KEY`
+
+**Spend guardrails (added after the 2026-08-14..16 incident, when a Claude Code CLI behavior change reached this REQUIRED lane through an unpinned install and ran $3–7 per review for two days, pushing the org over its monthly cap and pausing the API for CI _and_ production):**
+
+| Guardrail                                                                                      | Where                                                                                                                    | What it bounds                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code CLI **pinned** (`CLAUDE_CODE_VERSION`, exact semver ≥ 2.1.217)                     | `jobs.review.env` in `claude-review.yml`; the pre-install step targets it and **refuses** to review on any other version | The channel all three August incidents came through (default-model flip Aug 4, `/code-review` subagent fan-out Aug 14, tool-output offload Aug 16). The pin is the **rollback lever**. |
+| `--max-budget-usd ${{ inputs.max_budget_usd }}`                                                | `claude_args`                                                                                                            | Per-run dollars, subagent spend included; name-independent, unlike `--disallowedTools`                                                                                                 |
+| `--max-turns ${{ inputs.max_turns }}` + `--disallowedTools "Task,Agent,Skill,Workflow"`        | `claude_args`                                                                                                            | Parent turns; the fan-out tools by name                                                                                                                                                |
+| review step `timeout-minutes: 30`, job `timeout-minutes: 35`                                   | `claude-review.yml`                                                                                                      | Wall clock (step-level so a timed-out review still reaches the lost-findings guard)                                                                                                    |
+| Guard step: fails on `subtype: error_max_budget_usd`; `::warning::` when `total_cost_usd` > $2 | `Lost-findings guard` step                                                                                               | Detection in-band, per run, minutes after the fact — no cron, PAT, or Admin API key                                                                                                    |
+| `anthropics/claude-code-action` in its **own** dependabot group                                | `.github/dependabot.yml`                                                                                                 | A behavior-changing action bump can no longer ride the routine minor/patch batch                                                                                                       |
+
+**Bumping the CLI pin (or merging a `claude-code-action` bump):** change `CLAUDE_CODE_VERSION` (one line) → merge (manual, as always in this repo) → watch the next 5 `review / Claude Review` runs across the fleet: `total_cost_usd` in the run log should stay ≤ ~$1.50 and duration ≤ ~10 min; the guard warns on any run over the soft threshold. Anything else → revert the pin. Note that `gh run rerun` replays the reusable at the SHA the original run resolved, so a fix merged to `main` reaches existing PRs only through a **fresh event** (push / close-reopen), never a re-run.
+
+Selftests: `selftest/test_claude_review_cost_guardrails.sh` (static contract), `selftest/test_claude_review_lost_findings_guard.sh` S19–S21 (guard verdicts), `selftest/test_claude_review_max_turns_type.sh`.
 
 ### `prettier-autofix.yml`
 
