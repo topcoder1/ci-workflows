@@ -78,6 +78,24 @@ arbitrary helper scripts; that's a different kind of repo.
   tool must not suppress it — and that it can never fail the job, since a
   hard failure would redden every currently-green consumer on merge. The
   version pin itself is covered by `test_lint_ruff_version_is_pinned`.
+- `test_claude_review_lost_findings_guard.sh` — `claude-review.yml` must
+  keep the reviewer single-pass and must not let findings vanish. On
+  wxa-graph#403 (run 31925279662, 2026-08-16) the lane ran 52 min, posted
+  "Flagged 6 issues inline", created zero inline comments and concluded
+  SUCCESS; the log named no denied tool and four findings were lost. Cause:
+  since the action's 1.0.190 bump (Claude Code 2.1.227) the reviewer's first
+  call is the CLI's bundled `Skill(code-review)`, a background subagent with
+  its own finder/verifier fan-out that `--max-turns` never sees — the whole
+  fleet went from 1-8 min to 20-134 min per review at the bump. Pins (1)
+  `--disallowedTools Task,Agent,Skill,Workflow` in `claude_args`, and (2)
+  the guard: extracts the shipped bash and runs it against a stubbed `gh` —
+  the summary's "Flagged N issues inline" claim vs the inline comments the
+  bot actually created since the job's anchor; denials printed with tool
+  names; denied/errored inline bodies and subagent reports recovered into
+  one fallback comment phrased for bb-unaddressed-findings; job fails only
+  when nothing was recoverable or the fallback could not be posted; every
+  guard-side read error (API failure, missing/malformed transcript,
+  unrecognized phrasing) is a warning and exit 0.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

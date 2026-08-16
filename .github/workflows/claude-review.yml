@@ -218,7 +218,18 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/claude" --version
 
+      # Wall-clock anchor for the lost-findings guard below: only comments the
+      # review bot creates AFTER this instant count as this run's output. A
+      # re-run attempt gets a fresh anchor, so an earlier attempt's comments
+      # never satisfy a later attempt's claim.
+      - name: Record review start (lost-findings guard anchor)
+        id: clock
+        if: ${{ steps.bot_check.outputs.skipped != 'true' }}
+        run: |
+          echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Claude Code Review
+        id: claude
         if: ${{ steps.bot_check.outputs.skipped != 'true' }}
         # Pinned to v1.0.112 (2026-05-04) — v1.0.113/.114 (2026-05-06) ship a
         # regression where the action's setup step fails to install the Claude
@@ -265,7 +276,305 @@ jobs:
           # agentic runs: fleet spend went ~$50/day → ~$700/day (Aug 4). The
           # turn cap bounds worst-case tokens regardless of future model or
           # binary behavior changes.
+          #
+          # --disallowedTools: no subagents, no skills, no workflows. The turn
+          # cap above only counts the PARENT session's turns. Since the action's
+          # 1.0.181->1.0.190 bump (Claude Code 2.1.218->2.1.227, merged
+          # 2026-08-14 19:10Z) the reviewer's first move is
+          # `Skill(code-review)` — the CLI's bundled multi-agent review, which
+          # runs as a BACKGROUND SUBAGENT and fans out finder/verifier agents
+          # of its own. All of that work sits inside ONE parent tool call, so
+          # `num_turns: 3` reviews took 25-134 minutes at $4-9 each, fleet-wide,
+          # from the minute the bump landed (durations were 1-8 min before).
+          # It is also where findings get lost: the subagent hands the
+          # findings back as text; whether they reach the PR depends on the
+          # parent (or the skill's `--comment` fallback to `gh api`, which the
+          # allowlist denies) re-posting them. wxa-graph#403 run 31925279662:
+          # summary "Flagged 6 issues inline", 0 inline comments,
+          # permission_denials_count: 3, check SUCCESS. Removing Task/Agent/
+          # Skill/Workflow from the toolset restores the bounded single-pass
+          # review this lane was designed as: the parent reads `gh pr diff`,
+          # posts findings itself through the inline-comment MCP tool, and
+          # the turn cap is real again. Both `Task` and `Agent` are named
+          # because the subagent tool has carried each name across CLI
+          # versions (2.1.227 lists `Task`, its tool_use blocks say `Agent`).
+          # Verified on 2.1.227 `-p`: the four tools disappear from the init
+          # tool list. Guarded by selftest/test_claude_review_lost_findings_guard.sh.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns ${{ inputs.max_turns }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --disallowedTools "Task,Agent,Skill,Workflow"
+
+      # LOST-FINDINGS GUARD. The summary comment is the model's CLAIM about
+      # what it posted; the inline review comments on the PR are the FACT.
+      # When the two disagree in the losing direction the check used to stay
+      # green and the findings were gone: the action hides the SDK stream
+      # (`show_full_output: false`), so the run log holds only a
+      # `permission_denials_count` and the post-step's "No buffered inline
+      # comments" — nothing that says WHICH tool was denied or WHAT the
+      # findings were (wxa-graph#403, 2026-08-16 04:44Z: "Flagged 6 issues
+      # inline", zero inline comments, SUCCESS; four of the six were
+      # unrecoverable).
+      #
+      # This step:
+      #   1. prints a digest of the transcript the action leaves on disk
+      #      (`execution_file`): every permission denial WITH its tool name
+      #      and input, plus inline-comment / subagent call counts;
+      #   2. reads the FACT from GitHub — inline review comments the bot
+      #      created since the anchor above (the buffered
+      #      classify_inline_comments path posts inside the action's own
+      #      post-step, which has already run, so both paths are visible);
+      #   3. reads the CLAIM from the bot's summary ("Flagged N issues
+      #      inline", the exact shape the prompt mandates);
+      #   4. if N >= 1 and nothing was posted: recovers what it can from the
+      #      transcript — the bodies of denied, errored, and buffered-but-
+      #      never-posted inline-comment calls, any subagent/skill report,
+      #      the final message — posts it as ONE
+      #      fallback comment phrased so bb-unaddressed-findings.sh counts it
+      #      (`flagged N issue`), and FAILS the job only when the transcript
+      #      held nothing beyond the summary itself, or when the recovered
+      #      findings could not be posted (a job log is not the PR).
+      #      Recovered and posted = warn, green. Partial loss (0 < posted < N)
+      #      posts whatever was recovered and never fails.
+      #
+      # FAIL-SAFE on the reads that decide the verdict: an API error listing
+      # either comment set, or a summary phrased outside "Flagged N issue(s)",
+      # ends in a warning and exit 0 — a guard that reddens a REQUIRED check
+      # on its own flakiness is worse than the gap it closes. The transcript
+      # is different in kind: it is evidence for RECOVERY, not for the
+      # verdict. Claim > posted is established from GitHub alone, so a
+      # missing or malformed transcript cannot make a real loss spurious — it
+      # only makes it unrecoverable, and unrecoverable loss is the red case
+      # by design (the incident had no transcript either). Malformed entries
+      # are skipped, never fatal. Every branch above is pinned by
+      # selftest/test_claude_review_lost_findings_guard.sh, which extracts
+      # and executes this shipped bash against a stubbed `gh`.
+      #
+      # OVERLAP NOTE: the anchor is time-based, so two live runs on ONE PR
+      # would see each other's comments. They do not overlap: every caller
+      # installed from templates/ci-workflows/callers/pr-review.yml carries
+      # `concurrency: claude-review-<pr>-<draft|live>, cancel-in-progress:
+      # true`, and a cancelled run's guard never executes (`!cancelled()`).
+      # A job-level concurrency group in this reusable would make that
+      # caller-independent — deliberately not bundled into this change.
+      #
+      # ORDERING NOTE: claude-code-action's "Post buffered inline comments"
+      # is a regular composite step (composite actions have no `post:`
+      # hook), so by the time this step starts, both the live and the
+      # buffered posts have already landed — run 31925279662's log shows it
+      # (`__anthropics_claude-code-action.__run_8`) before the composite's
+      # own post phase (`...setup-bun` cache save).
+      - name: Lost-findings guard (summary claim vs inline comments posted)
+        id: guard
+        if: ${{ !cancelled() && steps.bot_check.outputs.skipped != 'true' && steps.claude.outcome != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          STARTED_AT: ${{ steps.clock.outputs.started_at }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          REVIEW_BOT: claude[bot]
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          INLINE_TOOL="mcp__github_inline_comment__create_inline_comment"
+          T=$(mktemp -d)
+          trap 'rm -rf "$T"' EXIT
+          note() { echo "review-guard: $*"; }
+          warn() { echo "::warning::review-guard: $*"; }
+
+          # ---- 1. transcript digest -----------------------------------------
+          # Every read tolerates shape drift: `objects` drops non-object
+          # entries, and a jq failure leaves the count at its default rather
+          # than aborting the step - the transcript is evidence, never a gate.
+          DENIED_N=0; DENIED_TOOLS=""; INLINE_CALLS=0; INLINE_ERR=0; SUBAGENT_CALLS=0
+          HAVE_TRANSCRIPT=0
+          if [ -n "${EXECUTION_FILE:-}" ] && [ -s "$EXECUTION_FILE" ] \
+             && jq -e 'type == "array"' "$EXECUTION_FILE" >/dev/null 2>&1; then
+            HAVE_TRANSCRIPT=1
+            DENIED_N=$(jq '[.[] | objects | select(.type == "result") | .permission_denials[]? | objects] | length' "$EXECUTION_FILE" 2>/dev/null) || DENIED_N=0
+            DENIED_TOOLS=$(jq -r '[.[] | objects | select(.type == "result") | .permission_denials[]? | objects | .tool_name | strings] | unique | join(",")' "$EXECUTION_FILE" 2>/dev/null) || DENIED_TOOLS=""
+            jq -r '.[] | objects | select(.type == "result") | .permission_denials[]? | objects
+                   | "::warning::review-guard: permission denied for \(.tool_name // "?"): \((.tool_input | tostring)[0:300])"' "$EXECUTION_FILE" 2>/dev/null \
+              || warn "transcript: could not list permission denials (unexpected shape)"
+            INLINE_CALLS=$(jq --arg t "$INLINE_TOOL" '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                   | select(.type == "tool_use" and .name == $t)] | length' "$EXECUTION_FILE" 2>/dev/null) || INLINE_CALLS=0
+            INLINE_ERR=$(jq --arg t "$INLINE_TOOL" '
+                   ([.[] | objects | select(.type == "assistant") | .message.content[]? | objects | select(.type == "tool_use" and .name == $t) | .id]) as $ids
+                   | [.[] | objects | select(.type == "user") | .message.content[]? | objects
+                      | select(.type == "tool_result" and .is_error == true and ((.tool_use_id as $i | $ids | index($i)) != null))] | length' "$EXECUTION_FILE" 2>/dev/null) || INLINE_ERR=0
+            SUBAGENT_CALLS=$(jq '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                   | select(.type == "tool_use" and (.name == "Task" or .name == "Agent" or .name == "Skill" or .name == "Workflow"))] | length' "$EXECUTION_FILE" 2>/dev/null) || SUBAGENT_CALLS=0
+            note "transcript: inline-comment calls=${INLINE_CALLS} (errored=${INLINE_ERR}) subagent/skill calls=${SUBAGENT_CALLS} permission denials=${DENIED_N}${DENIED_TOOLS:+ (${DENIED_TOOLS})}"
+          else
+            warn "no readable transcript at '${EXECUTION_FILE:-<unset>}' - denial digest and findings recovery unavailable"
+          fi
+
+          # ---- 2. FACT: inline review comments the bot posted this run -------
+          # `--paginate` emits one JSON array per page back to back; `jq -n
+          # '[inputs[] ...]'` flattens one page or many the same way.
+          if ! gh api "repos/${REPO}/pulls/${PR}/comments?per_page=100" --paginate \
+                 | jq -c -n --arg since "$STARTED_AT" --arg bot "$REVIEW_BOT" \
+                     '[inputs[] | objects | select(.user.login == $bot and .created_at >= $since) | {body: (.body // "")}]' \
+                 > "$T/posted.json"; then
+            warn "could not list review comments on PR #${PR}; cannot verify inline findings - skipping"
+            exit 0
+          fi
+          POSTED=$(jq 'length' "$T/posted.json")
+
+          # ---- 3. CLAIM: the bot's summary comment(s) this run ---------------
+          if ! SUMMARIES=$(gh api "repos/${REPO}/issues/${PR}/comments?per_page=100" --paginate \
+                 | jq -rn --arg since "$STARTED_AT" --arg bot "$REVIEW_BOT" \
+                     '[inputs[] | select(.user.login == $bot and .created_at >= $since)] | .[] | .body'); then
+            warn "could not list issue comments on PR #${PR}; cannot read the review summary - skipping"
+            exit 0
+          fi
+          # The prompt mandates "Flagged N issues inline - see comments." Any
+          # other phrasing reads as 0 and the guard stays silent: accepted, and
+          # asserted by the selftest, because guessing at prose is how a guard
+          # starts reddening clean runs.
+          CLAIMED=0
+          if printf '%s' "$SUMMARIES" | grep -qi 'inline'; then
+            CLAIMED=$(printf '%s\n' "$SUMMARIES" \
+                      | grep -oiE 'flagged +[0-9]+ +(issues?|bugs?|findings?|problems?)' \
+                      | grep -oE '[0-9]+' | sort -n | tail -1)
+            CLAIMED=${CLAIMED:-0}
+          fi
+          if [ -z "$SUMMARIES" ]; then
+            warn "no summary comment by ${REVIEW_BOT} since ${STARTED_AT} - the review protocol requires one"
+          fi
+          note "PR #${PR}: summary claims ${CLAIMED} inline finding(s); ${POSTED} inline review comment(s) by ${REVIEW_BOT} since ${STARTED_AT}"
+
+          if [ "$CLAIMED" -le "$POSTED" ]; then
+            exit 0
+          fi
+
+          # ---- 4. losing direction: recover, report, decide ------------------
+          : > "$T/denied.md"; : > "$T/errored.md"; : > "$T/unlanded.md"; : > "$T/subagents.md"; : > "$T/final.md"
+          if [ "$HAVE_TRANSCRIPT" -eq 1 ]; then
+            # (a) inline-comment calls denied at the permission layer: the
+            #     exact path/line/body the model wrote, straight from
+            #     permission_denials[].tool_input.
+            jq -r --arg t "$INLINE_TOOL" '.[] | objects | select(.type == "result") | .permission_denials[]? | objects
+                   | select(.tool_name == $t) | .tool_input | objects
+                   | select((.body | type) == "string" and (.body | length) > 0)
+                   | "- `\(.path // "?"):\(if .startLine then "\(.startLine)-" else "" end)\(.line // "?")` - \(.body // "")"' "$EXECUTION_FILE" > "$T/denied.md" 2>/dev/null \
+              || warn "transcript: could not read denied inline-comment calls (unexpected shape)"
+            # (b) inline-comment calls that ran but errored (422 line-not-in-diff etc.).
+            jq -r --arg t "$INLINE_TOOL" '
+                   ([.[] | objects | select(.type == "user") | .message.content[]? | objects | select(.type == "tool_result" and .is_error == true) | .tool_use_id]) as $err
+                   | .[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                   | select(.type == "tool_use" and .name == $t and ((.id as $i | $err | index($i)) != null)) | .input | objects
+                   | select((.body | type) == "string" and (.body | length) > 0)
+                   | "- `\(.path // "?"):\(if .startLine then "\(.startLine)-" else "" end)\(.line // "?")` - \(.body // "")"' "$EXECUTION_FILE" > "$T/errored.md" 2>/dev/null \
+              || warn "transcript: could not read errored inline-comment calls (unexpected shape)"
+            # (b2) inline-comment calls that SUCCEEDED but never landed: with
+            #      classify_inline_comments the first call is only buffered, and
+            #      the action's post-step can drop it (classifier says "probe")
+            #      or fail. Their bodies are still in tool_use.input; keep the
+            #      ones no posted comment carries.
+            jq -r --arg t "$INLINE_TOOL" --slurpfile posted "$T/posted.json" '
+                   ($posted[0] | map(.body)) as $bodies
+                   | ([.[] | objects | select(.type == "user") | .message.content[]? | objects | select(.type == "tool_result" and .is_error == true) | .tool_use_id]) as $err
+                   | [.[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                      | select(.type == "tool_use" and .name == $t and ((.id as $i | $err | index($i)) == null)) | .input | objects
+                      | select((.body | type) == "string" and (.body | length) > 0)
+                      | select(.body as $b | any($bodies[]; . == $b) | not)]
+                   | unique_by([.path, .startLine, .line, .body]) | .[]
+                   | "- `\(.path // "?"):\(if .startLine then "\(.startLine)-" else "" end)\(.line // "?")` - \(.body)"' "$EXECUTION_FILE" > "$T/unlanded.md" 2>/dev/null \
+              || warn "transcript: could not read buffered-but-unposted inline-comment calls (unexpected shape)"
+            # (c) what subagents / skills handed back - the fan-out's own report.
+            jq -r '
+                   ([.[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                     | select(.type == "tool_use" and (.name == "Task" or .name == "Agent" or .name == "Skill" or .name == "Workflow")) | .id]) as $ids
+                   | .[] | objects | select(.type == "user") | .message.content[]? | objects
+                   | select(.type == "tool_result" and ((.tool_use_id as $i | $ids | index($i)) != null))
+                   | (.content | if type == "array" then map(objects | .text // "") | join("\n") else tostring end)' "$EXECUTION_FILE" 2>/dev/null \
+                   | head -c 20000 > "$T/subagents.md" \
+              || warn "transcript: could not read subagent reports (unexpected shape)"
+            # (d) the model's final message.
+            jq -r '.[] | objects | select(.type == "result") | .result // "" | strings' "$EXECUTION_FILE" 2>/dev/null \
+                   | head -c 8000 > "$T/final.md" \
+              || warn "transcript: could not read the final message (unexpected shape)"
+          fi
+          # What counts as RECOVERED: denied/errored inline bodies (exact),
+          # a subagent/skill report of any substance, or a final message that
+          # is clearly more than the one-line summary echoed back (>= 600
+          # chars and >= 2x the summary text). A bare "Flagged N issues
+          # inline" restated in the final message is NOT recovery - counting
+          # it would be the original bug with extra steps.
+          RECOVERED=0
+          SUB_CHARS=$(wc -c < "$T/subagents.md" | tr -d ' ')
+          FINAL_CHARS=$(wc -c < "$T/final.md" | tr -d ' ')
+          SUMMARY_CHARS=$(printf '%s' "$SUMMARIES" | wc -c | tr -d ' ')
+          if [ -s "$T/denied.md" ] || [ -s "$T/errored.md" ] || [ -s "$T/unlanded.md" ] || [ "$SUB_CHARS" -ge 200 ]; then
+            RECOVERED=1
+          elif [ "$FINAL_CHARS" -ge 600 ] && [ "$FINAL_CHARS" -ge $((SUMMARY_CHARS * 2)) ]; then
+            RECOVERED=1
+          fi
+
+          # Partial mismatch with nothing recoverable is a WARNING, never a
+          # failure: the model's count is noisy in both directions (the
+          # 03:41Z run on wxa-graph#403 said "Flagged 3" and posted 7), so
+          # once at least one inline comment landed, claim > posted is far
+          # more likely a miscount than a loss. Zero landed is the loss signal.
+          if [ "$POSTED" -ge 1 ] && [ "$RECOVERED" -eq 0 ]; then
+            warn "summary claims ${CLAIMED} inline finding(s) but only ${POSTED} posted; transcript holds nothing recoverable beyond the summary"
+            exit 0
+          fi
+
+          {
+            echo "<!-- claude-review:lost-findings run=${GITHUB_RUN_ID:-?} -->"
+            if [ "$POSTED" -eq 0 ]; then
+              echo "### ⚠️ Claude Review flagged ${CLAIMED} issue(s) inline, but 0 inline comments were posted"
+            else
+              echo "### ⚠️ Claude Review flagged ${CLAIMED} issue(s) inline, but only ${POSTED} inline comment(s) were posted"
+            fi
+            echo
+            echo "The review summary for this run claimed **${CLAIMED}** inline finding(s); **${POSTED}** inline review comment(s) by \`${REVIEW_BOT}\` exist since the job started (${STARTED_AT})."
+            echo "Transcript: ${DENIED_N} permission denial(s)${DENIED_TOOLS:+ (${DENIED_TOOLS})}, ${INLINE_CALLS} inline-comment tool call(s) (${INLINE_ERR} errored), ${SUBAGENT_CALLS} subagent/skill call(s)."
+            echo
+            if [ -s "$T/denied.md" ] || [ -s "$T/errored.md" ] || [ -s "$T/unlanded.md" ]; then
+              echo "#### Findings recovered from the transcript (inline-comment calls that never landed)"
+              cat "$T/denied.md" "$T/errored.md" "$T/unlanded.md"
+              echo
+            fi
+            if [ "$SUB_CHARS" -ge 200 ]; then
+              echo "#### Subagent / skill report (verbatim, truncated)"
+              echo
+              cat "$T/subagents.md"
+              echo
+            fi
+            if [ -s "$T/final.md" ]; then
+              echo "#### Final message"
+              echo
+              cat "$T/final.md"
+              echo
+            fi
+            if [ "$RECOVERED" -eq 0 ]; then
+              echo "**Nothing beyond the summary was recoverable from the transcript** - re-run \`review / Claude Review\` to get the findings inline. This job is failed so the check cannot stay green over lost findings."
+            else
+              echo "Re-run \`review / Claude Review\` to get these inline; until then treat this comment as the findings."
+            fi
+            echo
+            echo "_Posted by the lost-findings guard in topcoder1/ci-workflows claude-review.yml. Run: ${RUN_URL:-n/a}_"
+          } | head -c 60000 > "$T/comment.md"
+
+          COMMENT_POSTED=1
+          if ! gh pr comment "$PR" -R "$REPO" --body-file "$T/comment.md" >/dev/null; then
+            COMMENT_POSTED=0
+            warn "could not post the lost-findings comment on PR #${PR}; its body follows"
+            sed 's/^/    | /' "$T/comment.md"
+          fi
+
+          if [ "$RECOVERED" -eq 0 ]; then
+            echo "::error::review-guard: summary claims ${CLAIMED} inline finding(s), ${POSTED} posted, nothing recoverable from the transcript - failing so the check cannot stay green over lost findings"
+            exit 1
+          fi
+          if [ "$COMMENT_POSTED" -eq 0 ]; then
+            echo "::error::review-guard: recovered findings could not be posted to PR #${PR} (they are in this log above) - failing so the check cannot stay green over findings that are not on the PR"
+            exit 1
+          fi
+          warn "summary claims ${CLAIMED} inline finding(s), ${POSTED} posted - recovered findings were posted as a fallback comment"
+          exit 0
