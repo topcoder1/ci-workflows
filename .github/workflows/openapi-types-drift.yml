@@ -430,14 +430,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Cleanup on the PASSING path — the drift gate already said clean.
+          # Every gh call here is reporting hygiene: a comments-API failure
+          # (the 2026-08-17 ~2-minute 503 shape) must degrade to a warning,
+          # not turn a passing check red. A stale comment then survives until
+          # the next clean run, which is fine.
+          # selftest/test_comment_nonfatal_reporting.sh pins this.
           marker="<!-- openapi-types-drift:drift-detected -->"
-          existing=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
-            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+          if ! existing=$(gh api "/repos/$REPO/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1); then
+            echo "::warning::could not list PR comments to clean up a stale drift comment (comments API failure; non-fatal — types are clean)"
+            exit 0
+          fi
           if [ -n "$existing" ]; then
-            gh api -X DELETE "/repos/${{ github.repository }}/issues/comments/$existing" >/dev/null
-            echo "Removed stale drift comment ($existing) — types are now clean."
+            if gh api -X DELETE "/repos/$REPO/issues/comments/$existing" >/dev/null; then
+              echo "Removed stale drift comment ($existing) — types are now clean."
+            else
+              echo "::warning::could not remove stale drift comment ($existing) (comments API failure; non-fatal — types are clean)"
+            fi
           fi
 
       - name: Fail if drift detected

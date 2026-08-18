@@ -39,6 +39,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_claude_review_lost_findings_guard.sh",
     "selftest/test_claude_review_cost_guardrails.sh",
     "selftest/test_codex_verdict_gate.sh",
+    "selftest/test_comment_nonfatal_reporting.sh",
     "selftest/test_findings_reply_narrowing.sh",
     "selftest/test_pr_files_listing.sh",
     "selftest/test_prettier_scope_failsafe.sh",
@@ -758,4 +759,52 @@ def test_lint_ruff_version_is_pinned():
     assert "ruff_version must be an exact x.y.z version" in text, (
         "the step must reject non-exact ruff_version values; a caller passing "
         "`0.15.*` would float to latest-matching while still looking pinned"
+    )
+def test_sticky_comment_action_steps_are_nonfatal():
+    """A sticky-comment ACTION step is reporting, not the gate.
+
+    coverage-floor.yml renders its markdown table after the enforce step has
+    already passed or failed. On 2026-08-17 a ~2-minute GitHub comments-API
+    503 window failed the sticky-comment action itself, which failed the job
+    and turned the REQUIRED `coverage-floor` check red on wxa-graph PRs that
+    had measured 83.0% against an 80.2% floor (run 32055207104).
+    `continue-on-error: true` keeps a lost comment a step-level annotation
+    instead of a gate verdict.
+
+    The shell-step half of the same invariant (claude-review's bot-skip,
+    dependabot-auto-merge's revoke explanation, openapi-types-drift's
+    stale-comment cleanup) is behavioral, in
+    selftest/test_comment_nonfatal_reporting.sh; action steps can't be
+    executed there, so this sweep pins them structurally. It walks EVERY
+    workflow so the next sticky-comment step added to any lane inherits the
+    invariant, and it is anchored to coverage-floor.yml so a rename or
+    restructure cannot leave it sweeping nothing and passing vacuously.
+    """
+    sticky = "marocchino/sticky-pull-request-comment"
+    found_in = set()
+    for wf in sorted(WORKFLOWS_DIR.glob("*.yml")):
+        lines = wf.read_text().splitlines()
+        step_starts = [
+            i
+            for i, line in enumerate(lines)
+            if line.lstrip().startswith(("- name:", "- uses:"))
+        ]
+        for i, line in enumerate(lines):
+            if sticky not in line or "uses:" not in line:
+                continue
+            found_in.add(wf.name)
+            start = max((s for s in step_starts if s <= i), default=0)
+            end = min((s for s in step_starts if s > i), default=len(lines))
+            block = "\n".join(lines[start:end])
+            assert "continue-on-error: true" in block, (
+                f"{wf.name}: the sticky-comment step at line {i + 1} can fail "
+                "its job on a comments-API blip — reporting must not red a "
+                "gate that already decided (2026-08-17, run 32055207104). "
+                "Add `continue-on-error: true` to the step."
+            )
+    assert "coverage-floor.yml" in found_in, (
+        "coverage-floor.yml no longer posts its sticky comment via "
+        "marocchino/sticky-pull-request-comment — re-anchor this sweep to "
+        "however the reporting step is implemented now, so it keeps guarding "
+        "the real one"
     )

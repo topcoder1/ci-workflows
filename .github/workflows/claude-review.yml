@@ -212,8 +212,18 @@ jobs:
             exit 0
           fi
 
-          gh pr comment "$PR" --body "Skipped: bot-authored PR (\`$ACTOR\`), all ${TOTAL} commit(s) bot-authored. Dependency bumps are reviewed by the risk classifier and human merge gate. Pushing a non-bot commit to this branch re-enables the full review."
+          # Decision first, announcement second. The comment is reporting,
+          # not the gate: on 2026-08-17 a ~2-minute GitHub comments-API 503
+          # window failed this call, which under `set -e` failed the step —
+          # turning the REQUIRED review check red on five wxa-graph PRs whose
+          # decision had already been made (run 32055207194) — AND aborted
+          # before the skipped=true write, so downstream steps saw no
+          # decision at all. Record the decision, then post; a failed post
+          # degrades to a warning. selftest/test_comment_nonfatal_reporting.sh
+          # pins this.
           echo "skipped=true" >> "$GITHUB_OUTPUT"
+          gh pr comment "$PR" --body "Skipped: bot-authored PR (\`$ACTOR\`), all ${TOTAL} commit(s) bot-authored. Dependency bumps are reviewed by the risk classifier and human merge gate. Pushing a non-bot commit to this branch re-enables the full review." \
+            || echo "::warning::could not post the skip-announcement comment on PR #${PR} (comments API failure; non-fatal — the skip decision stands)"
 
       # Pre-install the Claude Code native binary explicitly. Workaround for
       # anthropics/claude-code-action#1290 (opened 2026-05-06): upstream
