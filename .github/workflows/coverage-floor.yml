@@ -769,6 +769,15 @@ jobs:
 
       - name: Post sticky PR comment
         if: github.event_name == 'pull_request' && always()
+        # Reporting only — the enforce step above is the gate and has already
+        # passed or failed by the time this runs. Without this, a
+        # comments-API failure fails the JOB and turns a PASSING required
+        # check red: observed 2026-08-17 (run 32055207104), when a ~2-minute
+        # GitHub 503 window redded `coverage-floor` on wxa-graph PRs that had
+        # measured 83.0% against a floor of 80.2%. Pinned by
+        # test_sticky_comment_action_steps_are_nonfatal in
+        # selftest/test_workflow_guards.py.
+        continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage-floor

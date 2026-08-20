@@ -264,8 +264,15 @@ jobs:
           fi
 
           gh pr merge --disable-auto "$PR" --repo "$REPO"
-          gh pr comment "$PR" --repo "$REPO" --body "Auto-merge revoked: this PR was opened by \`${ACTOR}\` and armed for a dependency bump, but it now carries commits that are not bot-authored. The arming decision was made from dependabot metadata and never saw this code, so it no longer applies. Review and merge manually, or move the change to its own PR."
           echo "Revoked auto-merge on PR #${PR}."
+
+          # The revoke above is the enforcement and stays fatal. The comment
+          # below reports a decision already executed: failing the step on a
+          # comments-API blip (the 2026-08-17 503 shape) would make a
+          # SUCCEEDED revoke look failed. Degrade to a warning instead.
+          # selftest/test_comment_nonfatal_reporting.sh pins both halves.
+          gh pr comment "$PR" --repo "$REPO" --body "Auto-merge revoked: this PR was opened by \`${ACTOR}\` and armed for a dependency bump, but it now carries commits that are not bot-authored. The arming decision was made from dependabot metadata and never saw this code, so it no longer applies. Review and merge manually, or move the change to its own PR." \
+            || echo "::warning::could not post the revoke explanation comment on PR #${PR} (comments API failure; non-fatal — the revoke itself succeeded)"
 
           # RESIDUAL RACE: if every required check is already green when the
           # non-bot commit lands, GitHub can merge before this job finishes.
