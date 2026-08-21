@@ -205,4 +205,211 @@ done
 check "FAIL_ON_REGRESSION='true' enforces" "1 regression" "$(run "true" "$d79")"
 check "FAIL_ON_REGRESSION=' TRUE ' enforces" "1 regression" "$(run " TRUE " "$d79")"
 
+# ===========================================================================
+# STRICT_FINDINGS mode — used ONLY by codex-review.yml's comment step when a
+# findings-DELIVERY comment could not be posted. The default classifier's
+# residual misses are acceptable because "the review comment still puts it in
+# front of a human"; in the lost-comment branch there is no comment and no
+# human, and claude-author-automerge's findings gate (unaddressed-findings.sh,
+# fetched at decision time) admits a WIDER finding alphabet than the default
+# signals. Strict mode over-approximates that alphabet, so a verdict the gate
+# would have held cannot be degraded to "provenance only" and slip to green.
+# Over-matching is the safe direction: it merely restores the pre-#169 red.
+# ===========================================================================
+
+run_strict() {
+  local enforce="$1" verdict="$2" rc state out
+  printf '%s' "$verdict" > "$tmp/verdict"
+  : > "$tmp/ghout"
+  set +e
+  out=$(VERDICT_FILE="$tmp/verdict" FAIL_ON_REGRESSION="$enforce" STRICT_FINDINGS=true \
+    GITHUB_OUTPUT="$tmp/ghout" node "$script" 2>&1)
+  rc=$?
+  set -e
+  state=$(sed -n 's/^verdict_state=//p' "$tmp/ghout" | head -1)
+  printf '%s %s' "$rc" "${state:-<none>}"
+  printf '%s\n' "$out" > "$tmp/last_out"
+}
+
+# The lost-comment incident shape: an off-format [P2] finding plus a CLEAN
+# trailer. Default mode is clean BY DESIGN (the human reads the comment);
+# strict mode must refuse to call it findings-free.
+p2_verdict='Coverage and state-mutation axes look fine.
+
+- [P2] no test exercises the new error path — src/api/handler.ts:41
+
+No regressions found on the contract-drift axis.
+VERDICT: CLEAN'
+check "off-format P2 verdict stays clean by default (human reads the comment)" \
+  "0 clean" "$(run true "$p2_verdict")"
+check "off-format P2 verdict is findings under STRICT_FINDINGS" \
+  "1 regression" "$(run_strict true "$p2_verdict")"
+check "STRICT_FINDINGS stays report-only without FAIL_ON_REGRESSION" \
+  "0 regression" "$(run_strict false "$p2_verdict")"
+
+# Mid-text VERDICT: REGRESSION with a CLEAN final line: default mode reads
+# only the final line (deliberately); the gate's SEVERITY_RE matches the
+# string anywhere and would hold the PR, so strict must too.
+check "mid-text VERDICT: REGRESSION is findings under strict" "1 regression" \
+  "$(run_strict true 'VERDICT: REGRESSION on the coverage axis.
+VERDICT: CLEAN')"
+
+# Regression marker whose path starts with a NON_FINDING prefix word: the
+# default scan drops `regression: na/...` (its none/na filter fires on the
+# word boundary at the slash) but the gate's raw marker counts it.
+check "'regression: na/...' path is findings under strict" "1 regression" \
+  "$(run_strict true 'regression: na/foo.py:3 - counter increment never asserted
+VERDICT: CLEAN')"
+# ...and the gate ALSO admits that marker behind prefixes its raw form
+# cannot consume — canon strips checkboxes, quotes and numbered lists
+# before the marker test — so strict must be prefix-agnostic (Codex
+# pre-review round 4 found the checkbox form slipping through).
+check "checkbox-prefixed 'regression: na/...' is findings under strict" "1 regression" \
+  "$(run_strict true '- [ ] regression: na/foo.py:3 - counter increment never asserted')"
+# Decoration glued to the word defeats a \b anchor (underscore is a word
+# character), while canon strips it and admits — Codex pre-review round 6.
+check "underscore-wrapped marker is findings under strict" "1 regression" \
+  "$(run_strict true '__regression__: no_helpers/util.py:7 - fallback path untested')"
+# The rescue must not swallow the legitimate clean shape: bare "regression:
+# none" has no path-shaped target and stays clean even under strict.
+check "strict: 'regression: none' still clean" "0 clean" \
+  "$(run_strict true 'regression: none
+VERDICT: CLEAN')"
+
+# KNOWN OVER-MATCH, pinned as a decision: a P-token DISCLAIMER reads as a
+# finding under strict. Tightening it means porting the gate's CLEAN_RE
+# suppressor into strict mode, and an over-wide suppressor there is the
+# #165 fail-open; the cost as-is is a pre-#169-style red on a lost comment,
+# in a vocabulary ("[P1]/[P2] issues") codex-review's own prompt never
+# elicits. Codex pre-review round 3 raised this; declined with rationale.
+check "strict: P-token disclaimer over-matches (deliberate)" "1 regression" \
+  "$(run_strict true 'No [P1] or [P2] issues found. VERDICT: CLEAN')"
+
+# Strict must NOT red plain clean prose — the degrade path exists so a lost
+# CLEAN verdict stays green, and these are the real clean shapes.
+check "strict: domain-rank#82 clean prose stays clean" "0 clean" \
+  "$(run_strict true 'No regressions found in the requested coverage, state-mutation, or contract-drift axes.')"
+check "strict: clean trailer verdict stays clean" "0 clean" \
+  "$(run_strict true 'Reviewed the diff.
+VERDICT: CLEAN')"
+check "strict: no-verdict sentinel still classifies no_verdict" "1 no_verdict" \
+  "$(run_strict true '(Codex produced no parseable verdict — see workflow logs)')"
+
+# ===========================================================================
+# PARITY SWEEP: strict mode must over-approximate the automerge findings
+# gate. The gate's predicate is evaluated HERE with the same regex variables
+# unaddressed-findings.sh ships and the same jq application it runs at
+# decision time (its late_issue select) — so if either file drifts, this
+# breaks in this repo's own CI, not on a merged PR. One-directional by
+# design: strict may fail bodies the gate would pass (that only restores the
+# pre-#169 red on a lost comment), never the reverse.
+# ===========================================================================
+if command -v jq >/dev/null 2>&1; then
+  eval "$(grep -E '^(_NOT_EMPTY|_BLOCK_PREFIX|_MARKER_CANON|_REGRESSION_MARKER|_REGRESSION_MARKER_RAW|FINDING_RE|CLEAN_RE|SEVERITY_RE)=' .github/scripts/unaddressed-findings.sh)"
+  # _REGRESSION_MARKER is checked too: FINDING_RE interpolates it, so a
+  # rename upstream would otherwise eval FINDING_RE with an empty trailing
+  # alternative that matches every body.
+  for v in _NOT_EMPTY _BLOCK_PREFIX _MARKER_CANON _REGRESSION_MARKER _REGRESSION_MARKER_RAW FINDING_RE CLEAN_RE SEVERITY_RE; do
+    if [ -z "$(eval "printf '%s' \"\$$v\"")" ]; then
+      echo "✗ parity: could not extract $v from unaddressed-findings.sh — variable renamed?"
+      failed=1
+    fi
+  done
+
+  gate_counts() {
+    jq -n --arg body "$1" \
+      --arg find "$FINDING_RE" --arg clean "$CLEAN_RE" \
+      --arg sev "$SEVERITY_RE" --arg rmark "$_REGRESSION_MARKER_RAW" \
+      --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
+      def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
+      (($body | canon) | test($find; "i"))
+        and ((($body | test($clean; "i")) | not)
+             or ($body | test($sev; "i"))
+             or ($body | test($rmark; "i")))'
+  }
+
+  # Bodies spanning every admission clause the gate has, plus clean controls.
+  # Delimited with an unlikely separator so multi-line bodies survive.
+  parity_corpus() {
+    cat <<'CORPUS'
+Coverage looks fine.
+
+- [P2] no test exercises the new error path — src/api/handler.ts:41
+
+VERDICT: CLEAN
+===CASE===
+P2: `handler` accepts unvalidated ids — src/api/handler.ts:41
+VERDICT: CLEAN
+===CASE===
+**P1** Authentication bypass in the token refresh path.
+No regressions found elsewhere.
+===CASE===
+No issues found on coverage, but P1 unscoped token reaches push.
+===CASE===
+Flagged 3 issues inline.
+===CASE===
+VERDICT: REGRESSION on the coverage axis.
+VERDICT: CLEAN
+===CASE===
+regression: na/foo.py:3 - counter increment never asserted
+VERDICT: CLEAN
+===CASE===
+- [ ] regression: na/foo.py:3 - counter increment never asserted
+===CASE===
+> regression: no_helpers/util.py:7 - fallback path untested
+===CASE===
+__regression__: no_helpers/util.py:7 - fallback path untested
+===CASE===
+**regression**: na/foo.py:3 - counter increment never asserted
+===CASE===
+`regression`: no_cache/store.py:12 - eviction path untested
+===CASE===
+(regression: na/foo.py:3 - counter increment never asserted)
+===CASE===
+[regression: no_helpers/util.py:7 - fallback path untested]
+===CASE===
+<regression: na/foo.py:3 - counter increment never asserted
+===CASE===
+- regression: `src/x.py:9` - unasserted state mutation
+===CASE===
+No regressions found in the requested coverage, state-mutation, or contract-drift axes.
+===CASE===
+Looks good to me.
+===CASE===
+No [P1] or [P2] issues found. VERDICT: CLEAN
+CORPUS
+  }
+
+  case_n=0
+  body=''
+  flush_parity_case() {
+    [ -n "$body" ] || return 0
+    case_n=$((case_n + 1))
+    local gate strict_state
+    gate=$(gate_counts "$body")
+    strict_state=$(run_strict false "$body")
+    strict_state="${strict_state#* }"
+    if [ "$gate" = "true" ] && [ "$strict_state" = "clean" ]; then
+      echo "✗ parity case $case_n: the automerge gate would hold this body but STRICT_FINDINGS calls it clean (fail-open on a lost comment)"
+      printf '%s\n' "$body" | sed 's/^/    | /'
+      failed=1
+    else
+      echo "✓ parity case $case_n: gate=$gate strict=$strict_state (strict ⊇ gate holds)"
+    fi
+    body=''
+  }
+  while IFS= read -r line; do
+    if [ "$line" = "===CASE===" ]; then
+      flush_parity_case
+    else
+      body="${body:+$body
+}$line"
+    fi
+  done < <(parity_corpus)
+  flush_parity_case
+else
+  echo "✗ parity sweep skipped: jq not installed (required — the automerge gate runs on jq)"
+  failed=1
+fi
+
 exit "$failed"

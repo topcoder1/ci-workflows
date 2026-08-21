@@ -73,7 +73,12 @@ jobs:
           set -euo pipefail
           mkdir -p .github/scripts
           # Both scripts live in this reusable's repo, not the caller's
-          # checkout, so they have to be pulled at run time.
+          # checkout, so they have to be pulled at run time. The fetch has no
+          # ref, so it always serves current main even when a caller pins
+          # this workflow to an older sha — deliberate, and safe because new
+          # script capabilities ship behind env flags that default off
+          # (FAIL_ON_REGRESSION, STRICT_FINDINGS): older YAML + newer script
+          # is behavior-identical.
           for s in codex-gate.mjs codex-verdict.mjs; do
             gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$s" \
               --jq '.content' | base64 -d > ".github/scripts/$s"
@@ -254,6 +259,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
+          set -euo pipefail
           {
             echo "### Codex review"
             echo
@@ -261,7 +267,73 @@ jobs:
             echo
             echo "<sub>Model: \`$(cat /tmp/codex.model 2>/dev/null || echo unknown)\` · CLI: \`$(cat /tmp/codex.cliversion 2>/dev/null || echo unknown)\` · reasoning: \`low\`</sub>"
           } > /tmp/comment.md
-          gh pr comment "$PR" --body-file /tmp/comment.md
+          # This comment is findings DELIVERY, not post-decision reporting:
+          # claude-author-automerge.yml's findings gate reads PR comments, so
+          # a findings-bearing verdict that silently never lands fails OPEN
+          # (the #165 lost-findings class). But redding the job over a lost
+          # CLEAN verdict is the 2026-08-17 comments-API-503 class in a new
+          # spot — nothing was lost except provenance. So on a failed post:
+          # retry (the outage was a ~2 minute window; one attempt inside it
+          # loses the comment nearly every time), then dump the verdict into
+          # the log, classify it with the SAME script the Evaluate step runs
+          # (one parser, not two), and fail unless it is findings-free.
+          # Guarded by selftest/test_comment_nonfatal_reporting.sh (sec. 4).
+          # Accepted residual: an attempt that commits the write server-side
+          # but errors the response gets retried and can duplicate the
+          # comment — bounded at 3 identical copies, and the findings gate's
+          # hold decision is count-insensitive. A dedup pre-check would ride
+          # on the same failing API, so it cannot help exactly when this
+          # path runs.
+          posted=0
+          for i in 1 2 3; do
+            if gh pr comment "$PR" --body-file /tmp/comment.md; then
+              posted=1
+              break
+            fi
+            if [ "$i" -lt 3 ]; then
+              # Same cadence as claude-author-automerge.yml's retry helper.
+              # The selftest stubs `sleep` (and pins this cadence), so no
+              # test-only knob is needed here.
+              sleep "$((i * 5))"
+            fi
+          done
+          if [ "$posted" -eq 1 ]; then
+            exit 0
+          fi
+          echo "::warning::could not post the Codex review comment on PR #${PR} after 3 attempts; the verdict follows"
+          sed 's/^/    | /' /tmp/codex.verdict.full
+          # Report-only classification run: FAIL_ON_REGRESSION stays false
+          # and GITHUB_OUTPUT / GITHUB_STEP_SUMMARY are redirected, so this
+          # cannot disturb the real Evaluate step below — its ordering and
+          # fail_on_regression semantics are unchanged. STRICT_FINDINGS
+          # widens the finding signals to the automerge gate's alphabet
+          # (P[012] labels, flagged-N, VERDICT: REGRESSION anywhere): the
+          # default classifier's misses are acceptable only because a human
+          # reads the comment, and in this branch there is no comment. If
+          # node or the script dies here the step fails with it (set -e),
+          # which is the right direction: an unclassifiable verdict must not
+          # pass as findings-free.
+          : > /tmp/comment.classify
+          VERDICT_FILE=/tmp/codex.verdict.full FAIL_ON_REGRESSION=false \
+            STRICT_FINDINGS=true \
+            GITHUB_OUTPUT=/tmp/comment.classify GITHUB_STEP_SUMMARY='' \
+            node .github/scripts/codex-verdict.mjs
+          state=$(sed -n 's/^verdict_state=//p' /tmp/comment.classify)
+          case "$state" in
+            clean|no_verdict)
+              # No findings to deliver. no_verdict rides along deliberately,
+              # twice over: exiting 0 is what lets the Evaluate step run at
+              # all — THAT step owns no_verdict enforcement where a caller
+              # opted in — and report-only callers already go green when the
+              # no-verdict SENTINEL posts successfully, so losing the
+              # sentinel comment changes nothing they enforce.
+              echo "::warning::verdict carries no findings (state=${state}) - the lost comment costs provenance only; the check stays green"
+              ;;
+            *)
+              echo "::error::codex-review: the verdict could not be posted to PR #${PR} and is not findings-free (state=${state:-unclassified}; it is in this log above) - failing so the check cannot stay green over findings that are not on the PR"
+              exit 1
+              ;;
+          esac
 
       # Runs on every caller, enforcing only where `fail_on_regression: true`.
       # Report-only mode is deliberate: it exercises the classifier against
