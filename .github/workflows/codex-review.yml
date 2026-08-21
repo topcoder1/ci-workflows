@@ -355,7 +355,13 @@ jobs:
             # opted in. Same rule as the lost-comment branch further down,
             # scoped to what was actually lost — classify the remainder
             # alone, so a verdict whose findings all sit inside the posted
-            # prefix stays green. (Codex pre-review round 3 on #171.)
+            # prefix stays green when its tail is signal-free. (Codex
+            # pre-review round 3 on #171.) A tail that itself carries a
+            # gate signal — e.g. a compliant `VERDICT: REGRESSION` trailer
+            # below in-prefix findings — reds DELIBERATELY even though the
+            # prefix delivered the findings: proving the posted body
+            # already holds the gate needs the gate's own regexes at
+            # runtime, and over-hold is the safe direction (sec. 4b, T7).
             echo "::warning::the Codex verdict on PR #${PR} outgrew the ${cap}-byte comment cap; the elided remainder follows"
             sed 's/^/    | /' /tmp/codex.verdict.elided
             : > /tmp/comment.classify

@@ -636,7 +636,10 @@ VERDICT: CLEAN" 0
 
     # T3 — precision: a finding INSIDE the posted prefix, clean tail. The
     # comment delivers everything the gate needs, so red here would be a
-    # manufactured block on a correctly-reported verdict.
+    # manufactured block on a correctly-reported verdict. The CLEAN trailer
+    # is deliberate: it keeps the elided tail genuinely signal-free. The
+    # variant whose elided tail ends `VERDICT: REGRESSION` is T7's pinned
+    # over-hold, not a green case.
     codex_case "truncated-finding-in-prefix" "regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box
 $pad
 VERDICT: CLEAN" 0
@@ -761,6 +764,28 @@ VERDICT: CLEAN" 0
       pass "codex/multibyte straddle: the whole straddling line is recoverable from the log dump"
     else
       fail "codex/multibyte straddle: the straddling line never reached the log intact"
+    fi
+
+    # T7 — findings inside the prefix, compliant `VERDICT: REGRESSION`
+    # trailer elided. DELIBERATE OVER-HOLD, pinned as a decision (Codex
+    # pre-review round 4, declined): the trailer is itself one of the
+    # gate's finding signals, and going green would require proving the
+    # POSTED body already reads as a finding to the gate — strict mode
+    # over-approximates the gate (strict-positive on the prefix does not
+    # imply gate-positive, e.g. a loose P-token the gate's CLEAN_RE
+    # suppresses), so a sound prefix check needs the gate's own regexes
+    # fetched into the workflow at runtime. That coupling would buy
+    # precision only on >cap findings-BEARING verdicts, which merit a
+    # manual look anyway. Over-hold is the safe direction; under-match is
+    # the #165 fail-open.
+    codex_case "truncated-regression-trailer-elided" "regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box
+$pad
+VERDICT: REGRESSION" 0
+    if [ "$rc" -ne 0 ] && grep -q '::error::' "$T/stdout"; then
+      pass "codex/elided REGRESSION trailer: red — deliberate safe-direction over-hold on a findings-bearing overflow"
+    else
+      fail "codex/elided REGRESSION trailer: rc=$rc — this over-hold is a PINNED DECISION; green requires a gate-exact prefix check, not a strict-mode loosening"
+      sed 's/^/    /' "$T/stdout" | tail -5
     fi
 
     # Truncation + comments API down: the lost-comment branch above still
