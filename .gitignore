@@ -10,3 +10,7 @@ coverage.json
 *.egg-info/
 
 actionlint
+
+# OMC (oh-my-claudecode) per-session runtime state — operational artifacts,
+# never source. One slipped into a commit via a broad `git add` (2026-08-21).
+.omc/
