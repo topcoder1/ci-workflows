@@ -146,12 +146,12 @@ def test_codex_verdict_gate_is_wired_and_opt_in():
     )
 
     # The gate must read the UNtruncated verdict. The `VERDICT:` trailer is the
-    # last line, and the 4KB comment cap is a prefix cut — pointing the gate at
+    # last line, and the comment cap is a prefix cut — pointing the gate at
     # the capped file would classify any long-but-clean review as no_verdict and
     # fail an enforced PR closed. (Codex review round 3.)
     assert "VERDICT_FILE: /tmp/codex.verdict.full" in text, (
-        "the verdict gate must read the untruncated verdict file — the 4KB cap "
-        "is for the PR comment and would drop the trailer the gate reads"
+        "the verdict gate must read the untruncated verdict file — the comment "
+        "cap would drop the trailer the gate reads"
     )
     # And the cap must truncate from a file, not a pipe. In the `... | head -c`
     # form head exits at its limit and the writer takes SIGPIPE, which pipefail
@@ -182,6 +182,66 @@ def test_codex_verdict_gate_is_wired_and_opt_in():
     assert "node .github/scripts/codex-verdict.mjs" in text[evaluate_at:], (
         "the Evaluate Codex verdict step must itself run codex-verdict.mjs — "
         "the comment step's report-only invocation is not the enforcement"
+    )
+
+
+def test_codex_comment_cap_bounds_and_elided_classification():
+    """The PR comment is a capped slice of the verdict — pin the cap's
+    bounds and the strict classification of what the cap cuts off.
+
+    Codex pre-review round 3 on #171: on a SUCCESSFUL post, a finding
+    beyond the comment cap never reached the PR, and on report-only
+    callers (fail_on_regression=false, the fleet default) the job stayed
+    green — claude-author-automerge's findings gate reads PR comments, so
+    the finding was invisible everywhere (the #165 fail-open through a
+    different door; measured, a 65KB verdict posted 4180 bytes and dropped
+    its `regression:` line and trailer). The behavior is executed by
+    selftest/test_comment_nonfatal_reporting.sh (sec. 4b); this pins what
+    that harness cannot see from inside one scenario: the cap's bounds and
+    the strict-mode binding on the elided remainder.
+    """
+    text = (WORKFLOWS_DIR / "codex-review.yml").read_text()
+
+    m = re.search(r"^\s*cap=(\d+)\s*$", text, flags=re.M)
+    assert m, (
+        "codex-review.yml must declare the comment cap as a `cap=<bytes>` "
+        "line — the sec. 4b selftest sizes its fixtures from it"
+    )
+    cap = int(m.group(1))
+    # Lower bound: the original 4096 truncated realistic verdicts (the #171
+    # round-3 finding); shrinking back re-widens the window in which only
+    # the strict remainder classification stands between a cut finding and
+    # an automerge.
+    assert cap >= 16384, (
+        f"comment cap {cap} is small enough to truncate routine verdicts — "
+        "the 4096-era cap is what cut findings out of PR comments"
+    )
+    # Upper bound: GitHub caps comment bodies at 65536 CHARACTERS (UTF-8:
+    # bytes >= characters), and the header, provenance line, and truncation
+    # notice ride in the same body. Past this the post 422s and every
+    # oversized verdict takes the lost-comment path instead of posting its
+    # prefix.
+    assert cap <= 64000, (
+        f"comment cap {cap} leaves no headroom under GitHub's 65536-char "
+        "comment limit for the header/provenance/notice wrapper"
+    )
+
+    # What the cap cuts off must be classified with the automerge gate's
+    # alphabet: the elided remainder is exactly the text that gate cannot
+    # see, so the permissive default signals (whose misses are acceptable
+    # only because a human reads the comment) are not enough there.
+    elided_at = text.find("VERDICT_FILE=/tmp/codex.verdict.elided")
+    assert elided_at != -1, (
+        "the comment step must classify the elided remainder "
+        "(VERDICT_FILE=/tmp/codex.verdict.elided) when the posted body is "
+        "truncated — without it a finding beyond the cap is invisible to "
+        "the automerge findings gate on report-only callers"
+    )
+    assert "STRICT_FINDINGS=true" in text[elided_at : elided_at + 300], (
+        "the elided-remainder classification must run under "
+        "STRICT_FINDINGS=true — the default signals' misses are acceptable "
+        "only when a human reads the comment, and the cut text is in no "
+        "comment"
     )
 
 
