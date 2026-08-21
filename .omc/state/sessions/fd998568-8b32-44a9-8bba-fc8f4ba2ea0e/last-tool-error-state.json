@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"bash \\\"/private/tmp/claude-501/-Users-topcoder1-dev-ci-workflows--claude-worktrees-determined-antonelli-010d16/fd998568-8b32-44a9-8bba-fc8f4ba2ea0e/scratchpad/repro_truncation_failopen.sh\\...",
-  "error": "Exit code 1\nstep exit code: 0\nfull verdict bytes: 65093\nposted body bytes:  4180\nfinding IN posted comment: NO — dropped by the 4096-byte prefix\nBUG REPRODUCED: green step, finding absent from the PR comment (fail-open for report-only callers)",
-  "timestamp": "2026-08-21T15:50:17.003Z",
-  "retry_count": 1
-}
