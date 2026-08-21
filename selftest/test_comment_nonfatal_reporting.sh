@@ -684,6 +684,39 @@ VERDICT: REGRESSION" 0
       fail "codex/finding straddling the cap: the straddling line never reached the log intact"
     fi
 
+    # T5 — the cap lands EXACTLY on a newline, and the line ending there is
+    # a finding. The line is complete and deliverable, so it must stay in
+    # the posted body and (with a clean tail) the step stays green — an
+    # unconditional drop of the prefix's final line would move it into the
+    # remainder and manufacture a red on a fully delivered finding.
+    # (Codex pre-review round 1.)
+    boundary_finding='regression: src/boundary/edge.py:7 - the retry path is untested'
+    awk -v target="$((cap - ${#boundary_finding} - 1))" 'BEGIN{
+      rem = target; i = 0
+      while (rem > 80) {
+        s = sprintf("line %04d of harmless review prose without gate-visible markers.", i)
+        print s; rem -= length(s) + 1; i++
+      }
+      filler = ""; for (j = 0; j < rem - 1; j++) filler = filler "x"
+      print filler
+    }' > "$T/pad_boundary"
+    codex_case "truncated-boundary-newline-finding" "$(cat "$T/pad_boundary")
+$boundary_finding
+$pad
+VERDICT: CLEAN" 0
+    boundary_last=$(head -c "$cap" "$T/fixtures/codex.verdict.full" | tail -c 1 | od -An -c | tr -d ' \t\n')
+    if [ "$boundary_last" = '\n' ]; then
+      pass "codex/cap-on-newline: fixture validity — byte $cap of the verdict is the finding line's newline"
+    else
+      fail "codex/cap-on-newline: fixture broke — byte $cap is '$boundary_last', not a newline, so the scenario proves nothing"
+    fi
+    if [ "$rc" -eq 0 ] && grep -qF "$boundary_finding" "$T/fixtures/comment.md"; then
+      pass "codex/cap-on-newline: the complete finding line stays in the posted body and the step stays green"
+    else
+      fail "codex/cap-on-newline: rc=$rc — a complete, deliverable finding line was dropped from the posted body (needless red / lost delivery)"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+
     # Truncation + comments API down: the lost-comment branch above still
     # owns the no-post path, classifying the FULL file (nothing posted, so
     # remainder-scoping would under-count what was lost).

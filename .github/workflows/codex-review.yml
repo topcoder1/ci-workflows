@@ -275,14 +275,22 @@ jobs:
             # multibyte character (invalid UTF-8 in the posted body) and can
             # split a finding line so that NEITHER half still matches the
             # automerge gate's line-anchored markers — invisible on the PR
-            # and unclassifiable below. Dropping the prefix's final line
-            # (cut mid-line unless the cap landed exactly on a newline)
-            # moves any straddling line whole into the elided remainder,
-            # where the classifier still sees it. A single line longer than
-            # the cap empties the prefix and the remainder becomes the
-            # whole verdict — still the right thing to classify.
-            sed '$d' /tmp/codex.verdict > /tmp/codex.verdict.cut
-            mv /tmp/codex.verdict.cut /tmp/codex.verdict
+            # and unclassifiable below. When the cap lands mid-line, drop
+            # the prefix's partial final line so the straddling line moves
+            # whole into the elided remainder, where the classifier still
+            # sees it. Only then: when the cap lands exactly on a newline
+            # the final line is complete and deliverable, and dropping it
+            # would manufacture a red on a finding the comment carries
+            # (Codex pre-review round 1). The guard reads the prefix's last
+            # byte — command substitution strips a trailing newline, so
+            # empty means the cut is already line-aligned. A single line
+            # longer than the cap empties the prefix and the remainder
+            # becomes the whole verdict — still the right thing to
+            # classify.
+            if [ -n "$(tail -c 1 /tmp/codex.verdict)" ]; then
+              sed '$d' /tmp/codex.verdict > /tmp/codex.verdict.cut
+              mv /tmp/codex.verdict.cut /tmp/codex.verdict
+            fi
             tail -c +"$(( $(wc -c < /tmp/codex.verdict) + 1 ))" \
               /tmp/codex.verdict.full > /tmp/codex.verdict.elided
           fi
