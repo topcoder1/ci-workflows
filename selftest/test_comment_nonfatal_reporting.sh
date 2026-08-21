@@ -717,6 +717,52 @@ VERDICT: CLEAN" 0
       sed 's/^/    /' "$T/stdout" | tail -5
     fi
 
+    # T6 — a MULTIBYTE character straddles the cap. The step's line-boundary
+    # cut claims "no mid-UTF-8 split in the posted body"; every other
+    # fixture here is ASCII, so a regression back to a blind byte cut would
+    # pass them all while posting invalid UTF-8 and leaking a split
+    # character into neither half. Byte-exact: the padding ends at cap-2,
+    # so the cap lands two bytes into the first 4-byte emoji. Also
+    # exercises sed/tail on a partial multibyte line for real on BOTH
+    # platforms (BSD tools here, GNU in CI). (Codex pre-review round 2.)
+    awk -v target="$((cap - 2))" 'BEGIN{
+      rem = target; i = 0
+      while (rem > 80) {
+        s = sprintf("line %04d of harmless review prose without gate-visible markers.", i)
+        print s; rem -= length(s) + 1; i++
+      }
+      filler = ""; for (j = 0; j < rem - 1; j++) filler = filler "x"
+      print filler
+    }' > "$T/pad_mb"
+    codex_case "truncated-multibyte-straddle" "$(cat "$T/pad_mb")
+🤖🤖🤖🤖 robot resilience prose continues beyond the cut here
+VERDICT: CLEAN" 0
+    if [ "$rc" -eq 0 ]; then
+      pass "codex/multibyte straddle: green — the split character's line carries no findings"
+    else
+      fail "codex/multibyte straddle: rc=$rc — a findings-free verdict redded on a multibyte boundary"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+    if ! command -v iconv >/dev/null 2>&1; then
+      fail "codex/multibyte straddle: iconv required to validate the posted body's encoding"
+    elif iconv -f UTF-8 -t UTF-8 "$T/fixtures/comment.md" >/dev/null 2>&1; then
+      pass "codex/multibyte straddle: posted body is valid UTF-8"
+    else
+      fail "codex/multibyte straddle: posted body contains invalid UTF-8 — the cut split a multibyte character"
+    fi
+    # BSD grep needs -F for raw high bytes (a regex pattern silently never
+    # matches them); GNU -F matches too.
+    if LC_ALL=C grep -qF "$(printf '\xf0\x9f')" "$T/fixtures/comment.md"; then
+      fail "codex/multibyte straddle: a partial emoji fragment leaked into the posted body"
+    else
+      pass "codex/multibyte straddle: no partial-character bytes in the posted body"
+    fi
+    if grep -q '🤖🤖🤖🤖' "$T/stdout"; then
+      pass "codex/multibyte straddle: the whole straddling line is recoverable from the log dump"
+    else
+      fail "codex/multibyte straddle: the straddling line never reached the log intact"
+    fi
+
     # Truncation + comments API down: the lost-comment branch above still
     # owns the no-post path, classifying the FULL file (nothing posted, so
     # remainder-scoping would under-count what was lost).
