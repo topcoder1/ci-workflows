@@ -24,16 +24,21 @@
 # live, which is fail-open. Deliberately NOT covered here for the same
 # reason: the lost-findings fallback comment in claude-review.yml (its
 # failure is load-bearing — a green check over unpostable findings is the
-# #165 bug) and the Codex verdict comment in codex-review.yml (it delivers
-# findings that the automerge findings gate reads; see
-# test_codex_verdict_gate_is_wired_and_opt_in in test_workflow_guards.py).
+# #165 bug). The Codex verdict comment in codex-review.yml sits BETWEEN
+# the two invariants and is covered in section 4: it is findings DELIVERY
+# (claude-author-automerge's findings gate reads PR comments; see
+# test_codex_verdict_gate_is_wired_and_opt_in in test_workflow_guards.py),
+# so a findings-bearing verdict that never lands stays fatal — but a lost
+# CLEAN verdict costs provenance only and degrades to a ::warning::.
 # coverage-floor's sticky comment is an action step, not bash — its
 # continue-on-error pin lives in test_workflow_guards.py
 # (test_sticky_comment_action_steps_are_nonfatal).
 #
-# This extracts each workflow's SHIPPED bash — not a mirrored copy — and
-# executes it against a `gh` stub whose comment/list/delete/merge calls can
-# be told to fail the way 2026-08-17 did.
+# This extracts each workflow's SHIPPED bash and executes it against a `gh`
+# stub whose comment/list/delete/merge calls can be told to fail the way
+# 2026-08-17 did. (Section 4 re-roots the shipped script's /tmp fixture
+# paths into this run's tempdir first — see its note; everything else runs
+# verbatim.)
 #
 # Run from the repo root:
 #   bash selftest/test_comment_nonfatal_reporting.sh
@@ -42,6 +47,7 @@ set -euo pipefail
 REVIEW_WF=.github/workflows/claude-review.yml
 MERGE_WF=.github/workflows/dependabot-auto-merge.yml
 DRIFT_WF=.github/workflows/openapi-types-drift.yml
+CODEX_WF=.github/workflows/codex-review.yml
 
 failed=0
 T=$(mktemp -d)
@@ -124,6 +130,16 @@ case "${1:-}" in
 esac
 STUB
 chmod +x "$T/bin/gh"
+
+# A `sleep` stub: section 4's retry cadence runs through it (logged, never
+# slept), so the shipped step needs no test-only knob and the failure paths
+# stay fast.
+cat > "$T/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo "sleep $*" >> "${GH_LOG:-/dev/null}"
+exit 0
+STUB
+chmod +x "$T/bin/sleep"
 
 # Rows are `author|committer|verified` — same fixtures as
 # test_bot_skip_commit_authorship.sh.
@@ -293,6 +309,192 @@ if [ -s "$T/drift_clean.sh" ]; then
     pass "drift-clean/no stale comment: no-op (control)"
   else
     fail "drift-clean/no stale comment: expected exit 0 and no DELETE (rc=$rc)"
+    sed 's/^/    /' "$T/stdout"
+  fi
+fi
+
+# ===========================================================================
+# 4. codex-review.yml — the verdict comment. Sits BETWEEN the two invariants:
+#    the comment is findings DELIVERY (claude-author-automerge's findings
+#    gate reads PR comments), so a findings-bearing verdict that never lands
+#    must stay fatal — green over undelivered findings is the #165 fail-open
+#    class. A lost CLEAN (or empty) verdict costs provenance only, and
+#    redding the check for it is exactly the 2026-08-17 class sections 1-3
+#    pin — that degrades to a ::warning::. The step classifies with the same
+#    codex-verdict.mjs the Evaluate step runs, so these scenarios also
+#    exercise the real classifier, not a mirror of it.
+# ===========================================================================
+extract_run "$CODEX_WF" "Post review comment" "$T/codex_comment.raw" || true
+
+# The shipped step hardcodes /tmp/... paths (private on an ephemeral
+# runner, shared on a workstation). Redirect them — uniformly, so a path
+# the rewrite missed cannot exist — into this run's own fixture root:
+# concurrent selftest runs (parallel worktree sessions on one box) must
+# not cross-talk, and the EXIT trap must never delete files this test did
+# not create. The rewrite target is a LITERAL env reference expanded when
+# the script runs (quoted, so hostile TMPDIRs survive) — interpolating
+# "$T" into sed's replacement would corrupt on `&`, `\` or `|` in the
+# path. If the step's paths ever stop matching, the staged fixtures go
+# unread and the down-scenarios below fail loudly.
+if [ -s "$T/codex_comment.raw" ]; then
+  sed 's|/tmp/|"${CODEX_FIXTURES}"/|g' "$T/codex_comment.raw" > "$T/codex_comment.sh"
+  mkdir -p "$T/fixtures"
+fi
+
+if [ -s "$T/codex_comment.sh" ]; then
+  # Fixture verdicts. The findings one is domain-rank#79's real verdict (the
+  # incident that motivated the verdict gate); the sentinel is the literal
+  # string the review step writes when its awk extraction comes up empty.
+  codex_clean='No regressions found in the requested coverage, state-mutation, or contract-drift axes.
+VERDICT: CLEAN'
+  codex_findings='regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box
+VERDICT: REGRESSION'
+  codex_sentinel='(Codex produced no parseable verdict — see workflow logs)'
+  # An off-format finding: the default classifier calls this clean (its
+  # residual miss, accepted because a human reads the comment), but the
+  # automerge findings gate would hold a PR over it — so with the comment
+  # LOST there is no human and no hold, and the step must go red.
+  codex_offformat='Coverage and state-mutation axes look fine.
+
+- [P2] no test exercises the new error path — src/api/handler.ts:41
+
+No regressions found on the contract-drift axis.
+VERDICT: CLEAN'
+
+  codex_case() {
+    local label="$1" verdict="$2" comment_fail="$3"
+    echo "· scenario codex-comment/$label"
+    # Stage what the review step would have written, at the redirected paths.
+    printf '%s\n' "$verdict" > "$T/fixtures/codex.verdict.full"
+    head -c 4096 "$T/fixtures/codex.verdict.full" > "$T/fixtures/codex.verdict"
+    rm -f "$T/fixtures/codex.model" "$T/fixtures/codex.cliversion" \
+      "$T/fixtures/comment.md" "$T/fixtures/comment.classify"
+    : > "$T/ghlog"
+    rc=0
+    (
+      PATH="${CODEX_PATH_OVERRIDE:-$T/bin}:$PATH" \
+      CODEX_FIXTURES="$T/fixtures" \
+      GH_LOG="$T/ghlog" GH_COMMENT_FAIL="$comment_fail" \
+      GH_TOKEN=stub PR=422 \
+      bash "$T/codex_comment.sh"
+    ) > "$T/stdout" 2>&1 || rc=$?
+  }
+
+  # FAIL CLOSED: findings-bearing verdict + comments API down → red, with
+  # the verdict dumped into the log so the findings are recoverable.
+  codex_case "findings-down" "$codex_findings" 1
+  if [ "$rc" -ne 0 ] && grep -q '::error::' "$T/stdout"; then
+    pass "codex/findings verdict + comment API down: step fails — findings cannot be silently lost (#165 class)"
+  else
+    fail "codex/findings verdict + comment API down: rc=$rc without an ::error:: — a findings-bearing verdict can vanish behind a green check (fail-open)"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  if grep -q 'regression: deploy/redeploy-code.sh:171' "$T/stdout"; then
+    pass "codex/findings verdict + comment API down: unposted verdict dumped into the log"
+  else
+    fail "codex/findings verdict + comment API down: the unposted verdict never reached the log"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  if grep -q 'state=regression' "$T/stdout"; then
+    pass "codex/findings verdict + comment API down: classified by the real codex-verdict.mjs"
+  else
+    fail "codex/findings verdict + comment API down: no state=regression in output — the shared classifier never ran"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  # The 2026-08-17 window was ~2 minutes; one attempt inside it loses the
+  # comment almost every time. Pin the 3-try retry (same cadence as
+  # claude-author-automerge.yml's retry helper) before the fallback runs.
+  if [ "$(grep -c '^gh pr comment' "$T/ghlog")" -eq 3 ]; then
+    pass "codex/findings verdict + comment API down: post retried 3x before falling back"
+  else
+    fail "codex/findings verdict + comment API down: expected 3 gh pr comment attempts, got $(grep -c '^gh pr comment' "$T/ghlog")"
+  fi
+  # The production cadence itself (i*5 → 5s then 10s), via the sleep stub.
+  if grep -q '^sleep 5$' "$T/ghlog" && grep -q '^sleep 10$' "$T/ghlog"; then
+    pass "codex/findings verdict + comment API down: retry cadence is 5s/10s (house helper cadence)"
+  else
+    fail "codex/findings verdict + comment API down: expected sleep 5 and sleep 10 in the stub log"
+    sed 's/^/    /' "$T/ghlog"
+  fi
+
+  # THE #165-CLASS HOLE THE STRICT MODE CLOSES: an off-format finding the
+  # default classifier misses. With the comment posted, the automerge
+  # findings gate holds the PR; with the comment lost, only a red check
+  # preserves that hold. Green here would be fail-open.
+  codex_case "offformat-down" "$codex_offformat" 1
+  if [ "$rc" -ne 0 ] && grep -q '::error::' "$T/stdout"; then
+    pass "codex/off-format P2 verdict + comment API down: step fails — the automerge gate would have held this PR"
+  else
+    fail "codex/off-format P2 verdict + comment API down: rc=$rc — a finding the automerge gate admits was degraded to a warning (fail-open)"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  # Control: the same off-format verdict with a healthy API posts and stays
+  # green — strictness applies only to the lost-comment branch.
+  codex_case "offformat-healthy" "$codex_offformat" 0
+  if [ "$rc" -eq 0 ] && grep -q '^gh pr comment' "$T/ghlog"; then
+    pass "codex/off-format P2 verdict + healthy API: comment posted, step green (control)"
+  else
+    fail "codex/off-format P2 verdict + healthy API: rc=$rc — strict classification must not run when the comment posted"
+    sed 's/^/    /' "$T/stdout"
+  fi
+
+  # UNCLASSIFIABLE MUST FAIL CLOSED: if the classifier itself dies, the
+  # verdict cannot be presumed findings-free. A broken `node` stands in for
+  # any such failure; only this scenario prepends it to PATH.
+  mkdir -p "$T/badbin"
+  printf '#!/usr/bin/env bash\nexit 7\n' > "$T/badbin/node"
+  chmod +x "$T/badbin/node"
+  CODEX_PATH_OVERRIDE="$T/badbin:$T/bin" codex_case "classifier-broken" "$codex_clean" 1
+  unset CODEX_PATH_OVERRIDE
+  if [ "$rc" -ne 0 ]; then
+    pass "codex/classifier broken + comment API down: step fails — an unclassifiable verdict is not presumed findings-free"
+  else
+    fail "codex/classifier broken + comment API down: rc=0 — a dead classifier silently passed the verdict as clean (fail-open)"
+    sed 's/^/    /' "$T/stdout"
+  fi
+
+  # DEGRADE: clean verdict + comments API down → provenance loss only.
+  codex_case "clean-down" "$codex_clean" 1
+  if [ "$rc" -eq 0 ] && grep -q '::warning::' "$T/stdout"; then
+    pass "codex/clean verdict + comment API down: exit 0 with a ::warning:: (the 2026-08-17 class stays fixed)"
+  else
+    fail "codex/clean verdict + comment API down: rc=$rc — a lost CLEAN verdict redded the check"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  if grep -q 'state=clean' "$T/stdout"; then
+    pass "codex/clean verdict + comment API down: classified clean by the real codex-verdict.mjs"
+  else
+    fail "codex/clean verdict + comment API down: no state=clean in output — the shared classifier never ran"
+    sed 's/^/    /' "$T/stdout"
+  fi
+
+  # The no-verdict sentinel carries no findings either: nothing to deliver,
+  # so comment loss is a warning here too. Exit 0 is load-bearing — the
+  # Evaluate step only runs when this step succeeds, and THAT step (not this
+  # one) owns no_verdict enforcement where a caller opted in.
+  codex_case "no-verdict-down" "$codex_sentinel" 1
+  if [ "$rc" -eq 0 ] && grep -q 'state=no_verdict' "$T/stdout"; then
+    pass "codex/no-verdict sentinel + comment API down: warning only — enforcement stays with the Evaluate step"
+  else
+    fail "codex/no-verdict sentinel + comment API down: rc=$rc — expected exit 0 so the Evaluate step that owns no_verdict enforcement still runs"
+    sed 's/^/    /' "$T/stdout"
+  fi
+
+  # Controls: healthy API → comment posted and step green REGARDLESS of the
+  # verdict. The comment step never enforces on its own; fail_on_regression
+  # enforcement lives in the Evaluate step and must stay there.
+  codex_case "clean-healthy" "$codex_clean" 0
+  if [ "$rc" -eq 0 ] && grep -q '^gh pr comment' "$T/ghlog"; then
+    pass "codex/clean verdict + healthy API: comment posted (control)"
+  else
+    fail "codex/clean verdict + healthy API: expected exit 0 + a posted comment (rc=$rc)"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  codex_case "findings-healthy" "$codex_findings" 0
+  if [ "$rc" -eq 0 ] && grep -q '^gh pr comment' "$T/ghlog"; then
+    pass "codex/findings verdict + healthy API: comment posted, step green — enforcement stays in the Evaluate step (control)"
+  else
+    fail "codex/findings verdict + healthy API: rc=$rc — the comment step must not enforce on its own (fail_on_regression semantics)"
     sed 's/^/    /' "$T/stdout"
   fi
 fi

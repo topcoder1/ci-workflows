@@ -23,6 +23,8 @@
 // Inputs (from env):
 //   VERDICT_FILE        path to the extracted verdict (default /tmp/codex.verdict)
 //   FAIL_ON_REGRESSION  "true" to enforce; anything else reports only
+//   STRICT_FINDINGS     "true" to also count the automerge findings gate's
+//                       severity signals as findings (see below); default off
 //   GITHUB_OUTPUT       (optional) — verdict_state=clean|regression|no_verdict
 //   GITHUB_STEP_SUMMARY (optional) — append markdown summary
 //
@@ -33,6 +35,7 @@ import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 
 const verdictFile = process.env.VERDICT_FILE || '/tmp/codex.verdict';
 const enforce = (process.env.FAIL_ON_REGRESSION || '').trim().toLowerCase() === 'true';
+const strict = (process.env.STRICT_FINDINGS || '').trim().toLowerCase() === 'true';
 
 // A missing file means the review step never wrote a verdict. It reads as
 // the empty string, which lands in `no_verdict` below — fail closed under
@@ -110,6 +113,60 @@ const trailer = trailerMatch ? trailerMatch[1].toLowerCase() : null;
 // up empty.
 const NO_VERDICT_SENTINEL = /codex produced no parseable verdict/;
 
+// STRICT_FINDINGS — used ONLY by codex-review.yml's comment step, when the
+// findings-DELIVERY comment could not be posted. The default signals above
+// accept residual misses explicitly because "the review comment still puts
+// it in front of a human"; in the lost-comment branch there is no comment
+// and no human, and the gate that would have read the comment —
+// claude-author-automerge's unaddressed-findings.sh, fetched from this repo
+// at merge-decision time — admits a WIDER finding alphabet (its FINDING_RE /
+// SEVERITY_RE). So a verdict may not be degraded to "provenance only" unless
+// it is findings-free by THAT alphabet too.
+//
+// These are a deliberate OVER-approximation of the gate's signals: the bare
+// P[012] token subsumes every label-position and contrast-conjunction clause
+// in SEVERITY_RE, `flagged N issue` covers both spellings, and VERDICT:
+// REGRESSION counts anywhere (the gate matches it unanchored; the default
+// trailer rule reads only the final line). Over-matching is the SAFE
+// direction here: it merely restores the pre-#169 red on a lost comment,
+// while an under-match is the #165 fail-open. Parity with the gate is
+// pinned by the corpus sweep in selftest/test_codex_verdict_gate.sh, which
+// evaluates the gate's own shipped regexes through jq exactly as it applies
+// them.
+//
+// Tested against the RAW verdict, like the gate's severity signals. RAW
+// matters for the marker: the normalized `text` strips underscores, which
+// turns `no_helpers/util.py` into a none/na-shaped non-path and defeats the
+// content test below (found by the parity sweep).
+//
+// The marker signal exists because the finding scan above DROPS
+// `regression:` matches whose description opens with a none/na/no word —
+// but a PATH can open that way too (`na/foo.py:3`, `no_helpers/util.py:7`),
+// and the gate's canon pass strips bullets, checkboxes, quotes and numbered
+// lists before its own marker test, so it admits those behind any prefix.
+// This spelling is `\b`-anchored instead of porting either prefix chain —
+// prefix-agnostic by construction, strictly wider than both (safe
+// direction). The content lookaheads are the gate's own: a path segment
+// (`/` or `.ext`) or a `file:line`, never bare `n/a`; `regression: none`
+// has no path-shaped target and stays clean.
+const STRICT_SIGNALS = [
+  { name: 'P[012] severity token', re: /\bp[012]\b/i },
+  { name: 'flagged-N-issues summary', re: /flagged [0-9]+ issue/i },
+  { name: 'VERDICT: REGRESSION (anywhere)', re: /verdict:\s*regression/i },
+  {
+    name: 'regression marker (path-shaped target)',
+    // Not `\b`-anchored: decoration can be GLUED to the word
+    // (`__regression__:`), and underscore is a word character, so a \b
+    // never forms there — while the gate's canon strips the decoration and
+    // admits it (Codex pre-review round 6). Anchor on start-or-non-alnum
+    // plus the canon's own decoration alphabet instead.
+    re: /(^|[^a-z0-9])[*_`"'(\[<“”‘’]*regression[*_`]*\s*:\s*[ \t*_`"'(\[<“”‘’]*(?!n\/a\b)(?=[^\s`]*(\/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])/i,
+  },
+];
+const strictHits = strict
+  ? STRICT_SIGNALS.filter((s) => s.re.test(raw)).map((s) => s.name)
+  : [];
+
 // THE TRAILER IS A BONUS SIGNAL, NOT A REQUIREMENT — and that is a measured
 // decision, not a preference. An earlier revision required it and failed the
 // first real PR it ran on: topcoder1/domain-rank#82, 2026-07-28T04:57Z. The
@@ -131,9 +188,9 @@ const NO_VERDICT_SENTINEL = /codex produced no parseable verdict/;
 // front of a human. The alternative failure — blocking correct work — is
 // what gets a gate switched off, and then nothing is reviewed at all.
 let state;
-if (findings.length > 0 || trailer === 'regression') {
+if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
   // Findings outrank a CLEAN trailer: the trailer may not retract its own
-  // evidence.
+  // evidence. Strict-mode signals count as findings by the same rule.
   state = 'regression';
 } else if (text === '' || NO_VERDICT_SENTINEL.test(text)) {
   // A review that produced nothing must never read as "nothing found".
@@ -153,7 +210,12 @@ if (findings.length > 0 || trailer === 'regression') {
 
 const summary = {
   clean: 'Codex reported no regressions.',
-  regression: `Codex reported ${findings.length} regression(s).`,
+  regression:
+    `Codex reported ${findings.length} regression(s)` +
+    (strictHits.length
+      ? `; ${strictHits.length} strict-mode severity signal(s) present`
+      : '') +
+    '.',
   no_verdict:
     'Codex produced no verdict at all — the review did not happen, so nothing is vouched for.'
 }[state];
@@ -170,6 +232,7 @@ if (process.env.GITHUB_STEP_SUMMARY) {
 
 console.log(`Verdict: state=${state}; enforcing=${enforce}; ${summary}`);
 for (const f of findings) console.log(`  - regression: ${f}`);
+for (const s of strictHits) console.log(`  - strict signal: ${s}`);
 
 if (enforce && state !== 'clean') {
   const hint =
