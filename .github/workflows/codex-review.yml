@@ -214,24 +214,18 @@ jobs:
             verdict="(Codex produced no parseable verdict — see workflow logs)"
           fi
 
-          # TWO files, and the split is load-bearing.
+          # codex.verdict.full is what the verdict gate AND the comment step
+          # read, and it is NEVER truncated here: the machine-read `VERDICT:`
+          # trailer is the LAST line, and a prefix cut would drop it —
+          # classifying an otherwise clean review as no_verdict and failing
+          # an enforced PR closed. (Codex review round 3.)
           #
-          # codex.verdict.full is what the gate reads. It is never truncated,
-          # because the machine-read `VERDICT:` trailer is the LAST line and a
-          # prefix cut would drop it — classifying an otherwise clean review
-          # as no_verdict and failing an enforced PR closed. (Codex review
-          # round 3.)
-          #
-          # codex.verdict is the 4KB-capped body for the PR comment, which is
-          # the only thing the cap was ever protecting.
+          # The capped PR-comment body (/tmp/codex.verdict) is derived in the
+          # Post step, next to the disclosure and elided-remainder rules that
+          # make the cut safe — one step owns the whole comment contract, and
+          # selftest/test_comment_nonfatal_reporting.sh (sec. 4b) executes
+          # that step's shipped bash directly.
           printf '%s\n' "$verdict" > /tmp/codex.verdict.full
-          # head reads from a FILE here rather than a pipe. In the `... | head
-          # -c` form head exits at its byte limit and the writer takes SIGPIPE,
-          # which `set -o pipefail` above turns into a failed step. Measured:
-          # that needs the verdict to outgrow the OS pipe buffer (fine at
-          # 128KB, aborts at 2MB), so it is hygiene rather than a live failure
-          # at realistic verdict sizes — but reading the file costs nothing.
-          head -c 4096 /tmp/codex.verdict.full > /tmp/codex.verdict
 
           # Record which Codex model + CLI version actually ran. `npm install
           # -g @openai/codex@latest` (above) floats the CLI — and thus its
@@ -260,10 +254,61 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # The body is a CAPPED slice of the untruncated verdict. 60000
+          # bytes keeps verdict + header + provenance + notice under GitHub's
+          # 65536-CHARACTER comment limit (UTF-8: bytes >= characters) with
+          # ~5KB headroom; the old 4096 predated any measured need and
+          # silently cut findings out of the only surface report-only
+          # callers deliver findings on. Bounds pinned by
+          # test_workflow_guards.py; behavior by
+          # selftest/test_comment_nonfatal_reporting.sh (sec. 4b).
+          #
+          # head reads from a FILE rather than a pipe: in the `... | head -c`
+          # form head exits at its byte limit and the writer takes SIGPIPE,
+          # which `set -o pipefail` turns into a failed step. Hygiene at
+          # realistic verdict sizes — the file form is free.
+          cap=60000
+          head -c "$cap" /tmp/codex.verdict.full > /tmp/codex.verdict
+          : > /tmp/codex.verdict.elided
+          if [ "$(( $(wc -c < /tmp/codex.verdict.full) ))" -gt "$cap" ]; then
+            # Cut on a LINE boundary. A blind byte prefix can split a
+            # multibyte character (invalid UTF-8 in the posted body) and can
+            # split a finding line so that NEITHER half still matches the
+            # automerge gate's line-anchored markers — invisible on the PR
+            # and unclassifiable below. When the cap lands mid-line, drop
+            # the prefix's partial final line so the straddling line moves
+            # whole into the elided remainder, where the classifier still
+            # sees it. Only then: when the cap lands exactly on a newline
+            # the final line is complete and deliverable, and dropping it
+            # would manufacture a red on a finding the comment carries
+            # (Codex pre-review round 1). The guard reads the prefix's last
+            # byte — command substitution strips a trailing newline, so
+            # empty means the cut is already line-aligned. A single line
+            # longer than the cap empties the prefix and the remainder
+            # becomes the whole verdict — still the right thing to
+            # classify.
+            if [ -n "$(tail -c 1 /tmp/codex.verdict)" ]; then
+              sed '$d' /tmp/codex.verdict > /tmp/codex.verdict.cut
+              mv /tmp/codex.verdict.cut /tmp/codex.verdict
+            fi
+            tail -c +"$(( $(wc -c < /tmp/codex.verdict) + 1 ))" \
+              /tmp/codex.verdict.full > /tmp/codex.verdict.elided
+          fi
           {
             echo "### Codex review"
             echo
             cat /tmp/codex.verdict
+            if [ -s /tmp/codex.verdict.elided ]; then
+              # This line lands in the PR comment that the automerge
+              # findings gate classifies, so it must match neither the
+              # gate's finding alphabet (every truncated clean review would
+              # hold its PR) nor its clean-marker alphabet (it would
+              # suppress real findings elsewhere in the body). Checked
+              # against the gate's own shipped regexes by the sec. 4b
+              # selftest.
+              echo
+              echo "_The verdict outgrew the ${cap}-byte comment cap; $(( $(wc -c < /tmp/codex.verdict.elided) )) byte(s) were cut at a line boundary and are preserved in this workflow run's log._"
+            fi
             echo
             echo "<sub>Model: \`$(cat /tmp/codex.model 2>/dev/null || echo unknown)\` · CLI: \`$(cat /tmp/codex.cliversion 2>/dev/null || echo unknown)\` · reasoning: \`low\`</sub>"
           } > /tmp/comment.md
@@ -298,7 +343,43 @@ jobs:
             fi
           done
           if [ "$posted" -eq 1 ]; then
-            exit 0
+            if [ ! -s /tmp/codex.verdict.elided ]; then
+              exit 0
+            fi
+            # The post succeeded but the body carries only the prefix, and
+            # the comment is what claude-author-automerge's findings gate
+            # reads — a finding in the ELIDED remainder is invisible to it,
+            # and on report-only callers (fail_on_regression=false, the
+            # fleet default) nothing else holds the PR: the Evaluate step
+            # below reads the full file but only enforces where a caller
+            # opted in. Same rule as the lost-comment branch further down,
+            # scoped to what was actually lost — classify the remainder
+            # alone, so a verdict whose findings all sit inside the posted
+            # prefix stays green when its tail is signal-free. (Codex
+            # pre-review round 3 on #171.) A tail that itself carries a
+            # gate signal — e.g. a compliant `VERDICT: REGRESSION` trailer
+            # below in-prefix findings — reds DELIBERATELY even though the
+            # prefix delivered the findings: proving the posted body
+            # already holds the gate needs the gate's own regexes at
+            # runtime, and over-hold is the safe direction (sec. 4b, T7).
+            echo "::warning::the Codex verdict on PR #${PR} outgrew the ${cap}-byte comment cap; the elided remainder follows"
+            sed 's/^/    | /' /tmp/codex.verdict.elided
+            : > /tmp/comment.classify
+            VERDICT_FILE=/tmp/codex.verdict.elided FAIL_ON_REGRESSION=false \
+              STRICT_FINDINGS=true \
+              GITHUB_OUTPUT=/tmp/comment.classify GITHUB_STEP_SUMMARY='' \
+              node .github/scripts/codex-verdict.mjs
+            state=$(sed -n 's/^verdict_state=//p' /tmp/comment.classify)
+            case "$state" in
+              clean|no_verdict)
+                echo "::warning::the elided remainder carries no findings (state=${state}) - the cut cost prose only; the check stays green"
+                exit 0
+                ;;
+              *)
+                echo "::error::codex-review: finding(s) were cut out of the comment posted on PR #${PR} (state=${state:-unclassified}; the remainder is in this log above) - failing so the check cannot stay green over findings that are not on the PR"
+                exit 1
+                ;;
+            esac
           fi
           echo "::warning::could not post the Codex review comment on PR #${PR} after 3 attempts; the verdict follows"
           sed 's/^/    | /' /tmp/codex.verdict.full

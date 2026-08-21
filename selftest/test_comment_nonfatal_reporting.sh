@@ -364,10 +364,14 @@ VERDICT: CLEAN'
   codex_case() {
     local label="$1" verdict="$2" comment_fail="$3"
     echo "· scenario codex-comment/$label"
-    # Stage what the review step would have written, at the redirected paths.
+    # Stage what the review step would have written, at the redirected
+    # paths. Only the UNtruncated verdict: the capped comment body (and the
+    # elided remainder) are derived by the shipped step itself, so section
+    # 4b below exercises the real truncation code rather than a staged
+    # mirror of it.
     printf '%s\n' "$verdict" > "$T/fixtures/codex.verdict.full"
-    head -c 4096 "$T/fixtures/codex.verdict.full" > "$T/fixtures/codex.verdict"
-    rm -f "$T/fixtures/codex.model" "$T/fixtures/codex.cliversion" \
+    rm -f "$T/fixtures/codex.verdict" "$T/fixtures/codex.verdict.elided" \
+      "$T/fixtures/codex.model" "$T/fixtures/codex.cliversion" \
       "$T/fixtures/comment.md" "$T/fixtures/comment.classify"
     : > "$T/ghlog"
     rc=0
@@ -496,6 +500,316 @@ VERDICT: CLEAN'
   else
     fail "codex/findings verdict + healthy API: rc=$rc — the comment step must not enforce on its own (fail_on_regression semantics)"
     sed 's/^/    /' "$T/stdout"
+  fi
+
+  # =========================================================================
+  # 4b. TRUNCATION IS FINDINGS DELIVERY TOO. The posted body is a capped
+  #     slice of codex.verdict.full, and the comment is the only surface
+  #     report-only callers (fail_on_regression=false, the fleet default)
+  #     deliver findings on — claude-author-automerge's findings gate reads
+  #     PR comments, and the Evaluate step enforces nothing for them. So a
+  #     finding beyond the cap used to vanish behind a green check on a
+  #     SUCCESSFUL post (Codex pre-review round 3 on #171: the #165
+  #     fail-open through a different door — measured, a 65KB verdict
+  #     posted 4180 bytes and dropped its `regression:` line and trailer).
+  #     The shipped step must cut on a line boundary, disclose the cut in
+  #     the posted body, and go red only when the ELIDED remainder actually
+  #     carries findings — classified by the real codex-verdict.mjs under
+  #     STRICT_FINDINGS, never by a harness mirror of the gate's alphabet.
+  # =========================================================================
+  # Fixtures size themselves from the cap the extracted step declares, so a
+  # retuned cap cannot silently leave them undersized; a step that stops
+  # declaring `cap=` fails here loudly instead.
+  cap=$(sed -n 's/^cap=\([0-9][0-9]*\)$/\1/p' "$T/codex_comment.sh" | head -1)
+  if [ -z "$cap" ]; then
+    fail "codex/truncation: no cap=<bytes> line in the extracted Post step — the comment cap moved out of the shipped bash, so these fixtures cannot size themselves"
+  elif ! command -v jq >/dev/null 2>&1; then
+    fail "codex/truncation: jq required — the gate-alphabet checks below evaluate the automerge gate's own shipped regexes through jq"
+  else
+    # Signal-free padding, in complete lines, guaranteed to outgrow the cap.
+    awk -v n="$((cap / 59 + 40))" \
+      'BEGIN{for(i=0;i<n;i++) printf "line %04d of harmless review prose without gate-visible markers.\n", i}' \
+      > "$T/pad"
+    pad=$(cat "$T/pad")
+
+    # The automerge gate's own shipped regexes, applied exactly as its
+    # late_issue select applies them (same pattern as the parity sweep in
+    # test_codex_verdict_gate.sh — never hand-mirror the alphabet).
+    eval "$(grep -E '^(_NOT_EMPTY|_BLOCK_PREFIX|_MARKER_CANON|_REGRESSION_MARKER|_REGRESSION_MARKER_RAW|FINDING_RE|CLEAN_RE|SEVERITY_RE)=' .github/scripts/unaddressed-findings.sh)"
+    for v in _BLOCK_PREFIX _MARKER_CANON _REGRESSION_MARKER_RAW FINDING_RE CLEAN_RE SEVERITY_RE; do
+      if [ -z "$(eval "printf '%s' \"\$$v\"")" ]; then
+        fail "codex/truncation: could not extract $v from unaddressed-findings.sh — variable renamed?"
+      fi
+    done
+    gate_flags() {
+      jq -n --arg body "$1" \
+        --arg find "$FINDING_RE" --arg clean "$CLEAN_RE" \
+        --arg sev "$SEVERITY_RE" --arg rmark "$_REGRESSION_MARKER_RAW" \
+        --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
+        def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
+        (($body | canon) | test($find; "i"))
+          and ((($body | test($clean; "i")) | not)
+               or ($body | test($sev; "i"))
+               or ($body | test($rmark; "i")))'
+    }
+
+    # T1 — a finding wholly beyond the cap, healthy API. The truncated
+    # comment posts (the prefix still reaches the reader), then the step
+    # goes red: nothing else stands between this verdict and an automerge.
+    codex_case "truncated-finding-beyond-cap" "$pad
+regression: src/api/handler.ts:41 - no test exercises the new error path
+VERDICT: REGRESSION" 0
+    if [ "$rc" -ne 0 ] && grep -q '::error::' "$T/stdout"; then
+      pass "codex/finding beyond the cap: step fails — findings cut out of the posted comment cannot hide behind green"
+    else
+      fail "codex/finding beyond the cap: rc=$rc without an ::error:: — the finding is not in the comment and nothing went red (the pre-fix fail-open)"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+    if grep -q '^gh pr comment' "$T/ghlog"; then
+      pass "codex/finding beyond the cap: the truncated comment still posted before the red"
+    else
+      fail "codex/finding beyond the cap: no comment posted — the reader loses the prefix too"
+    fi
+    if [ -s "$T/fixtures/comment.md" ] && ! grep -q 'regression: src/api/handler.ts:41' "$T/fixtures/comment.md"; then
+      pass "codex/finding beyond the cap: harness validity — the finding is genuinely absent from the posted body"
+    else
+      fail "codex/finding beyond the cap: fixture broke — comment.md missing or the finding fit inside the cap, so the scenario proves nothing"
+    fi
+    if grep -q 'regression: src/api/handler.ts:41' "$T/stdout"; then
+      pass "codex/finding beyond the cap: elided remainder dumped into the log (finding recoverable)"
+    else
+      fail "codex/finding beyond the cap: the cut finding never reached the log"
+    fi
+    if grep -q 'state=regression' "$T/stdout"; then
+      pass "codex/finding beyond the cap: remainder classified by the real codex-verdict.mjs"
+    else
+      fail "codex/finding beyond the cap: no state=regression in output — the shared classifier never ran on the remainder"
+    fi
+
+    # T2 — clean overflow: a long but findings-free verdict. The cut costs
+    # prose only; redding it would be the 2026-08-17 class in a new spot.
+    codex_case "truncated-clean-overflow" "$pad
+VERDICT: CLEAN" 0
+    if [ "$rc" -eq 0 ] && grep -q '::warning::' "$T/stdout"; then
+      pass "codex/clean overflow: prose-only cut stays green with a ::warning::"
+    else
+      fail "codex/clean overflow: rc=$rc — a long but findings-free verdict redded (or the cut went silent)"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+    if grep -q 'comment cap' "$T/fixtures/comment.md"; then
+      pass "codex/clean overflow: the posted body discloses the cut"
+    else
+      fail "codex/clean overflow: no truncation notice in the posted body — the cut is silent again"
+    fi
+    body_bytes=$(( $(wc -c < "$T/fixtures/comment.md") ))
+    if [ "$body_bytes" -le 65536 ]; then
+      pass "codex/clean overflow: posted body is $body_bytes bytes — within GitHub's 65536-char comment limit (bytes >= chars)"
+    else
+      fail "codex/clean overflow: posted body is $body_bytes bytes — over the API limit, the real post would 422"
+    fi
+    if [ "$(gate_flags "$(cat "$T/fixtures/comment.md")")" = "false" ]; then
+      pass "codex/clean overflow: automerge gate stays quiet on the truncated clean body"
+    else
+      fail "codex/clean overflow: the automerge gate would flag this clean body — the truncation notice trips the gate's finding alphabet"
+    fi
+    # The notice line itself, against each alphabet in isolation: matching
+    # FINDING_RE would hold every truncated clean review; matching CLEAN_RE
+    # would suppress real findings elsewhere in the same body.
+    notice=$(grep -m1 'comment cap' "$T/fixtures/comment.md" || true)
+    if [ -z "$notice" ]; then
+      fail "codex/notice alphabet: could not extract the notice line from the posted body"
+    else
+      if [ "$(jq -n --arg b "$notice" --arg clean "$CLEAN_RE" '$b | test($clean; "i")')" = "false" ]; then
+        pass "codex/notice alphabet: notice matches no clean marker (cannot suppress findings)"
+      else
+        fail "codex/notice alphabet: the notice matches the gate's CLEAN_RE — it would suppress real findings elsewhere in the body"
+      fi
+      if [ "$(jq -n --arg b "$notice" --arg find "$FINDING_RE" \
+          --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
+          def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
+          ($b | canon) | test($find; "i")')" = "false" ]; then
+        pass "codex/notice alphabet: notice matches no finding marker (cannot hold a clean PR)"
+      else
+        fail "codex/notice alphabet: the notice reads as a finding — every truncated clean review would hold its PR"
+      fi
+    fi
+
+    # T3 — precision: a finding INSIDE the posted prefix, clean tail. The
+    # comment delivers everything the gate needs, so red here would be a
+    # manufactured block on a correctly-reported verdict. The CLEAN trailer
+    # is deliberate: it keeps the elided tail genuinely signal-free. The
+    # variant whose elided tail ends `VERDICT: REGRESSION` is T7's pinned
+    # over-hold, not a green case.
+    codex_case "truncated-finding-in-prefix" "regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box
+$pad
+VERDICT: CLEAN" 0
+    if [ "$rc" -eq 0 ]; then
+      pass "codex/finding inside the prefix: green — the comment delivers every finding the gate reads"
+    else
+      fail "codex/finding inside the prefix: rc=$rc — findings the comment DOES carry must not red the step"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+    if grep -q 'regression: deploy/redeploy-code.sh:171' "$T/fixtures/comment.md"; then
+      pass "codex/finding inside the prefix: finding present in the posted body (harness validity)"
+    else
+      fail "codex/finding inside the prefix: fixture broke — the finding should sit inside the posted prefix"
+    fi
+    if [ "$(gate_flags "$(cat "$T/fixtures/comment.md")")" = "true" ]; then
+      pass "codex/finding inside the prefix: the automerge gate still holds the PR on the truncated body"
+    else
+      fail "codex/finding inside the prefix: the gate would MISS the delivered finding — the truncation notice or the cut broke the gate's match"
+    fi
+
+    # T4 — a finding line STRADDLING the cap. A blind byte cut leaves a
+    # fragment in the comment and an unclassifiable half in the remainder —
+    # the line-boundary cut must move the whole line into the remainder.
+    awk -v target="$((cap - 40))" \
+      'BEGIN{b=0; i=0; while (b + 70 <= target) {s=sprintf("line %04d of harmless review prose without gate-visible markers.", i); print s; b += length(s) + 1; i++}}' \
+      > "$T/pad_straddle"
+    straddle='regression: src/retry/counter_module.py:123 - the incremented retry counter state mutation is never asserted by any existing or new test case'
+    codex_case "truncated-straddling-finding" "$(cat "$T/pad_straddle")
+$straddle
+VERDICT: REGRESSION" 0
+    if [ "$rc" -ne 0 ] && grep -q '::error::' "$T/stdout"; then
+      pass "codex/finding straddling the cap: red — the whole line moved into the classified remainder"
+    else
+      fail "codex/finding straddling the cap: rc=$rc — a finding split by the byte cap went unclassified (both halves invisible)"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+    if ! grep -q 'regression:' "$T/fixtures/comment.md"; then
+      pass "codex/finding straddling the cap: no partial finding fragment in the posted body (cut is line-aligned)"
+    else
+      fail "codex/finding straddling the cap: a partial 'regression:' fragment leaked into the posted body — the cut is not line-aligned"
+    fi
+    if grep -qF "$straddle" "$T/stdout"; then
+      pass "codex/finding straddling the cap: the whole line is recoverable from the log dump"
+    else
+      fail "codex/finding straddling the cap: the straddling line never reached the log intact"
+    fi
+
+    # T5 — the cap lands EXACTLY on a newline, and the line ending there is
+    # a finding. The line is complete and deliverable, so it must stay in
+    # the posted body and (with a clean tail) the step stays green — an
+    # unconditional drop of the prefix's final line would move it into the
+    # remainder and manufacture a red on a fully delivered finding.
+    # (Codex pre-review round 1.)
+    boundary_finding='regression: src/boundary/edge.py:7 - the retry path is untested'
+    awk -v target="$((cap - ${#boundary_finding} - 1))" 'BEGIN{
+      rem = target; i = 0
+      while (rem > 80) {
+        s = sprintf("line %04d of harmless review prose without gate-visible markers.", i)
+        print s; rem -= length(s) + 1; i++
+      }
+      filler = ""; for (j = 0; j < rem - 1; j++) filler = filler "x"
+      print filler
+    }' > "$T/pad_boundary"
+    codex_case "truncated-boundary-newline-finding" "$(cat "$T/pad_boundary")
+$boundary_finding
+$pad
+VERDICT: CLEAN" 0
+    boundary_last=$(head -c "$cap" "$T/fixtures/codex.verdict.full" | tail -c 1 | od -An -c | tr -d ' \t\n')
+    if [ "$boundary_last" = '\n' ]; then
+      pass "codex/cap-on-newline: fixture validity — byte $cap of the verdict is the finding line's newline"
+    else
+      fail "codex/cap-on-newline: fixture broke — byte $cap is '$boundary_last', not a newline, so the scenario proves nothing"
+    fi
+    if [ "$rc" -eq 0 ] && grep -qF "$boundary_finding" "$T/fixtures/comment.md"; then
+      pass "codex/cap-on-newline: the complete finding line stays in the posted body and the step stays green"
+    else
+      fail "codex/cap-on-newline: rc=$rc — a complete, deliverable finding line was dropped from the posted body (needless red / lost delivery)"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+
+    # T6 — a MULTIBYTE character straddles the cap. The step's line-boundary
+    # cut claims "no mid-UTF-8 split in the posted body"; every other
+    # fixture here is ASCII, so a regression back to a blind byte cut would
+    # pass them all while posting invalid UTF-8 and leaking a split
+    # character into neither half. Byte-exact: the padding ends at cap-2,
+    # so the cap lands two bytes into the first 4-byte emoji. Also
+    # exercises sed/tail on a partial multibyte line for real on BOTH
+    # platforms (BSD tools here, GNU in CI). (Codex pre-review round 2.)
+    awk -v target="$((cap - 2))" 'BEGIN{
+      rem = target; i = 0
+      while (rem > 80) {
+        s = sprintf("line %04d of harmless review prose without gate-visible markers.", i)
+        print s; rem -= length(s) + 1; i++
+      }
+      filler = ""; for (j = 0; j < rem - 1; j++) filler = filler "x"
+      print filler
+    }' > "$T/pad_mb"
+    codex_case "truncated-multibyte-straddle" "$(cat "$T/pad_mb")
+🤖🤖🤖🤖 robot resilience prose continues beyond the cut here
+VERDICT: CLEAN" 0
+    if [ "$rc" -eq 0 ]; then
+      pass "codex/multibyte straddle: green — the split character's line carries no findings"
+    else
+      fail "codex/multibyte straddle: rc=$rc — a findings-free verdict redded on a multibyte boundary"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+    if ! command -v iconv >/dev/null 2>&1; then
+      fail "codex/multibyte straddle: iconv required to validate the posted body's encoding"
+    elif iconv -f UTF-8 -t UTF-8 "$T/fixtures/comment.md" >/dev/null 2>&1; then
+      pass "codex/multibyte straddle: posted body is valid UTF-8"
+    else
+      fail "codex/multibyte straddle: posted body contains invalid UTF-8 — the cut split a multibyte character"
+    fi
+    # BSD grep needs -F for raw high bytes (a regex pattern silently never
+    # matches them); GNU -F matches too.
+    if LC_ALL=C grep -qF "$(printf '\xf0\x9f')" "$T/fixtures/comment.md"; then
+      fail "codex/multibyte straddle: a partial emoji fragment leaked into the posted body"
+    else
+      pass "codex/multibyte straddle: no partial-character bytes in the posted body"
+    fi
+    if grep -q '🤖🤖🤖🤖' "$T/stdout"; then
+      pass "codex/multibyte straddle: the whole straddling line is recoverable from the log dump"
+    else
+      fail "codex/multibyte straddle: the straddling line never reached the log intact"
+    fi
+
+    # T7 — findings inside the prefix, compliant `VERDICT: REGRESSION`
+    # trailer elided. DELIBERATE OVER-HOLD, pinned as a decision (Codex
+    # pre-review round 4, declined): the trailer is itself one of the
+    # gate's finding signals, and going green would require proving the
+    # POSTED body already reads as a finding to the gate — strict mode
+    # over-approximates the gate (strict-positive on the prefix does not
+    # imply gate-positive, e.g. a loose P-token the gate's CLEAN_RE
+    # suppresses), so a sound prefix check needs the gate's own regexes
+    # fetched into the workflow at runtime. That coupling would buy
+    # precision only on >cap findings-BEARING verdicts, which merit a
+    # manual look anyway. Over-hold is the safe direction; under-match is
+    # the #165 fail-open.
+    codex_case "truncated-regression-trailer-elided" "regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box
+$pad
+VERDICT: REGRESSION" 0
+    if [ "$rc" -ne 0 ] && grep -q '::error::' "$T/stdout"; then
+      pass "codex/elided REGRESSION trailer: red — deliberate safe-direction over-hold on a findings-bearing overflow"
+    else
+      fail "codex/elided REGRESSION trailer: rc=$rc — this over-hold is a PINNED DECISION; green requires a gate-exact prefix check, not a strict-mode loosening"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+
+    # Truncation + comments API down: the lost-comment branch above still
+    # owns the no-post path, classifying the FULL file (nothing posted, so
+    # remainder-scoping would under-count what was lost).
+    codex_case "truncated-clean-down" "$pad
+VERDICT: CLEAN" 1
+    if [ "$rc" -eq 0 ] && grep -q 'state=clean' "$T/stdout"; then
+      pass "codex/clean overflow + comment API down: lost-comment branch classifies the full file, stays green"
+    else
+      fail "codex/clean overflow + comment API down: rc=$rc — expected the lost-comment branch to classify the full file clean"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
+
+    # Control — a small verdict is untouched: posted whole (trailer and
+    # all), no truncation notice.
+    codex_case "small-verdict-untouched" "$codex_clean" 0
+    if [ "$rc" -eq 0 ] && grep -q 'VERDICT: CLEAN' "$T/fixtures/comment.md" \
+      && ! grep -q 'comment cap' "$T/fixtures/comment.md"; then
+      pass "codex/small verdict: posted whole, trailer intact, no truncation notice (control)"
+    else
+      fail "codex/small verdict: rc=$rc — expected the full verdict (trailer included) and no notice"
+      sed 's/^/    /' "$T/stdout" | tail -5
+    fi
   fi
 fi
 
