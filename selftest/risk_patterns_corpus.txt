@@ -319,3 +319,15 @@ SAFE: docs/dependabot-setup.md
 SAFE: templates/email/welcome.html
 SAFE: templates/ci-workflows-notes.md
 SAFE: docs/ci-workflows/overview.md
+
+# ── .audit evidence-SQL exemption (wxa_webcat#978, 2026-08-26) ─────────────
+# Root .audit/ dated-run dirs hold read-only analysis SQL (SELECT-only
+# harnesses committed as audit evidence) — exempt from the .sql
+# migrations-class pattern ONLY. GH: loop skip in claude-author-automerge.yml;
+# BB: ^(?!\.audit/).*\.sql$ in bb-automerge.py. The RISKY controls pin the
+# anchor (root-only, exact dir name) and prove the exemption is SQL-only.
+SAFE: .audit/runs/ws4-976-sizing-2026-08-25/scanA_bnf_composition.sql
+SAFE: .audit/coverage-baseline-2026-08-07/queries.sql
+RISKY: .audit2/schema.sql
+RISKY: sub/.audit/query.sql
+RISKY: .audit/runs/x/auth.py
