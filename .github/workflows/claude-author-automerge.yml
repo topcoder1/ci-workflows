@@ -936,6 +936,17 @@ jobs:
             while IFS= read -r p; do
               p="${p#"${p%%[![:space:]]*}"}"
               [ -z "$p" ] && continue
+              # Root .audit/ evidence dirs hold read-only analysis SQL committed
+              # with dated audit runs (wxa_webcat#978: two SELECT-only harness
+              # files blocked, 2026-08-26). Exempt them from the migrations-class
+              # SQL pattern ONLY — other risk patterns still apply to .audit/
+              # paths; nested sub/.audit/ and .audit2/ stay covered (anchor is
+              # ^\.audit/). ERE has no lookahead, hence this loop skip; the BB
+              # twin is ^(?!\.audit/).*\.sql$ in bb-automerge.py. Shared corpus
+              # pins both directions (selftest/risk_patterns_corpus.txt).
+              if [ "$p" = '.*\.sql$' ] && echo "$f" | grep -Eq '^\.audit/'; then
+                continue
+              fi
               if echo "$f" | grep -Eq "$p"; then
                 matched="$matched$f (matched: $p)\n"
                 break
