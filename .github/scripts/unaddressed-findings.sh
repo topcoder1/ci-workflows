@@ -38,6 +38,12 @@
 #   0 — no unaddressed findings
 #   1 — unaddressed findings present
 #   2 — invocation error
+#
+# Post-merge disposition (MERGED PRs only — see THE ACKNOWLEDGMENT PATH in
+# check_pr): a top-level HUMAN comment carrying a line that OPENS with
+#   findings-disposition: <why the finding is fixed elsewhere / does not apply>
+# answers every finding older than it. Open PRs ignore the marker by design —
+# pre-merge, the answer to a finding is still a commit.
 
 set -uo pipefail
 
@@ -303,7 +309,38 @@ _BLOCK_PREFIX='^[[:blank:]]*(([>|#•–—]|[-*+]|\[[ xX]\]|[0-9]{1,9}[.)])[[:b
 # only rather than by a repo-wide setting.
 _MARKER_CANON='^[*_`"\x27(\[<“”‘’]*regression[*_`]*:([[:blank:]]|[*_`"\x27(\[<“”‘’])*'
 _REGRESSION_MARKER='(^|\n)regression: (?!n/a\b)(?=[^[:space:]]*(/|\.[A-Za-z])|[A-Za-z_][A-Za-z0-9_.@+-]*:[0-9])[A-Za-z0-9_./@+-]+(:[0-9]+)?'
-FINDING_RE="([Ff]lagged [0-9]+ issue|\bP[012]\b|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
+# --------------------------------------------------------------------------
+# The flagged-count clause: `[Ff]lagged N <words> issue`, gap SENTENCE-BOUNDED.
+#
+# THE BURN. whois-api-llc/wxa_webcat#927, 2026-08-16: claude[bot]'s inline
+# posting failed wholesale — all four of its inline comments predate the last
+# commit — so the round's findings existed ONLY in the top-level summary
+# posted 26 minutes after it: "Flagged 4 confirmed issues inline: (1) ...".
+# This clause then read `[Ff]lagged [0-9]+ issue`, demanding "issue"
+# IMMEDIATELY after the count; one adjective broke adjacency, no other
+# alternative matched (no P-token, no VERDICT trailer, the word "regression"
+# never appears), and the sweeper printed "no unaddressed findings". The
+# clause keys on the CLAIM — a count of issues — so it tolerates the words a
+# model puts between the count and the noun.
+#
+# The gap is `[^.!?\n]{0,60}?`, NOT `.*`, because this clause also sits in
+# SEVERITY_RE below as a suppressor-cancelling override, where widening
+# manufactures false positives (the round-5 lesson): with `.*` the gap
+# crosses a sentence boundary, so a re-review PASS like "the earlier round
+# flagged 2 findings, all addressed. No issues found." matches
+# flagged-N-issues and overrides its own clean verdict — a false "do not
+# merge yet". Same sentence-bounding idiom as SEVERITY_RE's contrast-
+# conjunction clause; bounded lazy repetition, one character per step,
+# nothing to backtrack over pathologically.
+#
+# The clause appears TWICE, with a deliberate count asymmetry: `[0-9]+` here
+# (the admission gate must examine a zero count so CLEAN_RE can weigh the
+# clean phrase beside it) and `[1-9][0-9]*` in SEVERITY_RE (a zero count must
+# never OVERRIDE that clean phrase — "No issues found. Flagged 0 confirmed
+# issues inline." stays clean). Widen both together, or the adjective reopens
+# the same hole one suppressor later.
+# --------------------------------------------------------------------------
+FINDING_RE="([Ff]lagged [0-9]+[^.!?\n]{0,60}? issue|\bP[012]\b|VERDICT: REGRESSION|${_REGRESSION_MARKER})"
 # THE SAME MARKER, IN RAW-BODY FORM. Used in exactly one place: the CLEAN
 # override in the jq select below. Never in FINDING_RE.
 #
@@ -476,7 +513,7 @@ _NOT_EMPTY='(?![[:blank:]]*(none|nothing|n/a|not applicable|no findings|no issue
 # like everything else here while still overriding `- regression: src/foo.ts:12`.
 # Keeping it a separate term is only so the two spellings stay legible; it is
 # semantically one more alternative in this alternation.
-SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]* issue|VERDICT: REGRESSION)"
+SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[012]\]|\*\*P[012]\*\*|P[012][[:space:]]*[-—:])${_NOT_EMPTY}|\b(but|however|except|although|though|yet)\b((?!\b(no|not|zero|none|neither|without)\b)[^.!?\n]){0,30}?\bP[012]\b|flagged [1-9][0-9]*[^.!?\n]{0,60}? issue|VERDICT: REGRESSION)"
 
 # The "last commit" a finding is measured against must be a commit that could
 # plausibly ANSWER it — i.e. one carrying the author's changes. `auto-update-branch`
@@ -487,13 +524,57 @@ SEVERITY_RE="(\bP[012]:${_NOT_EMPTY}|(^|\n)[[:space:]]*([-*+][[:space:]]*)?(\[P[
 # log.Fatalf citing a reason its own adjacent comment says is obsolete) was followed
 # by FOUR `Merge branch 'main' into ...` commits and nothing else. This script
 # reported "no unaddressed findings", and the PR merged at 03:34:17Z with the
-# message still wrong on main. Excluding merge commits (parents >= 2) is the fix:
-# a base merge introduces no authored change, so it cannot address a review finding.
+# message still wrong on main. Excluding those merges is the fix: a base merge
+# introduces no authored change, so it cannot address a review finding.
 #
-# `// empty` rather than `// null`: a PR whose only commits are merges yields no
-# usable value, which must fall through to the hard error below (fail closed),
-# not compare as the string "null".
-LAST_COMMIT_JQ='[.[] | select((.parents | length) < 2) | .commit.committer.date] | max // empty'
+# 2026-08-16, wxa_vpn#1529: the exclusion as first written was "parents >= 2",
+# and that over-reaches. Two Codex P2s at 23:43:53Z were answered by 2cfeb271 —
+# a 2-parent commit the author wrote by hand ("merge origin/main; reduce to the
+# two setup guards main still lacks") that ALSO added the two requested tests.
+# Codex re-reviewed it clean; this script kept reporting "last commit:
+# 2026-08-14T21:53:02Z" and the P2s as unaddressed. Parent count cannot separate
+# a base merge from an authored merge; the SUBJECT can. A base merge has ONE
+# source, and git's fmt-merge-msg labels a single-source merge by how the source
+# was named — `Merge branch '...'`, `Merge remote-tracking branch '...'`,
+# `Merge commit '...'` (raw sha) or `Merge tag '...'` — while GitHub's merge
+# button writes `Merge pull request #...`. Those are every label fmt-merge-msg
+# emits when it can NAME the source, so they are enumerated below and only
+# those are excluded. Deliberately not enumerated: `git pull <url>` with no
+# refspec yields an unlabeled `Merge <url> into ...` — a bare URL/path is a
+# suffix-open family, and the fleet lesson is to enumerate closed label sets,
+# never open ones. That shape counts as authored, an accepted fail-open corner:
+# fleet base merges come from auto-update-branch / "Update branch" and from
+# `git merge origin/main`, both labeled, and nothing here pulls a bare URL.
+# The plural forms, `Merge branches 'a' and 'b'`, exist only
+# for octopus merges (more than one source at once) — nobody octopus-merges a
+# base into a PR head, so they count as authored, like any subject not listed.
+# The quote after the label is load-bearing: it is git's ref syntax, so a
+# hand-written subject that merely opens with "Merge branch protection ..." is
+# not excluded. Any 2-parent commit with another subject counts as authored,
+# same as a 1-parent commit — the trust model is unchanged: an author's own
+# push, of any shape, is taken as the response, so a base-only merge typed as
+# `-m "sync main"` clears findings exactly like `commit --allow-empty` always
+# has (fleet automation keeps git's default subject for that reason; see
+# commands/babysit-prs.md). The mirror residual is over-report: a
+# default-subject merge whose conflict resolution carries the fix stays
+# excluded and the finding is re-flagged until a 1-parent commit follows —
+# fail-closed, accepted. `^` is string-anchored in jq (Oniguruma SINGLELINE),
+# so `test` reads the subject line only, never a body line.
+#
+# Second, subject-independent gate (fleet "two gates" rule): every merge GitHub
+# itself commits — auto-update-branch, "Update branch", "Resolve conflicts", the
+# merge queue — carries committer `noreply@github.com` (login web-flow; verified
+# on techrecon#826). Such a merge is a base merge whatever its subject says, so
+# a GitHub subject reword cannot resurrect #826 through the subject gate alone.
+# `// ""` on the email is safe here: an absent email simply fails to match
+# GitHub's, and the subject gate still decides.
+#
+# `// empty` rather than `// null`: a PR whose only commits are base merges
+# yields no usable value, which must fall through to the hard error below (fail
+# closed), not compare as the string "null".
+BASE_MERGE_SUBJECT_RE="^Merge branch '|^Merge remote-tracking branch '|^Merge commit '|^Merge tag '|^Merge pull request #"
+GITHUB_COMMITTER_EMAIL="noreply@github.com"
+LAST_COMMIT_JQ="[.[] | select((.parents | length) < 2 or ((.commit.message | test(\"$BASE_MERGE_SUBJECT_RE\") | not) and ((.commit.committer.email // \"\") != \"$GITHUB_COMMITTER_EMAIL\"))) | .commit.committer.date] | max // empty"
 
 # check_pr <repo> <pr> -> prints report, returns 0 clean / 1 findings
 check_pr() {
@@ -552,6 +633,60 @@ check_pr() {
     echo "error: last-commit timestamp for $repo#$pr is not ISO-8601 (got: ${last:0:60})" >&2; exit 2
   fi
 
+  # --------------------------------------------------------------------------
+  # THE ACKNOWLEDGMENT PATH (ci-workflows#163) — MERGED PRs ONLY.
+  #
+  # A merged PR can never receive this detector's one clear-signal (an authored
+  # commit newer than the finding), so before this block every post-merge
+  # finding re-flagged on every sweep until ~25 newer-CREATED merges pushed the
+  # PR out of the scan window: wxa_vpn#1587 accumulated 6-hourly reports for
+  # two days after every finding on wxa_vpn#1629/#1630 was fixed or adjudicated
+  # (2026-08-24..26). The sweep's own issue text has always asked the operator
+  # to "record why the finding does not apply" — this gives that record a
+  # spelling the detector reads.
+  #
+  # The marker: a TOP-LEVEL comment by a KNOWN HUMAN whose body has a line
+  # opening (column 0) with `findings-disposition:` followed by content. Its
+  # created_at then acts like a commit: findings OLDER than the newest valid
+  # marker are answered; a finding posted AFTER it re-flags and needs a new
+  # decision. Every leg fails CLOSED, deliberately:
+  #   * MERGED PRs only. On an OPEN PR — the automerge gate's entire domain —
+  #     behavior is byte-identical with or without a marker: pre-merge, the
+  #     answer to a finding remains a commit (or the human's click past the
+  #     gate's decline), per the 2026-08-09 Option-1 deferral on wxa_vpn#1392.
+  #   * The author must be a string login NOT ending `[bot]`: a bot cannot
+  #     disposition its own finding, and a null/non-string author is nobody's
+  #     decision (same type-guard as late_issue below, same reason).
+  #   * Column 0, lowercase, content required. A quoted `> findings-...`, a
+  #     mid-sentence mention, or a bare marker with nothing after the colon
+  #     dispositions nothing. Operators type this marker on purpose — it is a
+  #     literal, not model prose — so it gets no normalizer and no case
+  #     folding: the marker is a SUPPRESSOR, and widening a suppressor is the
+  #     false-negative direction this file argues against twice already.
+  #   * A malformed created_at is ignored (the SHAPE rule above, same class).
+  #   * Edits don't count: created_at never moves on edit, so retro-editing an
+  #     old comment cannot acknowledge a newer finding.
+  # An applied disposition is ALWAYS named in the report, on both verdicts —
+  # a quiet PR must show WHY it is quiet; suppression is never silent.
+  local ack_row ack_ts ack_who cutoff
+  cutoff="$last"
+  ack_row=""
+  if [[ "$merged" != "null" && -n "$merged" ]]; then
+    ack_row=$(printf '%s' "$issue" | jq -r '
+      [ .[] | select(.user.login | type == "string" and (endswith("[bot]") | not))
+            | select((.body // "")
+                     | test("(^|\\n)findings-disposition:[[:blank:]]*[^[:space:]]")) ]
+      | sort_by(.created_at) | last // empty
+      | [.created_at, .user.login] | @tsv' 2>/dev/null)
+  fi
+  if [[ -n "$ack_row" ]]; then
+    ack_ts="${ack_row%%$'\t'*}"
+    ack_who="${ack_row#*$'\t'}"
+    if [[ "$ack_ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} && "$ack_ts" > "$cutoff" ]]; then
+      cutoff="$ack_ts"
+    fi
+  fi
+
   # A comment stream spanning pages arrives as concatenated arrays; jq handles
   # each as an independent input and the per-page results concatenate, so no
   # reduction is needed for those.
@@ -593,8 +728,8 @@ check_pr() {
   # Same `type` guard as late_issue's below, same reason, opposite default
   # (there, unknown does not count).
   local late_inline
-  late_inline=$(printf '%s' "$inline" | jq -r --arg last "$last" '
-    [ .[] | select(.created_at > $last)
+  late_inline=$(printf '%s' "$inline" | jq -r --arg cutoff "$cutoff" '
+    [ .[] | select(.created_at > $cutoff)
           | select(.in_reply_to_id == null
                    or (.user.login | type != "string" or endswith("[bot]"))) ]
     | .[] | [.created_at, (.user.login // "-"), (.path // "-"),
@@ -651,12 +786,12 @@ check_pr() {
   #     a CHECKED checkbox recording a fix. The raw spelling keeps the override
   #     and drops the widening: exact parity with round 3, measured both ways.
   local late_issue
-  late_issue=$(printf '%s' "$issue" | jq -r --arg last "$last" \
+  late_issue=$(printf '%s' "$issue" | jq -r --arg cutoff "$cutoff" \
                  --arg find "$FINDING_RE" --arg clean "$CLEAN_RE" \
                  --arg sev "$SEVERITY_RE" --arg rmark "$_REGRESSION_MARKER_RAW" \
                  --arg blk "$_BLOCK_PREFIX" --arg mark "$_MARKER_CANON" '
     def canon: split("\n") | map(sub($blk; "") | sub($mark; "regression: "; "i")) | join("\n");
-    [ .[] | select(.created_at > $last)
+    [ .[] | select(.created_at > $cutoff)
           | select(.user.login | type == "string" and endswith("[bot]"))
           | select(((.body // "") | canon) as $body
                    | ((.body // "")) as $raw
@@ -678,8 +813,15 @@ check_pr() {
   all=$(printf '%s\n%s' "$late_inline" "$late_issue" | grep -v '^$' || true)
 
   if [[ -z "$all" ]]; then
-    printf '%s%s#%s%s — %sno unaddressed findings%s (last commit %s)\n' \
-      "$BOLD" "$repo" "$pr" "$RESET" "$GREEN" "$RESET" "$last"
+    if [[ "$cutoff" != "$last" ]]; then
+      # Suppression is never silent: the sweep's rolling report must show WHY
+      # a previously-flagged PR went quiet, or a disposition is a laundering.
+      printf '%s%s#%s%s — %sno unaddressed findings%s (last commit %s; findings before %s dispositioned by %s)\n' \
+        "$BOLD" "$repo" "$pr" "$RESET" "$GREEN" "$RESET" "$last" "$cutoff" "$ack_who"
+    else
+      printf '%s%s#%s%s — %sno unaddressed findings%s (last commit %s)\n' \
+        "$BOLD" "$repo" "$pr" "$RESET" "$GREEN" "$RESET" "$last"
+    fi
     return 0
   fi
 
@@ -693,6 +835,10 @@ check_pr() {
   printf '%s%s#%s%s — %s%s%s\n' "$BOLD" "$repo" "$pr" "$RESET" "$RED$BOLD" "$verdict" "$RESET"
   printf '  %slast commit:%s %s — findings below arrived after it, with no commit in response\n' \
     "$DIM" "$RESET" "$last"
+  if [[ "$cutoff" != "$last" ]]; then
+    printf '  %sdisposition:%s findings before %s dispositioned by %s — the finding(s) below POST-DATE it and need a new decision\n' \
+      "$DIM" "$RESET" "$cutoff" "$ack_who"
+  fi
   printf '%s\n' "$all" | while IFS=$'\t' read -r ts who path body; do
     printf '  %s%s%s  %s  %s%s%s\n    %s\n' \
       "$DIM" "$ts" "$RESET" "$who" "$DIM" "$path" "$RESET" "$body"
