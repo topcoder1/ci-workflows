@@ -126,6 +126,21 @@ name: Claude-author Auto-merge (reusable)
 # detector, and declines + disarms when a finding is newer than the last
 # authored commit. It applies to every arm path (bypass labels included), is
 # not a required check, and never blocks the manual merge button.
+#
+# DECISION LABELS (wxa-graph#476/#478, 2026-08-28): every deliberate
+# abstention (risk-tier match, findings hold, quiet-cap, base refusal) ends
+# with a green run and autoMergeRequest=null — the same signature as the
+# cancel-in-progress wedge where no run consumed the state at all. The
+# final "Publish arbiter decision label" step therefore reconciles exactly
+# one `automerge:*` label onto the PR naming the standing decision
+# (`automerge:blocked-classifier`, `automerge:blocked-risk-tier`,
+# `automerge:withheld-findings`, `automerge:withheld-quiet-cap`,
+# `automerge:refused-base`), and clears them when the PR arms or the
+# operator's own hold label takes over. Operator contract: CLEAN + all-green +
+# autoMergeRequest=null + an `automerge:*` label = deliberate abstention —
+# read the label description for the lever; the same signature with NO
+# `automerge:*` label is the wedge shape — re-fire with a human label
+# event. Selftest: selftest/test_automerge_decision_label.sh.
 
 on:
   workflow_call:
@@ -1000,7 +1015,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$CHECK_NAME" ]; then
-            echo "bypass=0" >> "$GITHUB_OUTPUT"
+            { echo "bypass=0"; echo "state=disabled"; } >> "$GITHUB_OUTPUT"
             echo "Codex bypass disabled (codex_check_name input empty)."
             exit 0
           fi
@@ -1040,6 +1055,10 @@ jobs:
             )
           fi
           echo "Codex check '$CHECK_NAME' state: '${codex_state:-<absent>}'"
+          # `state` feeds the risk-tier comment below so the operator sees
+          # what the gate actually observed at decision time (absent vs.
+          # pending vs. failure) instead of guessing from the checks tab.
+          echo "state=${codex_state:-absent}" >> "$GITHUB_OUTPUT"
           if [ "$codex_state" = "success" ] || [ "$codex_state" = "SUCCESS" ]; then
             echo "bypass=1" >> "$GITHUB_OUTPUT"
             echo "Codex Review passed — risk-tier gate overridden."
@@ -1333,6 +1352,7 @@ jobs:
           exit 0
 
       - name: Enable auto-merge
+        id: arm
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
@@ -1389,6 +1409,16 @@ jobs:
             if [ "$state" != "OFF" ]; then
               echo "::error::auto-merge is '$state' after --disable-auto — investigate"
               exit 1
+            fi
+            # A deliberate stand-down (exit 0) ends this run green with no
+            # arm and, because retargets emit only `edited` (no caller
+            # subscribes), no later event on its own — exactly the wedge
+            # signature. Publish it for the decision-label reconciler so
+            # the PR carries `automerge:refused-base` instead of silence.
+            # Only on the clean path: a failed disarm exits 1 above and
+            # must stay an unlabeled red run.
+            if [ "$1" = "0" ]; then
+              echo "stood_down=base" >> "$GITHUB_OUTPUT"
             fi
             exit "$1"
           }
@@ -1476,6 +1506,12 @@ jobs:
             echo "::error::enable auto-merge failed and the head still matches ${HEAD_SHA} — investigate."
             exit 1
           fi
+          # Published for the decision-label reconciler below: `armed=1`
+          # means THIS run enabled auto-merge, so any stale `automerge:*`
+          # abstention label must come off. The head-moved stand-down above
+          # exits before this line — that run owns no decision and must not
+          # touch the newer head's labels.
+          echo "armed=1" >> "$GITHUB_OUTPUT"
 
       # Sticky comment when classifier marked the PR risk:blocked. Distinct
       # from the regex-based comment below — classifier-blocked has no
@@ -1542,6 +1578,7 @@ jobs:
           MATCHED: ${{ steps.risk.outputs.matched }}
           BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
           CODEX_CHECK: ${{ inputs.codex_check_name }}
+          CODEX_STATE: ${{ steps.bypass_codex.outputs.state }}
         run: |
           set -euo pipefail
           marker="<!-- claude-author-automerge:risk-tier -->"
@@ -1568,9 +1605,15 @@ jobs:
               echo "  the label event and enable auto-merge. One click from the PR list page."
             fi
             if [ -n "$CODEX_CHECK" ]; then
-              echo "- Wait for the \`$CODEX_CHECK\` status check to pass. If Codex Review is"
-              echo "  installed on this repo and it returns SUCCESS, the workflow auto-bypasses"
-              echo "  the risk gate on its next run (e.g. on push of a fixup commit)."
+              echo "- Codex-trusted bypass: a SUCCESS from the \`$CODEX_CHECK\` check lets a"
+              echo "  LATER run of this workflow arm auto-merge — but a check completing fires"
+              echo "  no run by itself, and bot label writes fire nothing (GITHUB_TOKEN events"
+              echo "  never trigger workflows). Re-fire this workflow by pushing a commit or by"
+              echo "  re-applying a label as a human. Observed \`$CODEX_CHECK\` state at this"
+              echo "  run's decision time: \`${CODEX_STATE:-absent}\`. Repos that deliberately"
+              echo "  route standard-tier PRs to a differently named Codex check (e.g."
+              echo "  \`review_standard / Codex Review\`) keep this bypass unavailable there by"
+              echo "  design — use the bypass label above, or click-merge."
             fi
             echo ""
             echo "If a path is misclassified, fix the regex in"
@@ -1581,6 +1624,178 @@ jobs:
               -f body="$(cat /tmp/automerge-comment.md)" >/dev/null
           else
             gh pr comment "$PR" --body-file /tmp/automerge-comment.md
+          fi
+
+      # Arbiter decision label (wxa-graph#476/#478, 2026-08-28): every
+      # deliberate abstention above ends with a GREEN run and
+      # autoMergeRequest=null — at the surface operators actually probe
+      # (`gh pr view --json labels,autoMergeRequest`, the PR list) that is
+      # INDISTINGUISHABLE from the cancel-in-progress wedge where no run
+      # consumed the state at all. Both #476 (findings hold) and #478
+      # (risk-tier match) were diagnosed as wedges and label-refired /
+      # manually merged while the real decision sat in a sticky comment
+      # and a green log's ::notice. This step publishes the standing
+      # decision as exactly one `automerge:*` label so absence-of-arm
+      # always carries its reason.
+      #
+      # Design constraints, in order:
+      #   * NOT a check-run or commit status — that needs checks:/statuses:
+      #     write, and the reusable's job permissions are capped by 44+
+      #     existing callers granting only contents+pull-requests (the
+      #     Option-B cap-mismatch note on the job header). Labels ride the
+      #     pull-requests:write the fleet already grants.
+      #   * GITHUB_TOKEN label writes never trigger workflows (recursion
+      #     prevention), so publishing is inert — no self-retrigger, no
+      #     safe-paths cross-fire.
+      #   * The reconciler manages ONLY the exact prefix `automerge:` —
+      #     `auto-merge`, `auto-merge-approved`, `auto-merge-nonmain`,
+      #     `manual-merge` and `risk:*` are other mechanisms' surfaces and
+      #     are never touched.
+      #   * Advisory, never load-bearing: every label API failure degrades
+      #     to a ::warning and exit 0. The gate decisions above already
+      #     stand on their own; a label blip must not redden a run that
+      #     decided correctly (and gh-retry double-fire is a known trap —
+      #     one attempt, non-fatal).
+      #   * ARMED / hold runs reconcile to NO label: those states are
+      #     already visible (autoMergeRequest; the hold label is the
+      #     operator's own click, present by definition). Classifier-
+      #     blocked PUBLISHES `automerge:blocked-classifier` — the verdict
+      #     can come from the direct risk-paths.yml read with no risk:*
+      #     label on the PR at all, and the operator contract below only
+      #     holds if every abstention labels. A run with no positive
+      #     terminal state of its own (arm stood down on a moved head, a
+      #     gate step errored) publishes NOTHING — the newer head's run or
+      #     the red job owns the story, and clearing here could race a
+      #     valid newer decision. Two guards enforce ownership: the step
+      #     skips on run cancellation (`!cancelled()` — a superseded run's
+      #     stale gate outputs must not repaint labels; the status
+      #     function still lets it run after a FAILED step, where it
+      #     no-ops via publish=0), and it re-reads the live head before
+      #     mutating, standing down on any mismatch or unreadable head.
+      #   * SNAPSHOT semantics, accepted: the label records the LAST run's
+      #     verdict. PR state that mutates with NO event — the canonical
+      #     case is a post-run base retarget, which emits only `edited`
+      #     (unsubscribed) — leaves the label stale until the next event's
+      #     run reconciles it. That is deliberate: no publish-time probe
+      #     can see a future retarget, and a stale label's remedy line
+      #     ("re-fire with an event, or click-merge") is still the correct
+      #     operator move, unlike the unlabeled green+null wedge signature
+      #     it replaces (codex round-2, accepted with reworded remedy).
+      - name: Publish arbiter decision label
+        id: decision_label
+        if: |
+          !cancelled() &&
+          steps.detect.outputs.claude_authored == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ARMED: ${{ steps.arm.outputs.armed }}
+          ARM_STOOD_DOWN: ${{ steps.arm.outputs.stood_down }}
+          BLOCKED: ${{ steps.classifier_verdict.outputs.blocked }}
+          HOLD: ${{ steps.hold.outputs.hold }}
+          BASE_REFUSE: ${{ steps.base_gate.outputs.refuse }}
+          RISKY: ${{ steps.risk.outputs.risky }}
+          BYPASS_LBL: ${{ steps.bypass_label.outputs.bypass }}
+          BYPASS_CDX: ${{ steps.bypass_codex.outputs.bypass }}
+          QF_REASON: ${{ steps.quiet_findings.outputs.reason }}
+        run: |
+          set -euo pipefail
+          # Terminal-state precedence mirrors the gate chain above. `publish=0`
+          # (no state this run owns) is distinct from `decision=""` (positive
+          # state, natively visible — clear stale arbiter labels).
+          decision=""
+          publish=1
+          if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ]; then
+            decision=""
+          elif [ "${BLOCKED:-}" = "1" ]; then
+            # Publishes rather than defers to the risk:* label: the verdict
+            # can come from the DIRECT risk-paths.yml read with no label on
+            # the PR at all (pr-classify absent, lagging, or its label write
+            # failed) — and the operator contract "no automerge:* label =
+            # wedge" only holds if EVERY abstention labels (codex round-3).
+            decision="automerge:blocked-classifier"
+          elif [ "${ARM_STOOD_DOWN:-}" = "base" ] || [ "${BASE_REFUSE:-}" = "1" ]; then
+            decision="automerge:refused-base"
+          elif [ "${RISKY:-}" = "1" ] && [ "${BYPASS_LBL:-}" != "1" ] && [ "${BYPASS_CDX:-}" != "1" ]; then
+            decision="automerge:blocked-risk-tier"
+          elif [ "${QF_REASON:-}" = "findings" ]; then
+            decision="automerge:withheld-findings"
+          elif [ "${QF_REASON:-}" = "quiet-cap" ]; then
+            decision="automerge:withheld-quiet-cap"
+          else
+            publish=0
+          fi
+          if [ "$publish" = "0" ]; then
+            echo "No arbiter decision to publish from this run — labels untouched."
+            exit 0
+          fi
+          # Ownership probe: only the run whose event matches the PR's LIVE
+          # head may repaint labels — a superseded run's decision is stale
+          # by definition (same guard as the error-revoke step below). A
+          # positive mismatch or an unreadable head both stand down:
+          # advisory surface fails toward silence, never a stale repaint.
+          live=$(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || live=""
+          if [ -z "$live" ]; then
+            echo "::warning::could not read the live head — skipping arbiter decision-label publish (advisory)."
+            exit 0
+          fi
+          if [ "$live" != "$HEAD_SHA" ]; then
+            echo "Head moved (${HEAD_SHA} → ${live}) — the newer head's run owns the labels; not publishing."
+            exit 0
+          fi
+          # Paginated read — a hold label past the 30-label default page must
+          # not read as absent (same pin as the manual-hold gate).
+          current=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels?per_page=100" \
+            --paginate --jq '.[].name' 2>/dev/null) || {
+            echo "::warning::could not read PR labels — skipping arbiter decision-label publish (advisory; the gate decision above already stands)."
+            exit 0
+          }
+          while IFS= read -r l; do
+            [ -z "$l" ] && continue
+            case "$l" in
+              automerge:*) ;;
+              *) continue ;;
+            esac
+            [ "$l" = "$decision" ] && continue
+            enc=$(jq -rn --arg s "$l" '$s|@uri')
+            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels/${enc}" >/dev/null 2>&1 \
+              || echo "::warning::could not remove stale arbiter label '$l' (non-fatal)."
+          done <<< "$current"
+          if [ -z "$decision" ]; then
+            echo "Arbiter labels cleared — state is natively visible (armed / risk:* / hold label)."
+            exit 0
+          fi
+          # Deliberately BEFORE the create/edit ensure: a same-verdict rerun
+          # is the common case (every synchronize/labeled event), and paying
+          # two label-API calls each time to refresh a description that is
+          # merely cosmetically stale is not worth the churn — wording
+          # refreshes ride the next publish that actually ADDS the label
+          # anywhere in the repo (codex round-4 P3, accepted).
+          if grep -qxF "$decision" <<< "$current"; then
+            echo "Arbiter decision label '$decision' already present."
+            exit 0
+          fi
+          case "$decision" in
+            automerge:blocked-classifier) color="a40e26"; desc="Automerge arbiter: risk:blocked/sensitive classifier verdict — manual click-merge per risk tier" ;;
+            automerge:blocked-risk-tier)  color="b60205"; desc="Automerge arbiter: risk-tier path matched — click-merge or apply the bypass label" ;;
+            automerge:withheld-findings)  color="d93f0b"; desc="Automerge arbiter: review findings postdate the last commit — push a fix or merge manually" ;;
+            automerge:withheld-quiet-cap) color="fbca04"; desc="Automerge arbiter: review activity never went quiet — the next PR event retries" ;;
+            automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
+          esac
+          # create-else-EDIT (not a create-retry): create's failure is the
+          # EXPECTED already-exists conflict, and the edit refreshes a
+          # stale description on repos that minted the label under older
+          # wording (codex round-3 P3). Both non-fatal — a real failure
+          # (perms, outage) surfaces at the add below, whose warning is
+          # the reporting surface.
+          gh label create "$decision" --color "$color" --description "$desc" 2>/dev/null \
+            || gh label edit "$decision" --color "$color" --description "$desc" >/dev/null 2>&1 || true
+          if gh api -X POST "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels" -f "labels[]=$decision" >/dev/null; then
+            echo "Published arbiter decision label: $decision"
+          else
+            echo "::warning::could not add arbiter decision label '$decision' (non-fatal — the run log and sticky comment carry the decision)."
           fi
 
       # FAIL CLOSED for already-armed PRs (codex round-4 P1): "refusing
