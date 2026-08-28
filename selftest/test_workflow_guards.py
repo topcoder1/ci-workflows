@@ -22,6 +22,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # _UNLISTED_OK below, which is what keeps this list honest.)
 _SHELL_SELFTESTS = [
     "selftest/test_automerge_base_gate.sh",
+    "selftest/test_automerge_decision_label.sh",
     "selftest/test_automerge_findings_gate.sh",
     "selftest/test_automerge_hold_gate.sh",
     "selftest/test_automerge_quiet_anchor.sh",
