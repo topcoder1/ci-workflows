@@ -100,6 +100,20 @@ name: Claude-author Auto-merge (reusable)
 # techrecon#410 + wxa-astro#63. Claude Review still reviews copy
 # semantically, but it is not the merge gate for this category.
 #
+# SECOND EXCEPTION, same shape: `^docs/decisions/.*` (added 2026-08-27).
+# Decision records (ADRs) live at a fixed conventional path, and repo
+# contracts require explicit human approval to amend them (wxa-graph
+# AGENTS.md: "existing ADRs are amended only with explicit human
+# approval") — yet docs/** is trivial/safe-by-glob in every automerge
+# lane, so a docs-only ADR amendment auto-merged with no click
+# (verified 2026-08-27, whois-api-llc/wxa-graph#477 — that PR carries
+# the repo-side sensitive: + CODEOWNERS fix; this pattern is the durable
+# central gate, and the safe-paths tier-2 hold makes it effective on
+# docs-only diffs). Unlike docs/legal's tier-1 override, the tier-2 hold
+# is releasable by the bypass label — a label click on an ADR PR is a
+# human decision on that PR, which is what the contract asks. BB twin:
+# bb-automerge.py HIGH_RISK_PATTERNS (topcoder1/dotclaude#266).
+#
 # This workflow does NOT bypass branch protection. It only enables GitHub's
 # "auto-merge" toggle, which still waits for required checks (Claude Review)
 # to pass and required reviews to land before merging.
@@ -894,6 +908,7 @@ jobs:
           .*\.sql$
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
           ^docs/legal/.*
+          ^docs/decisions/.*
           (^|/)naf(/|\.(py|go|ts|js)$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$

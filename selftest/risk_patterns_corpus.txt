@@ -67,6 +67,18 @@ RISKY: docs/legal/acceptable-use-policy.md
 RISKY: docs/legal/terms-of-service.md
 RISKY: docs/legal/privacy/gdpr.md
 
+# ── RISKY: decision records / ADRs (wxa-graph gap, 2026-08-27) ──────────────
+# docs/decisions/ is a fixed conventional path like docs/legal/. Repo
+# contracts require explicit human approval to amend ADRs (wxa-graph
+# AGENTS.md), yet docs/** is trivial/safe-by-glob in every automerge lane —
+# a docs-only ADR amendment auto-merged with no click. Repo-side fix:
+# wxa-graph#477 (sensitive: + CODEOWNERS); central gate: ^docs/decisions/.*
+# in claude-author-automerge.yml + safe-paths-automerge.yml tier-2 +
+# bb-automerge.py HIGH_RISK_PATTERNS (dotclaude#266).
+RISKY: docs/decisions/ADR-0003-cluster-algorithm.md
+RISKY: docs/decisions/ADR-0012-preepoch-domaininfo-edge-heal.md
+RISKY: docs/decisions/proposals/ADR-0099-draft.md
+
 # ── RISKY: NAF credit/billing gate (wxa_webcat#438 gap, 2026-05-28) ─────────
 # The validate_call/log_successful_call client that authorizes + charges each
 # customer API call. Path has no auth/billing keyword so it slipped through.
@@ -182,6 +194,10 @@ SAFE: docs/data-dictionary.md
 # Anchored at docs/legal/ — "legal" elsewhere in the tree is ordinary docs.
 SAFE: docs/notes/legal-review-process.md
 SAFE: docs/legal-summary.md
+# Anchored at docs/decisions/ — a decisions-named FILE or sibling dir is
+# ordinary docs; only the ADR directory itself is gated.
+SAFE: docs/decisions.md
+SAFE: docs/decision-log.md
 SAFE: README.md
 SAFE: tests/test_anything.py
 SAFE: tests/unit/utils_test.go
