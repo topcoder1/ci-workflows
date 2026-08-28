@@ -129,10 +129,17 @@ run_case "risk-session-dir" 0 risk-tier-hold "web/tests/e2e/session/expiry.spec.
 run_case "risk-billing-dir" 0 risk-tier-hold "web/tests/e2e/checkout/pay.spec.ts"
 # A .sql fixture under tests/ is safe-by-glob but risk-tier by content.
 run_case "risk-sql-fixture" 0 risk-tier-hold "tests/fixtures/seed.sql"
+# An ADR amendment is 100% docs — safe-by-glob — and exactly the diff the
+# tier-2 hold must catch (wxa-graph gap, 2026-08-27; wxa-graph#477).
+run_case "risk-adr-amendment" 0 risk-tier-hold "docs/decisions/ADR-0003-cluster-algorithm.md"
 
 # 2. The bypass label releases the hold.
 LABELS="auto-merge-approved"
 run_case "bypass-releases-hold" 1 - "web/tests/e2e/auth/signup.spec.ts"
+# ADRs are tier-2, not tier-1: unlike docs/legal below, the label DOES
+# release them — a label click on an ADR PR is a human decision on that PR.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-adr" 1 - "docs/decisions/ADR-0003-cluster-algorithm.md"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
