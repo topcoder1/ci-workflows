@@ -82,7 +82,14 @@ name: Claude-author Auto-merge (reusable)
 # would over-block some repos and miss others. The enforcement for this
 # policy category is the caller's .github/risk-paths.yml `sensitive:`
 # list (item 1 above): marketing-site repos MUST list their
-# wording-bearing trees there.
+# wording-bearing trees there. That requirement is NOT relaxed by any of
+# the exceptions below — they are a floor for the conventional docs/
+# layout, never a substitute for a repo listing where its own copy lives.
+#
+# The exceptions all share one admission test: a FIXED CONVENTIONAL PATH
+# under docs/, which cannot over-block (a repo without that directory is
+# unaffected) and which therefore earns a DURABLE central gate instead of
+# a per-repo one. A layout that is not conventional stays caller-side.
 #
 # EXCEPTION: `^docs/legal/.*` IS matched centrally (added 2026-07-27).
 # Unlike a marketing tree, docs/legal/ is a fixed conventional path, so it
@@ -113,6 +120,48 @@ name: Claude-author Auto-merge (reusable)
 # is releasable by the bypass label — a label click on an ADR PR is a
 # human decision on that PR, which is what the contract asks. BB twin:
 # bb-automerge.py HIGH_RISK_PATTERNS (topcoder1/dotclaude#266).
+#
+# THIRD EXCEPTION, same shape: `^docs/(marketing|pricing|product-page)`
+# (added 2026-08-30). Customer-facing PRICING wording — a wrong published
+# price is a public commitment, and CI can no more check that a price is
+# the one we agreed to sell at than it can check a clause is true.
+#
+# This is a deliberate amendment to the paragraph above, not an oversight
+# of it: that text names marketing/pricing as caller-side BECAUSE layouts
+# differ, and this exception is scoped to the one layout that does not —
+# the conventional docs/ tree. Measured before adding, across all 140
+# repos in topcoder1 + whois-api-llc: exactly TWO carry any of these
+# directories — whois-api-llc/wxa_vpn and topcoder1/inbox_superpilot,
+# whose docs/marketing/ holds PRICING_FEATURE_MATRIX_AND_SPLIT_INBOX.md
+# and positioning-onepager.md, i.e. the same category. So it provably
+# cannot over-block; 96 repos have no docs/ tree at all and 42 have one
+# with none of these names.
+#
+# Why caller-side alone was NOT enough, which is the whole reason this is
+# here: safe-paths-automerge.yml decides on diff CONTENT and never reads
+# risk-paths.yml, so a docs-only pricing diff is armed by its `^docs/.*`
+# safe glob no matter what the caller classifies. A repo can follow the
+# paragraph above perfectly and still ship an unreviewed price change —
+# the caller-side listing is necessary and not sufficient. Lesson
+# 2026-08-30, whois-api-llc/wxa_vpn#1718: docs/marketing/
+# pricing-block-handoff.md is pasted verbatim into the CMS,
+# docs/product-page/*.html is the product page, and docs/marketing-launch/
+# 03-seo/schema-json-ld.html is shipped structured data with a literal
+# "price" field that Google and the AI answer engines read — all three
+# classified `trivial`, i.e. auto-merge eligible.
+#
+# Note `docs/pricing/**` was ALREADY held incidentally, by the
+# billing|payment|pricing segment rule above; this makes that coverage
+# intentional and extends it to the marketing and product-page trees,
+# which that rule misses (`pricing` is not a whole segment in
+# `docs/marketing/pricing-block-handoff.md`).
+#
+# Boundary is `([/.-]|$)`, not a bare prefix: it must reach
+# docs/marketing-launch/ (hyphen) and docs/pricing.md — the canonical
+# customer-facing tier+price table, which sits BESIDE docs/pricing/ — while
+# leaving docs/marketingnotes.md alone. Tier 2, not tier 1: a price is a
+# commercial decision a human can legitimately approve with a label click,
+# unlike a contractual clause. BB twin: bb-automerge.py HIGH_RISK_PATTERNS.
 #
 # This workflow does NOT bypass branch protection. It only enables GitHub's
 # "auto-merge" toggle, which still waits for required checks (Claude Review)
@@ -924,6 +973,7 @@ jobs:
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
           ^docs/legal/.*
           ^docs/decisions/.*
+          ^docs/(marketing|pricing|product-page)([/.-]|$)
           (^|/)naf(/|\.(py|go|ts|js)$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
