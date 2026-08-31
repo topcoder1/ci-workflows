@@ -132,6 +132,19 @@ run_case "risk-sql-fixture" 0 risk-tier-hold "tests/fixtures/seed.sql"
 # An ADR amendment is 100% docs — safe-by-glob — and exactly the diff the
 # tier-2 hold must catch (wxa-graph gap, 2026-08-27; wxa-graph#477).
 run_case "risk-adr-amendment" 0 risk-tier-hold "docs/decisions/ADR-0003-cluster-algorithm.md"
+# Customer-facing pricing/marketing wording (wxa_vpn#1718, 2026-08-30). Also
+# 100% docs, and the case the caller-side risk-paths.yml CANNOT reach: this
+# workflow never reads that file, so its `sensitive:` entry does not stop the
+# arm. Measured on origin/main before the pattern landed, all four armed.
+run_case "risk-pricing-handoff" 0 risk-tier-hold "docs/marketing/pricing-block-handoff.md"
+run_case "risk-pricing-schema" 0 risk-tier-hold "docs/marketing-launch/03-seo/schema-json-ld.html"
+run_case "risk-pricing-product-page" 0 risk-tier-hold "docs/product-page/index.html"
+# Beside the directory, not in it — docs/pricing/** alone would miss it.
+run_case "risk-pricing-top-level-file" 0 risk-tier-hold "docs/pricing.md"
+# Boundary: a name that merely STARTS with a token is ordinary docs and must
+# still auto-merge, or the exception over-blocks.
+run_case "safe-marketingnotes" 1 - "docs/marketingnotes.md"
+run_case "safe-product-pages-overview" 1 - "docs/product-pages-overview.md"
 
 # 2. The bypass label releases the hold.
 LABELS="auto-merge-approved"
@@ -140,6 +153,13 @@ run_case "bypass-releases-hold" 1 - "web/tests/e2e/auth/signup.spec.ts"
 # release them — a label click on an ADR PR is a human decision on that PR.
 LABELS="auto-merge-approved"
 run_case "bypass-releases-adr" 1 - "docs/decisions/ADR-0003-cluster-algorithm.md"
+# Pricing is tier-2 as well: a price is a commercial decision a human can
+# approve with a label click. This case is what pins the TIER — promoting the
+# pattern into unsafe_overrides would yield reason=unsafe-override here, and
+# the drift guard could not catch it (it only compares the two
+# risk_tier_overrides blocks, never the tier a pattern sits in).
+LABELS="auto-merge-approved"
+run_case "bypass-releases-pricing" 1 - "docs/marketing/pricing-block-handoff.md"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
