@@ -99,15 +99,21 @@ RISKY: src/webcat/api/middleware/naf.py
 RISKY: asm/asm-core/src/naf/client.go
 RISKY: internal/naf/validate.go
 
-# ── RISKY: ML serving / model-promotion (2026-06-02 lesson, corpus gap 2026-08-31)
-# ml/predictor.py is the live scoring path, ml/retrain.py the promotion gate.
-# A serving-path fix auto-merged once because ml/ had no risk glob. The
-# patterns went into claude-author-automerge.yml then, but NEVER into
-# bb-automerge.py, and no corpus entry existed to notice — so the BB lane was
-# ungated for ~3 months and the GH selftest's mirror silently dropped them too.
+# ── RISKY: ML serving / model-promotion (2026-06-02 lesson; drift closed 2026-08-31)
+# ml/predictor.* is the live scoring path, ml/retrain.* the model-promotion
+# gate. Both joined the two GH workflow gate blocks on 2026-06-02 after a
+# serving-path fix auto-merged — but this corpus, the hardcoded mirror in
+# test_automerge_risk_patterns.sh, and bb-automerge.py's HIGH_RISK_PATTERNS
+# never got them, the exact three-surface drift the lock-step comments forbid.
+# So the BB lane was ungated for ~3 months and nothing could notice, because a
+# pattern with no corpus entry is a pattern no test defends.
+# All four extensions of the enumerated (py|go|ts|js) set are exercised.
 RISKY: ml/predictor.py
 RISKY: ml/retrain.py
 RISKY: services/ml/predictor.go
+RISKY: src/ml/retrain.go
+RISKY: services/ml/predictor.ts
+RISKY: ml/retrain.js
 
 # ── RISKY: database (migrations + .sql) ────────────────────────────────────
 RISKY: internal/db/migrations/00049_workflows.sql
@@ -304,10 +310,18 @@ SAFE: docs/signin-flow.md
 # `naf` gate is matched as a file/dir segment, not a substring — these stay safe
 SAFE: docs/naf-integration.md
 # ml/ is anchored on the DIRECTORY plus an exact stem — a sibling file in
-# ml/, or a predictor under a different dir, is ordinary code.
+# ml/, or a predictor under a different dir, is ordinary code. Stem-scoped
+# deliberately: ml/ alone is NOT gated, only the two stems.
 SAFE: ml/serve.py
+SAFE: ml/pipeline.py
+# A suffixed stem is not the stem (predictor_test. != predictor.)
 SAFE: ml/predictor_test.py
 SAFE: mlflow/predictor.py
+# Segment anchor: `ml/predictor.py` IS a substring of `html/predictor.py` —
+# only the (^|/) guard keeps it safe.
+SAFE: html/predictor.py
+# Extension set is enumerated (py|go|ts|js): predictor docs stay auto-mergeable.
+SAFE: ml/predictor.md
 SAFE: src/naffle/handler.py
 SAFE: internal/snafu/retry.go
 # Cron files SHOULD be safe — wxa_vpn#250 / wxa_vpn#439 lesson
