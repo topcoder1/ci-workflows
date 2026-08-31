@@ -45,7 +45,9 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 ^k8s/.*
 ^fly\.toml$
 ^deploy/.*
-(^|/)deploy.*\.(sh|ya?ml)$'
+(^|/)deploy.*\.(sh|ya?ml)$
+(^|/)ml/predictor\.(py|go|ts|js)$
+(^|/)ml/retrain\.(py|go|ts|js)$'
 
 matches() {
   local f=$1
