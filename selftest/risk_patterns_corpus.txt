@@ -79,6 +79,19 @@ RISKY: docs/decisions/ADR-0003-cluster-algorithm.md
 RISKY: docs/decisions/ADR-0012-preepoch-domaininfo-edge-heal.md
 RISKY: docs/decisions/proposals/ADR-0099-draft.md
 
+# ── RISKY: customer-facing pricing/marketing wording (wxa_vpn#1718, 2026-08-30)
+# Third fixed-conventional-path exception, same admission test as
+# docs/legal/ and docs/decisions/: measured across all 140 topcoder1 +
+# whois-api-llc repos, only wxa_vpn and inbox_superpilot carry any of these
+# directories, so it cannot over-block. A wrong published price is a public
+# commitment and CI cannot check it. Boundary is ([/.-]|$) so the hyphenated
+# sibling tree and the top-level file are both reached.
+RISKY: docs/marketing/pricing-block-handoff.md
+RISKY: docs/marketing-launch/03-seo/schema-json-ld.html
+RISKY: docs/pricing/launch-grid-locked.md
+RISKY: docs/pricing.md
+RISKY: docs/product-page/index.html
+
 # ── RISKY: NAF credit/billing gate (wxa_webcat#438 gap, 2026-05-28) ─────────
 # The validate_call/log_successful_call client that authorizes + charges each
 # customer API call. Path has no auth/billing keyword so it slipped through.
@@ -198,6 +211,12 @@ SAFE: docs/legal-summary.md
 # ordinary docs; only the ADR directory itself is gated.
 SAFE: docs/decisions.md
 SAFE: docs/decision-log.md
+# Anchored with a separator boundary, so a name that merely STARTS with
+# one of the tokens is ordinary docs. docs/marketing-launch/ IS caught (the
+# hyphen is a boundary); docs/marketingnotes.md is not.
+SAFE: docs/marketingnotes.md
+SAFE: docs/pricingfaq.md
+SAFE: docs/product-pages-overview.md
 SAFE: README.md
 SAFE: tests/test_anything.py
 SAFE: tests/unit/utils_test.go

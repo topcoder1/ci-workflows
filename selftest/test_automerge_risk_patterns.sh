@@ -22,6 +22,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
 ^docs/legal/.*
 ^docs/decisions/.*
+^docs/(marketing|pricing|product-page)([/.-]|$)
 (^|/)naf(/|\.(py|go|ts|js)$)
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
