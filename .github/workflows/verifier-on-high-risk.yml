@@ -283,7 +283,7 @@ jobs:
         if: steps.classify.outputs.matched == 'yes'
         id: verifier
         continue-on-error: true # keep the workflow running so we can post the check-run with FAILURE conclusion
-        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.prompt.outputs.text }}
