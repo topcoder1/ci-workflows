@@ -1,0 +1,13 @@
+{
+  "name": "ci-workflows-classifier-deps",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Build-only manifest for .github/scripts/classifier-deps.mjs. Pins the exact dependency tree vendored into that bundle; package-lock.json beside it pins the transitives too. Never installed at run time — scripts/build-classifier-deps.sh copies these two files into a scratch dir, runs `npm ci`, and bundles the result. To change a version, edit it here and re-run that script.",
+  "dependencies": {
+    "minimatch": "10.2.6",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

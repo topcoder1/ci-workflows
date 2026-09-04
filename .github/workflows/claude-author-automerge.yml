@@ -364,13 +364,20 @@ jobs:
       # needed for any of this (deliberate: e.g. the wxa-secrets caller
       # omits it to keep the Codex bypass disabled).
       #
-      # Deliberately NOT pinned: classify.mjs is fetched from this repo's
-      # default branch and deps are pinned to majors (yaml@2 minimatch@10)
-      # — the SAME source and pins pr-classify.yml uses. Pinning only this
-      # side to an immutable ref would reintroduce matcher drift between
-      # the two workflows, which is the exact bug class this gate exists
-      # to close; callers reference the reusable @main anyway, so a pin
-      # here adds no supply-chain isolation in practice.
+      # Deliberately NOT pinned: classify.mjs and its vendored dep bundle
+      # (classifier-deps.mjs) are fetched from this repo's default branch —
+      # the SAME source pr-classify.yml uses. Pinning only this side to an
+      # immutable ref would reintroduce matcher drift between the two
+      # workflows, which is the exact bug class this gate exists to close;
+      # callers reference the reusable @main anyway, so a pin here adds no
+      # supply-chain isolation in practice.
+      #
+      # The dep VERSIONS are now pinned exactly, in the committed bundle
+      # (yaml@2.9.0, minimatch@10.2.6 — see scripts/build-classifier-deps.sh).
+      # They used to float on `yaml@2`/`minimatch@10`, resolved independently
+      # here and in pr-classify.yml at run time, so the two matchers could
+      # differ by a patch release even on the same PR. Both now load identical
+      # bytes.
       - name: Setup Node (risk-paths classification)
         id: setup_node
         if: steps.detect.outputs.claude_authored == '1'
@@ -478,11 +485,28 @@ jobs:
               mkdir -p "$work/repo/.github"
               printf '%s' "$rp_b64" | base64 -d > "$work/repo/.github/risk-paths.yml"
               fetch_mjs() {
-                gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs" \
+                gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$1" \
                   --jq '.content'
               }
-              retry fetch_mjs | base64 -d > "$work/classify.mjs"
-              (cd "$work" && npm install --no-save --silent yaml@2 minimatch@10 >/dev/null)
+              # classify.mjs plus the vendored, version-pinned dep bundle it
+              # imports relatively. This install was already isolated in $work
+              # (no caller package.json to drag in), so the latency fix that
+              # motivated vendoring does not apply here — but the DRIFT fix
+              # does, and this gate is the reason it matters. The comment above
+              # explains that pinning only one side would reintroduce matcher
+              # drift between this workflow and pr-classify.yml; with both
+              # floating on `yaml@2`/`minimatch@10` they resolved independently
+              # at run time, so two runs minutes apart could already match with
+              # different minimatch patches. One committed bundle makes the two
+              # matchers byte-identical, which is what these comments claimed
+              # all along.
+              for s in classify.mjs classifier-deps.mjs; do
+                retry fetch_mjs "$s" | base64 -d > "$work/$s"
+                if [ ! -s "$work/$s" ]; then
+                  echo "::error::fetched an empty $s from topcoder1/ci-workflows — refusing to arm auto-merge (fail closed)."
+                  exit 1
+                fi
+              done
               class=$(cd "$work/repo" && printf '%s\n' "$changed" | node "$work/classify.mjs")
               echo "risk-paths.yml@${rules_ref} verdict: $class"
               # Closed enum: anything outside the classifier's documented

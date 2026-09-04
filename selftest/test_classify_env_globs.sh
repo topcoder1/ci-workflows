@@ -34,10 +34,12 @@ set -euo pipefail
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# classify.mjs resolves its deps from its own location, so install them next
-# to a copy in the temp dir — same versions pr-classify.yml pins.
-cp .github/scripts/classify.mjs "$tmp/classify.mjs"
-(cd "$tmp" && npm install --no-save --silent yaml@2 minimatch@10 >/dev/null 2>&1)
+# classify.mjs imports its deps from classifier-deps.mjs sitting beside it —
+# the same committed, version-pinned bundle pr-classify.yml fetches into
+# .github/scripts/. Copying both mirrors the workflow's on-disk layout exactly,
+# and replaces an `npm install yaml@2 minimatch@10` that made this test both
+# slower and dependent on whatever those majors resolved to that day.
+cp .github/scripts/classify.mjs .github/scripts/classifier-deps.mjs "$tmp/"
 
 mkdir -p "$tmp/repo/.github"
 failed=0

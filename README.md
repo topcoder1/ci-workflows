@@ -122,6 +122,43 @@ Detection (any matching marker file → ecosystem enabled): `package.json` → n
 ~/.claude/templates/ci-workflows/scripts/rotate-anthropic-key.sh --apply
 ```
 
+## Classifier dependencies are vendored
+
+`.github/scripts/classify.mjs` and `codex-gate.mjs` need `yaml` and `minimatch`.
+Rather than installing them at run time, both import
+`.github/scripts/classifier-deps.mjs` — a committed, version-pinned esbuild
+bundle that every consumer fetches alongside the script itself.
+
+The pins live in `scripts/classifier-deps/package.json`, with
+`package-lock.json` beside it pinning the transitives too — `minimatch` pulls in
+`brace-expansion` and `balanced-match`, and both end up in the bundle, so
+without a lockfile a compatible transitive release would make `--check` report
+a stale bundle with no pin change of ours. To change a version:
+
+```bash
+$EDITOR scripts/classifier-deps/package.json
+(cd scripts/classifier-deps && npm install --package-lock-only)
+scripts/build-classifier-deps.sh          # regenerate
+scripts/build-classifier-deps.sh --check  # verify the committed copy is current
+```
+
+Commit the manifest, the lockfile and the regenerated bundle together.
+
+`selftest/test_classifier_deps_vendored.sh` runs `--check` in CI, so a bumped pin
+with a stale bundle fails there. Nothing else needs regenerating — editing
+`classify.mjs` does **not** require rebuilding the bundle.
+
+Why it is vendored rather than installed: the classifier used to run
+`npm install --no-save yaml@2 minimatch@10` inside the **caller's** checkout,
+where a root `package.json` made npm install that repo's entire dependency tree
+on every PR — ~1000 packages instead of 4 in `wxa-jake-ai`, with a measured 7m03s
+worst case that blew the auto-merge gate's poll budget and wedged the PR. The
+classifier is a fail-closed gate in every caller repo, so npm in its critical
+path was a fleet-wide wedge vector; it now depends only on the GitHub API, which
+it already required. The pins are exact, so `pr-classify.yml` and
+`claude-author-automerge.yml` match with identical bytes instead of independently
+resolved floating majors.
+
 ## Caveats
 
 - **Target repo workflow permissions:** must be "Read and write" (Settings → Actions → General). `install-pr-review.sh` auto-flips this; if you wire callers manually, flip it yourself.

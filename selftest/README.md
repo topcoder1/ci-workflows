@@ -30,6 +30,20 @@ arbitrary helper scripts; that's a different kind of repo.
   it would demote an unmatched path from the strict `standard` fallback into
   an auto-merge-eligible class (a PR adding `Tests/release.py` under
   `safe_test: ['tests/**']`).
+- `test_classifier_deps_vendored.sh` — the classifier's deps are a committed,
+  version-pinned esbuild bundle (`.github/scripts/classifier-deps.mjs`) instead
+  of a run-time `npm install`. The install used to run inside the caller's
+  checkout, where a root `package.json` pulled that repo's whole dependency tree
+  into every classify run (~1000 packages instead of 4 in wxa-jake-ai; 32s /
+  7m03s / 5m20s across three consecutive runs, the slowest of which wedged a PR
+  by blowing the auto-merge gate's poll budget). Pins that the bundle is not
+  stale, that every consumer workflow fetches it, and that no run-time
+  yaml/minimatch install has crept back. Its central case CALLS both exports
+  rather than merely importing them: yaml's exports map has no `import`
+  condition, so esbuild bundles its CommonJS build, whose `require('process')`
+  becomes a shim that throws — the first bundle built here imported cleanly and
+  died inside `parse()`, which would have hard-failed the classifier in all 45
+  caller repos.
 - `test_codex_verdict_gate.sh` — `codex-verdict.mjs` classification and its
   opt-in enforcement. Codex's verdict used to be a comment only: the job
   exited 0 whatever it said, so domain-rank#74 and #79 (both 2026-07-27) each
