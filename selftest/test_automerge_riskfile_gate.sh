@@ -66,6 +66,7 @@ set -euo pipefail
 
 WF=.github/workflows/claude-author-automerge.yml
 CLASSIFY=.github/scripts/classify.mjs
+DEPS=.github/scripts/classifier-deps.mjs
 failed=0
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
@@ -74,18 +75,34 @@ trap 'rm -rf "$T"' EXIT
 # 0a. Structural drift guards: the gate must use the SAME classifier, the
 #     SAME dependency pins, and read the rules from the BASE ref.
 # ---------------------------------------------------------------------------
-MJS_SOURCE='repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs'
+# Both workflows fetch their scripts by name from one shared API prefix. The
+# assertion is split into prefix + filename because both now pull several files
+# in a loop ("…/scripts/$s"), so no single literal path string appears any more.
+#
+# Comments are stripped first: these workflows discuss classify.mjs at length in
+# prose, and matching that would let a workflow that had STOPPED fetching the
+# script still pass. Assigned to a variable rather than piped into `grep -q` —
+# under `set -o pipefail` a match makes grep -q exit early, SIGPIPEs the
+# upstream grep, and the pipeline reports 141, i.e. a match reads as a failure.
+MJS_SOURCE='repos/topcoder1/ci-workflows/contents/.github/scripts/'
+DEPS_SOURCE='classifier-deps.mjs'
 for wf in .github/workflows/pr-classify.yml "$WF"; do
-  if grep -q "$MJS_SOURCE" "$wf"; then
+  wf_code=$(grep -vE '^[[:space:]]*#' "$wf" || true)
+  if grep -q "$MJS_SOURCE" <<<"$wf_code" && grep -q 'classify\.mjs' <<<"$wf_code"; then
     echo "✓ $wf fetches classify.mjs from the shared source"
   else
     echo "✗ $wf does not fetch classify.mjs from $MJS_SOURCE — matchers can drift"
     failed=1
   fi
-  if grep -q 'yaml@2 minimatch@10' "$wf"; then
-    echo "✓ $wf pins classifier deps yaml@2 minimatch@10"
+  # Both workflows must load the SAME dependency bytes, or the two matchers
+  # can disagree. This used to assert the shared `yaml@2 minimatch@10` npm
+  # pins; those were floating majors resolved independently at run time, so
+  # they only ever pinned the two sides to the same MAJOR. They are now a
+  # committed, exact-version bundle fetched from the same shared source.
+  if grep -q "$DEPS_SOURCE" <<<"$wf_code"; then
+    echo "✓ $wf fetches the shared vendored dep bundle"
   else
-    echo "✗ $wf does not pin classifier deps yaml@2 minimatch@10"
+    echo "✗ $wf does not fetch classifier deps from $DEPS_SOURCE — matchers can drift"
     failed=1
   fi
 done
@@ -153,6 +170,10 @@ fi
 #       STUB_FILES             — newline-separated changed-file list (path)
 #       STUB_CLASSIFY_FILE     — classifier served to the gate (defaults to
 #                                the real classify.mjs via REAL_CLASSIFY)
+#       REAL_DEPS              — the real vendored dep bundle
+#                                (classifier-deps.mjs) served verbatim;
+#                                classify.mjs imports it relatively, so the
+#                                gate cannot run without it
 #
 #     Any rules read whose ref is neither the base ref nor the default
 #     branch exits 64 — pinning is asserted on EVERY case, not just one.
@@ -168,6 +189,9 @@ case "$args" in
     ;;
   *contents/.github/scripts/classify.mjs*)
     base64 < "${STUB_CLASSIFY_FILE:-$REAL_CLASSIFY}"
+    ;;
+  *contents/.github/scripts/classifier-deps.mjs*)
+    base64 < "$REAL_DEPS"
     ;;
   *contents/.github/risk-paths.yml*)
     _ref=""
@@ -214,6 +238,7 @@ STUB
 chmod +x "$T/bin/npm"
 
 REAL_CLASSIFY="$PWD/$CLASSIFY"
+REAL_DEPS="$PWD/$DEPS"
 
 # ---------------------------------------------------------------------------
 # Runner + assertions.
@@ -242,6 +267,7 @@ run_gate() {
     STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_DEFAULT_FILE="$STUB_RISK_DEFAULT_FILE" \
     STUB_RISK_RC="$STUB_RISK_RC" STUB_CLASSIFY_FILE="$STUB_CLASSIFY_FILE" \
     STUB_FILES="$STUB_FILES" REAL_CLASSIFY="$REAL_CLASSIFY" \
+    REAL_DEPS="$REAL_DEPS" \
     bash gate.sh 2>&1)
   GATE_RC=$?
   set -e

@@ -79,13 +79,22 @@ jobs:
           # script capabilities ship behind env flags that default off
           # (FAIL_ON_REGRESSION, STRICT_FINDINGS): older YAML + newer script
           # is behavior-identical.
-          for s in codex-gate.mjs codex-verdict.mjs; do
+          # classifier-deps.mjs is the committed, version-pinned bundle of yaml
+          # and minimatch that codex-gate.mjs imports relatively, so it has to
+          # land in this same directory. It replaced an
+          # `npm install --no-save yaml@2 minimatch@10` that ran in the CALLER's
+          # checkout, where a root package.json made npm install that repo's
+          # whole dependency tree on every PR — ~1000 packages instead of 4 in
+          # wxa-jake-ai, with a measured 7m03s worst case. codex-verdict.mjs
+          # imports only node:fs and needs nothing.
+          for s in codex-gate.mjs codex-verdict.mjs classifier-deps.mjs; do
             gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$s" \
               --jq '.content' | base64 -d > ".github/scripts/$s"
+            if [ ! -s ".github/scripts/$s" ]; then
+              echo "::error::fetched an empty $s from topcoder1/ci-workflows — refusing to run the gate."
+              exit 1
+            fi
           done
-
-      - name: Install gate deps
-        run: npm install --no-save yaml@2 minimatch@10
 
       - name: Compute PR diff stats
         id: diff

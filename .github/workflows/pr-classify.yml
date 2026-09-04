@@ -60,7 +60,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Fetch classifier script from this reusable's repo
+      - name: Fetch classifier script and vendored deps from this reusable's repo
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -69,15 +69,36 @@ jobs:
           # The caller checked out THEIR repo. We need our classify.mjs script,
           # which lives in topcoder1/ci-workflows. Pull it via the GitHub API
           # so we don't pollute the caller's working tree.
+          #
+          # classifier-deps.mjs is the committed, version-pinned bundle of the
+          # only two third-party packages classify.mjs uses (yaml, minimatch).
+          # It replaces an `npm install --no-save yaml@2 minimatch@10` that ran
+          # RIGHT HERE, in the caller's checkout — where a root package.json
+          # made npm install that repo's ENTIRE dependency tree on every PR.
+          # In whois-api-llc/wxa-jake-ai (24 deps + 39 devDeps) that meant ~1000
+          # packages instead of 4, and the tail latency scaled with it: three
+          # consecutive runs on 2026-09-03 took 32s, 7m03s and 5m20s. The 7m03s
+          # run blew claude-author-automerge.yml's wait-for-classification
+          # budget and wedged the PR (whois-api-llc/wxa-jake-ai#1107).
+          #
+          # It must land beside classify.mjs — the script imports it relatively.
+          # Both files come from the same already-retried API call pattern, so
+          # this job now depends on ONE external service instead of two; npm was
+          # a fleet-wide wedge vector in front of a fail-closed gate.
           mkdir -p .github/scripts
-          fetch() {
-            gh api repos/topcoder1/ci-workflows/contents/.github/scripts/classify.mjs \
-              --jq '.content' | base64 -d > .github/scripts/classify.mjs
+          fetch_script() {
+            gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$1" --jq '.content'
           }
-          retry fetch
-
-      - name: Install classifier deps
-        run: npm install --no-save yaml@2 minimatch@10
+          for s in classify.mjs classifier-deps.mjs; do
+            retry fetch_script "$s" | base64 -d > ".github/scripts/$s"
+            # An empty file imports cleanly as a module with no exports, which
+            # would surface much later as "parse is not a function". Fail here,
+            # where the message names the actual problem.
+            if [ ! -s ".github/scripts/$s" ]; then
+              echo "::error::fetched an empty $s from topcoder1/ci-workflows — refusing to classify."
+              exit 1
+            fi
+          done
 
       - name: Compute highest-priority class
         id: compute

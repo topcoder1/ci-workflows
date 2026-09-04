@@ -20,8 +20,39 @@
 // Used by topcoder1/ci-workflows/.github/workflows/pr-classify.yml.
 
 import { readFileSync } from 'node:fs';
-import { parse } from 'yaml';
-import { minimatch } from 'minimatch';
+
+// `yaml` and `minimatch` come from classifier-deps.mjs — a committed, version-
+// pinned esbuild bundle that the workflows fetch into the same directory as this
+// script (see scripts/build-classifier-deps.sh). This replaced an
+// `npm install --no-save yaml@2 minimatch@10` that ran inside the CALLER's
+// checkout, where a root package.json dragged that repo's entire dependency tree
+// into every classify run: ~1000 packages instead of 4 in wxa-jake-ai, whose
+// tail latency (32s / 7m03s / 5m20s across three consecutive runs) blew the
+// auto-merge gate's poll budget and wedged PRs. The classifier is a fail-closed
+// gate in 45 repos, so npm in its critical path was a fleet-wide wedge vector;
+// it now depends only on the GitHub API, which it already required and already
+// retries.
+//
+// The node_modules fallback is a rollout shim, and stays as insurance for any
+// caller that pins the reusable to a sha. Callers reference these workflows
+// @main, so the workflow YAML and this script normally update together — but a
+// run that started before the change landed and reaches this step after it
+// would otherwise hard-fail on a file its older YAML never fetched. Anything
+// other than a missing file (a corrupt or truncated bundle) is re-thrown rather
+// than papered over: this gate fails closed.
+let parse, minimatch;
+try {
+	({ parse, minimatch } = await import('./classifier-deps.mjs'));
+} catch (e) {
+	if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
+	process.stderr.write(
+		'classify.mjs: classifier-deps.mjs not found beside this script — falling back to ' +
+			'node_modules. Verdicts are unaffected, but the workflow running this is out of ' +
+			'date: it should fetch classifier-deps.mjs alongside classify.mjs.\n'
+	);
+	({ parse } = await import('yaml'));
+	({ minimatch } = await import('minimatch'));
+}
 
 const RULES_PATH = '.github/risk-paths.yml';
 const PRIORITY = [

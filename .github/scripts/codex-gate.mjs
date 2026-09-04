@@ -17,8 +17,23 @@
 //   4. otherwise                              → RUN
 
 import { readFileSync, existsSync, appendFileSync } from 'node:fs';
-import { parse } from 'yaml';
-import { minimatch } from 'minimatch';
+
+// Vendored, version-pinned deps fetched alongside this script — see
+// .github/scripts/classify.mjs and scripts/build-classifier-deps.sh for why the
+// run-time `npm install` was removed. The node_modules fallback is the same
+// rollout shim classify.mjs carries; a corrupt bundle still throws.
+let parse, minimatch;
+try {
+  ({ parse, minimatch } = await import('./classifier-deps.mjs'));
+} catch (e) {
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
+  process.stderr.write(
+    'codex-gate.mjs: classifier-deps.mjs not found beside this script — falling back to ' +
+      'node_modules. The workflow running this should fetch it alongside the gate scripts.\n'
+  );
+  ({ parse } = await import('yaml'));
+  ({ minimatch } = await import('minimatch'));
+}
 
 const files = (process.env.CHANGED_FILES || '')
   .split('\n')

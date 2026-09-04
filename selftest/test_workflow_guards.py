@@ -34,6 +34,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_classify_exclude.sh",
     "selftest/test_classify_list_shape.sh",
     "selftest/test_classify_nocase.sh",
+    "selftest/test_classifier_deps_vendored.sh",
     # These two shipped unlisted (#152 and #160) and ran in CI never —
     # the completeness guard below found both on its first execution.
     "selftest/test_claude_review_max_turns_type.sh",
