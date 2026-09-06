@@ -134,6 +134,16 @@ expect_gate "17. 'Resolves https://github.com/o/r/issues/12 (partly)' refuses" \
 expect_gate "18. 'closes https://github.com/o/r/issues/12' clears" "closes https://github.com/o/r/issues/12" 0
 expect_gate "19. 'closes #1, owner/repo#2 and https://github.com/o/r/pull/3.' clears" \
   "closes #1, owner/repo#2 and https://github.com/o/r/pull/3." 0
+# codex round 2: a TAB before the qualifier used to end the match at the
+# reference ([^[:cntrl:]] excludes tab), clearing the exact hazard.
+expect_gate "22. a TAB before the qualifier still refuses" "$(printf 'Fixes #12\t(partial)')" 1
+# codex round 2: the Oxford pair ", and" is a separator, not a qualifier.
+expect_gate "23. 'Fixes #1, #2, and #3.' clears" "Fixes #1, #2, and #3." 0
+expect_gate "24. 'Closes #1; #2 and #3' clears" "Closes #1; #2 and #3" 0
+# codex round 2: the finder is case-insensitive, so the stripper must fold too.
+expect_gate "25. bare mixed-case URL clears" "Closes https://GitHub.com/o/r/issues/12" 0
+expect_gate "26. mixed-case URL with a qualifier refuses" \
+  "Closes https://GitHub.com/o/r/issues/12 partially" 1
 
 # The gate publishes a hash of the body it judged, so the arm step can
 # re-bind to it (a body edit fires no caller event).
@@ -171,6 +181,13 @@ pin "a body refusal revokes an existing arm" "- name: Revoke auto-merge on body-
 pin "decision-label publisher knows the verdict" "automerge:refused-body" 2
 pin "a refusal leaves a sticky comment" "claude-author-automerge:body-gate" 1
 pin "the sticky-comment lookup paginates" "issues/\$PR/comments?per_page=100\" --paginate" 1
+# codex round 2: `gh --paginate | head -1` takes SIGPIPE on duplicate markers,
+# and with no `|| true` on the pipeline pipefail aborts the step before the
+# sticky comment is updated. This lookup takes the first id by parameter
+# expansion instead. (The risk-tier comment step at ~line 1562 still uses the
+# piped shape; it carries `|| true`, so it degrades to an empty result and a
+# duplicate comment rather than aborting — reported on the PR, not fixed here.)
+pin "the body-gate sticky lookup avoids the SIGPIPE-prone head -1" 'existing=${existing_all%%' 1
 pin "the arm step re-binds to the body the gate judged" "GATE_BODY_SHA: \${{ steps.body_gate.outputs.body_sha }}" 1
 pin "a body change at arm time stands down as 'body'" "stood_down=body" 1
 pin "exactly one stand-down reason is published" "STOOD_DOWN_PUBLISHED" 2

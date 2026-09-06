@@ -951,20 +951,33 @@ jobs:
           # stripper below cannot drift apart.
           ref='(#[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(issues|pull)/[0-9]+)'
           kw='(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)'
+          # Separators that join references in one closing clause, including
+          # the Oxford pair ", and" — a comma AND a conjunction, not one or
+          # the other ("Fixes #1, #2, and #3." is a reference list, not a
+          # qualifier).
+          sep='[[:space:]]*(,|;)?[[:space:]]*(and|&|/)?[[:space:]]*'
           # One line per closing reference (`-o`: the match only, through the
-          # end of that line). `|| true`: no match is the common case.
+          # end of that line — `.` never crosses a newline, grep is line
+          # oriented, and unlike [^[:cntrl:]] it keeps a TAB, so
+          # "Fixes #12<TAB>(partial)" is still seen as qualified).
+          # `|| true`: no match is the common case.
           refs=$(printf '%s\n' "$body" \
-            | grep -oiE "\\b${kw}:?[[:space:]]+${ref}[^[:cntrl:]]*" \
+            | grep -oiE "\\b${kw}:?[[:space:]]+${ref}.*" \
             || true)
           while IFS= read -r m; do
             [ -z "$m" ] && continue
             # Drop the keyword and its first reference, then every further
-            # reference joined by a comma / "and" / "&" / "/", then trailing
-            # punctuation. Whatever is left is a qualifier. `~` delimits sed
-            # because the URL form carries slashes.
-            rest=$(printf '%s' "$m" \
+            # reference joined by a separator, then trailing punctuation.
+            # Whatever is left is a qualifier. `~` delimits sed because the
+            # URL form carries slashes. The finder is case-insensitive, so
+            # the stripper works on a CASE-FOLDED copy: `sed -E … I` is
+            # GNU-only and the selftest also runs on a BSD-sed Mac, so a
+            # mixed-case "https://GitHub.com/o/r/issues/12" must fold rather
+            # than survive as a phantom qualifier.
+            m_lc=$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')
+            rest=$(printf '%s' "$m_lc" \
               | sed -E "s~^[[:alpha:]]+:?[[:space:]]+${ref}~~" \
-              | sed -E "s~^([[:space:]]*(,|and|&|/)?[[:space:]]*${ref})*~~" \
+              | sed -E "s~^(${sep}${ref})*~~" \
               | sed -E 's~^[[:space:]]*[.,;:!)]*[[:space:]]*~~')
             if [ -n "$rest" ]; then
               refuse=1
@@ -1031,8 +1044,13 @@ jobs:
           marker="<!-- claude-author-automerge:body-gate -->"
           # Paginated: a marker first posted past the 30-comment default page
           # would otherwise read as absent and every refusal would post anew.
-          existing=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/comments?per_page=100" --paginate \
-            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+          # NOT piped into `head -1`: with duplicate markers on separate pages
+          # the reader exits first, `gh --paginate` takes SIGPIPE writing the
+          # next id, and pipefail would abort this step before it updates the
+          # sticky comment. Take the first line with parameter expansion.
+          existing_all=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/comments?per_page=100" --paginate \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" || true)
+          existing=${existing_all%%$'\n'*}
           {
             echo "$marker"
             echo "**Auto-merge withheld — the PR body would close an issue you probably meant to keep open.**"
