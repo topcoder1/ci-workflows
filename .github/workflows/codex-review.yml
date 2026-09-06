@@ -12,6 +12,10 @@ name: Codex Review (reusable)
 #   - codex review with prompt-only invocation works (~1:23 wall-clock)
 #   - --base / --commit / --uncommitted are mutually exclusive with [PROMPT]
 #   - Output streams reasoning then prints final verdict on a `codex\n<verdict>` block
+# Smoke-tested locally 2026-09-06 against codex-cli 0.153.4 (the release that
+# flipped the bundled default to gpt-6-astra): `-c model=gpt-5.6-sol` is
+# honored (banner `model: gpt-5.6-sol` at column 0), a prompt-only `review`
+# still sees the branch diff, and `-c model=` overrides a config.toml model.
 
 on:
   workflow_call:
@@ -58,6 +62,12 @@ jobs:
       # AND PINNED_MODEL in selftest/test_codex_model_pin.py in the same PR,
       # citing a measured hit rate. The review step refuses to run on any
       # other reported model (mirrors claude-review.yml's version refusal).
+      # This reverses #124's "why not just pin the model" call (a pinned id
+      # rots when OpenAI retires it); the 2026-09-04 evidence above is what
+      # changed. Rot is bounded (GA models get >= 6 months' deprecation
+      # notice) and fails LOUD (model-not-found reds the step with the id in
+      # the log) instead of silently reviewing with the wrong model. The
+      # response to rot is a deliberate bump, not a return to floating.
       CODEX_MODEL: gpt-5.6-sol
     permissions:
       contents: read
@@ -264,12 +274,13 @@ jobs:
           # the first lines of the output and reads `model: <id>` at column 0.
           # Bounding the scan (head -n 30) and anchoring (^) keep a `model:`
           # fragment inside the review text (a reviewed `pricing_model: str`
-          # line, say) from becoming the reported model, and folding case keeps
-          # a `Model: GPT-5.6-Sol` banner from reading as a different model.
+          # line, say) from becoming the reported model. Provenance keeps the
+          # banner's own spelling; the comparison below folds case so a
+          # `Model: GPT-5.6-Sol` banner cannot read as a different model.
           # Both matter now that a DIFFERENT reported model refuses the run.
           model_raw=$(head -n 30 /tmp/codex.out \
             | grep -ioE '^model:[[:space:]]*[A-Za-z0-9._-]+' | head -n1 \
-            | tr '[:upper:]' '[:lower:]' | sed -E 's/^model:[[:space:]]*//' || true)
+            | sed -E 's/^[^:]*:[[:space:]]*//' || true)
           model="${model_raw:-(unreported — see logs)}"
           printf '%s' "$model" > /tmp/codex.model
           printf '%s' "${codex_version:-unknown}" > /tmp/codex.cliversion
@@ -291,9 +302,10 @@ jobs:
           # reviewed". Exact match on purpose: a resolved snapshot id would
           # red the fleet with this message, and the fix is a deliberate bump.
           pin=$(printf '%s' "$CODEX_MODEL" | tr '[:upper:]' '[:lower:]')
+          reported=$(printf '%s' "$model_raw" | tr '[:upper:]' '[:lower:]')
           if [ -z "$model_raw" ]; then
             echo "::warning::codex-review: Codex did not report its model; the ${CODEX_MODEL} pin could not be verified this run"
-          elif [ "$model_raw" != "$pin" ]; then
+          elif [ "$reported" != "$pin" ]; then
             echo "::error::codex-review: pinned model ${CODEX_MODEL} but the CLI ran ${model_raw}; the -c model= override was not honored, refusing to count this as a second-model review"
             exit 1
           fi

@@ -114,7 +114,8 @@ arbitrary helper scripts; that's a different kind of repo.
   (`CODEX_MODEL`: hardcoded expectation plus typo/drop-flag/drop-anchor/
   defang negative controls), and executes the step's shipped provenance +
   refusal bash against synthetic `codex.out` fixtures: a different model
-  reds the run; a missing, re-cased, CRLF or out-of-region banner only warns.
+  reds the run; a re-cased or CRLF banner still matches the pin; a missing
+  or out-of-region banner only warns.
   Background: the 2026-09-04 `@openai/codex@latest` bump silently flipped
   the bundled default to gpt-6-astra, which then reported zero regressions
   in 88 fleet reviews against a 16% baseline on gpt-5.6-sol.

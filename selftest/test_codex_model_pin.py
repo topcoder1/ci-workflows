@@ -38,7 +38,7 @@ PINNED_MODEL = "gpt-5.6-sol"
 
 _ANCHORED_GREP = "grep -ioE '^model:[[:space:]]*"
 _REFUSAL = re.compile(
-    r'elif \[ "\$model_raw" != "\$pin" \]; then\n(?P<body>(?:.*\n)*?)\s+fi\n'
+    r'elif \[ "\$reported" != "\$pin" \]; then\n(?P<body>(?:.*\n)*?)\s+fi\n'
 )
 _PROVENANCE_MARKER = "codex_version=$(codex --version"
 _STEP_NAME = "Run Codex adversarial review"
@@ -194,7 +194,8 @@ def test_different_model_is_refused_after_provenance_is_recorded():
 def test_banner_variants_still_match_the_pin(codex_out):
     rc, log, reported, _ = _run_shipped(codex_out)
     assert rc == 0, log
-    assert reported == PINNED_MODEL
+    # Provenance keeps the banner's own spelling; only the comparison folds.
+    assert reported.lower() == PINNED_MODEL
     assert "::warning::" not in log, log
 
 
