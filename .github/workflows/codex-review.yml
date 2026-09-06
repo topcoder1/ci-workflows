@@ -12,6 +12,10 @@ name: Codex Review (reusable)
 #   - codex review with prompt-only invocation works (~1:23 wall-clock)
 #   - --base / --commit / --uncommitted are mutually exclusive with [PROMPT]
 #   - Output streams reasoning then prints final verdict on a `codex\n<verdict>` block
+# Smoke-tested locally 2026-09-06 against codex-cli 0.153.4 (the release that
+# flipped the bundled default to gpt-6-astra): `-c model=gpt-5.6-sol` is
+# honored (banner `model: gpt-5.6-sol` at column 0), a prompt-only `review`
+# still sees the branch diff, and `-c model=` overrides a config.toml model.
 
 on:
   workflow_call:
@@ -47,6 +51,24 @@ jobs:
     name: Codex Review
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
+    env:
+      # The review model. `npm install -g @openai/codex@latest` (below) floats
+      # the CLI on purpose so bug fixes land without a bump, but the CLI's
+      # BUNDLED DEFAULT model floats with it: 0.153.4 (2026-09-04) flipped it
+      # from gpt-5.6-sol to gpt-6-astra and nobody chose that. Astra at
+      # reasoning=low then reported zero regressions across the next 88 fleet
+      # reviews against a 16% baseline on Sol (750 reviews), at 2.5x the token
+      # price. The model of a merge gate changes by decision only: bump this
+      # AND PINNED_MODEL in selftest/test_codex_model_pin.py in the same PR,
+      # citing a measured hit rate. The review step refuses to run on any
+      # other reported model (mirrors claude-review.yml's version refusal).
+      # This reverses #124's "why not just pin the model" call (a pinned id
+      # rots when OpenAI retires it); the 2026-09-04 evidence above is what
+      # changed. Rot is bounded (GA models get >= 6 months' deprecation
+      # notice) and fails LOUD (model-not-found reds the step with the id in
+      # the log) instead of silently reviewing with the wrong model. The
+      # response to rot is a deliberate bump, not a return to floating.
+      CODEX_MODEL: gpt-5.6-sol
     permissions:
       contents: read
       pull-requests: write
@@ -206,12 +228,15 @@ jobs:
           # The flag is documented as the canonical CI escape hatch:
           # "Intended solely for running in environments that are externally
           # sandboxed" — which GHA runners are (ephemeral VMs).
+          # -c model="$CODEX_MODEL": pinned at the job level; see the env
+          # comment on jobs.codex-review for why the model must not float.
           # -c model_reasoning_effort=low: diff review is shallow analysis
           # work — medium/high reasoning roughly doubles cost per call without
           # measurable change in regression-finding rate on the 3-axis prompt
           # above. Keep the door open to bumping back up if FN rate climbs.
           codex \
             --dangerously-bypass-approvals-and-sandbox \
+            -c model="$CODEX_MODEL" \
             -c model_reasoning_effort=low \
             review "$PROMPT" 2>&1 | tee /tmp/codex.out
 
@@ -237,16 +262,26 @@ jobs:
           printf '%s\n' "$verdict" > /tmp/codex.verdict.full
 
           # Record which Codex model + CLI version actually ran. `npm install
-          # -g @openai/codex@latest` (above) floats the CLI — and thus its
-          # default model — on every run, so a silently shifted default would
-          # otherwise drift unnoticed across the fleet. The CLI version is the
+          # -g @openai/codex@latest` (above) floats the CLI on every run; the
+          # model is pinned via CODEX_MODEL and the reported one is checked
+          # against it below, so a CLI that stopped honoring `-c model=`
+          # cannot drift unnoticed across the fleet. The CLI version is the
           # reliable signal (always captured); the model is best-effort from
           # Codex's startup banner, falling back to "(unreported)". grep/sed
           # guarded with `|| true` so a missing banner never trips pipefail.
           codex_version=$(codex --version 2>/dev/null | head -n1 || true)
-          model=$(grep -ioE 'model:[[:space:]]*[A-Za-z0-9._-]+' /tmp/codex.out \
-            | head -n1 | sed -E 's/^[Mm]odel:[[:space:]]*//' || true)
-          [ -n "$model" ] || model="(unreported — see logs)"
+          # Banner-only, line-anchored, case-folded: the startup banner sits in
+          # the first lines of the output and reads `model: <id>` at column 0.
+          # Bounding the scan (head -n 30) and anchoring (^) keep a `model:`
+          # fragment inside the review text (a reviewed `pricing_model: str`
+          # line, say) from becoming the reported model. Provenance keeps the
+          # banner's own spelling; the comparison below folds case so a
+          # `Model: GPT-5.6-Sol` banner cannot read as a different model.
+          # Both matter now that a DIFFERENT reported model refuses the run.
+          model_raw=$(head -n 30 /tmp/codex.out \
+            | grep -ioE '^model:[[:space:]]*[A-Za-z0-9._-]+' | head -n1 \
+            | sed -E 's/^[^:]*:[[:space:]]*//' || true)
+          model="${model_raw:-(unreported — see logs)}"
           printf '%s' "$model" > /tmp/codex.model
           printf '%s' "${codex_version:-unknown}" > /tmp/codex.cliversion
           {
@@ -255,6 +290,25 @@ jobs:
             echo "- Model: \`${model}\`"
             echo "- Reasoning effort: \`low\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # Enforce the pin. A CLI that ignored or renamed `-c model=` would
+          # silently review with its bundled default, which is the 2026-09-04
+          # drift in a new costume. The branch is on emptiness, not on the
+          # display sentinel, so rewording the sentinel cannot turn the
+          # fail-safe path into the refusal. Unreported (no banner matched)
+          # stays a warning so a banner-format change cannot red the fleet; a
+          # DIFFERENT reported model is refused outright, before any comment
+          # is posted, so a wrong-model verdict never reads as "second-model
+          # reviewed". Exact match on purpose: a resolved snapshot id would
+          # red the fleet with this message, and the fix is a deliberate bump.
+          pin=$(printf '%s' "$CODEX_MODEL" | tr '[:upper:]' '[:lower:]')
+          reported=$(printf '%s' "$model_raw" | tr '[:upper:]' '[:lower:]')
+          if [ -z "$model_raw" ]; then
+            echo "::warning::codex-review: Codex did not report its model; the ${CODEX_MODEL} pin could not be verified this run"
+          elif [ "$reported" != "$pin" ]; then
+            echo "::error::codex-review: pinned model ${CODEX_MODEL} but the CLI ran ${model_raw}; the -c model= override was not honored, refusing to count this as a second-model review"
+            exit 1
+          fi
 
       - name: Post review comment
         if: steps.gate.outputs.should_run == 'true'
