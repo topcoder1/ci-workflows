@@ -149,6 +149,12 @@ expect_gate "26. mixed-case URL with a qualifier refuses" \
 expect_gate "27. 'Fixes #1, fixes #2' clears" "Fixes #1, fixes #2" 0
 expect_gate "28. 'Closes #1 and closes owner/repo#2.' clears" "Closes #1 and closes owner/repo#2." 0
 expect_gate "29. 'Fixes #1, fixes #2 (partial)' still refuses" "Fixes #1, fixes #2 (partial)" 1
+# codex round 4: sentence-separated clauses are two closing references, but a
+# period followed by PROSE is still a qualifier — the separator is only ever
+# consumed when another reference follows.
+expect_gate "30. 'Fixes #1. Fixes #2.' clears" "Fixes #1. Fixes #2." 0
+expect_gate "31. 'Fixes #12. Some notes about #34' refuses" "Fixes #12. Some notes about #34" 1
+expect_gate "32. 'Closes #1. And closes #2' clears" "Closes #1. And closes #2" 0
 
 # The gate publishes a hash of the body it judged, so the arm step can
 # re-bind to it (a body edit fires no caller event).
@@ -196,6 +202,11 @@ pin "the body-gate sticky lookup avoids the SIGPIPE-prone head -1" 'existing=${e
 # codex round 3: the advisory comment must not redden a completed refusal.
 pin "both comment writes degrade to a warning" "could not update the body-gate comment" 1
 pin "the comment post degrades to a warning too" "could not post the body-gate comment" 1
+# codex round 4: a disarm that itself fails must be retried by the always()
+# error-revoke, or the stale arm merges while the job merely goes red.
+pin "the body revoke step is addressable" "id: body_revoke" 1
+pin "the error-revoke retries a failed body disarm" "steps.body_revoke.outcome == 'failure'" 1
+pin "the error-revoke retries a failed pre-arm stand-down" "steps.arm.outcome == 'failure'" 1
 pin "the arm step re-binds to the body the gate judged" "GATE_BODY_SHA: \${{ steps.body_gate.outputs.body_sha }}" 1
 pin "a body change at arm time stands down as 'body'" "stood_down=body" 1
 pin "exactly one stand-down reason is published" "STOOD_DOWN_PUBLISHED" 2

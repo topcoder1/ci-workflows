@@ -954,8 +954,11 @@ jobs:
           # Separators that join references in one closing clause, including
           # the Oxford pair ", and" — a comma AND a conjunction, not one or
           # the other ("Fixes #1, #2, and #3." is a reference list, not a
-          # qualifier).
-          sep='[[:space:]]*(,|;)?[[:space:]]*(and|&|/)?[[:space:]]*'
+          # qualifier) — and a sentence break, so "Fixes #1. Fixes #2." reads
+          # as two closing clauses. A separator is only ever consumed when
+          # ANOTHER reference follows it, so a trailing "." before prose is
+          # still a qualifier.
+          sep='[[:space:]]*(,|;|\.)?[[:space:]]*(and|&|/)?[[:space:]]*'
           # One line per closing reference (`-o`: the match only, through the
           # end of that line — `.` never crosses a newline, grep is line
           # oriented, and unlike [^[:cntrl:]] it keeps a TAB, so
@@ -1004,6 +1007,7 @@ jobs:
       # disarm an arm placed by an earlier run — "refusing to arm" alone is
       # not fail-closed for a PR that is already armed.
       - name: Revoke auto-merge on body-gate refusal
+        id: body_revoke
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.body_gate.outputs.refuse == '1'
@@ -2080,6 +2084,14 @@ jobs:
       # blocked short-circuits). The job still ends red from the failed
       # gate step — this only guarantees the arm is gone.
       #
+      # A DISARM that itself failed counts too: `body_revoke` and the arm
+      # step's own pre-arm stand-downs (base or body) both try to remove an
+      # arm placed by an earlier run, and both verify with `gh pr view`. If
+      # that disarm or its verification errors, the gate step it belongs to
+      # still reads 'success', the job goes red — and GitHub keeps the stale
+      # auto-merge request, which merges as soon as checks pass. Listing
+      # their outcomes makes this step retry the disarm (codex round 4 P1).
+      #
       # PREREQUISITE failures count too (codex round-5 P1): if checkout,
       # detect, or setup-node errors, the gate steps end 'skipped' — not
       # 'failure' — and the arm would survive on the outcome checks
@@ -2099,6 +2111,8 @@ jobs:
            steps.hold.outcome == 'failure' ||
            steps.base_gate.outcome == 'failure' ||
            steps.body_gate.outcome == 'failure' ||
+           steps.body_revoke.outcome == 'failure' ||
+           steps.arm.outcome == 'failure' ||
            steps.risk.outcome == 'failure' ||
            steps.quiet_findings.outcome == 'failure' ||
            steps.setup_node.outcome == 'failure' ||
