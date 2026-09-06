@@ -906,6 +906,126 @@ jobs:
             exit 1
           fi
 
+      # A PR body that says "closes #N <qualifier>" closes N in FULL on merge:
+      # GitHub's keyword parser reads the keyword and the number and ignores
+      # everything after them. topcoder1/webcrawl#509 was closed on 2026-09-04
+      # by a body reading "closes #509 follow-up (b)"; the lane kept posting
+      # deploy records to a closed issue for a day before noticing. This gate
+      # ABSTAINS (declines to arm — never a veto, manual merge stays available)
+      # when a closing keyword's reference is followed by a qualifier on the
+      # same line, so the author rewrites it ("part of #N", "addresses #N …")
+      # or a human clicks knowing exactly what closes.
+      #
+      # Body from the event payload — immutable per event, no API read to
+      # fail; an `edited` event starts a newer run that re-gates from the new
+      # body. What clears: a bare reference ("Closes #12", "Fixes #12."), a
+      # list of references ("closes #1 and #2", "fixes #1, #2, #3"), or text
+      # that is not a closing keyword at all ("part of #509", "fixes for #12"
+      # — the keyword must be directly followed by the reference). What
+      # refuses: any other word after the reference ("closes #509 follow-up
+      # (b)", "Fixes #7 (partial)", "closes #509's saga", "Fixes #12: …").
+      - name: Check PR body closing keywords
+        id: body_gate
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.hold.outputs.hold != '1'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          refuse=0
+          reason=""
+          # One line per closing reference (`-o`: the match only, through the
+          # end of that line). `|| true`: no match is the common case.
+          refs=$(printf '%s\n' "${PR_BODY:-}" \
+            | grep -oiE '\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[[:space:]]+#[0-9]+[^[:cntrl:]]*' \
+            || true)
+          while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            # Drop the keyword and its first reference, then every further
+            # reference joined by a comma / "and" / "&" / "/", then trailing
+            # punctuation. Whatever is left is a qualifier.
+            rest=$(printf '%s' "$m" \
+              | sed -E 's/^[[:alpha:]]+:?[[:space:]]+#[0-9]+//' \
+              | sed -E 's/^([[:space:]]*(,|and|&|\/)?[[:space:]]*#[0-9]+)*//' \
+              | sed -E 's/^[[:space:]]*[.,;:!)]*[[:space:]]*//')
+            if [ -n "$rest" ]; then
+              refuse=1
+              reason="closing keyword with a qualifier: \"$m\" — GitHub closes the whole issue on merge; write \"part of #N\" / \"addresses #N …\" unless it should close"
+              break
+            fi
+          done <<< "$refs"
+          {
+            echo "refuse=$refuse"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$refuse" -eq 1 ]; then
+            echo "::notice::Auto-merge withheld: $reason. Manual merge remains available."
+          else
+            echo "PR body closing keywords cleared."
+          fi
+
+      # Same idempotent revoke as the base gate: a body refusal must also
+      # disarm an arm placed by an earlier run — "refusing to arm" alone is
+      # not fail-closed for a PR that is already armed.
+      - name: Revoke auto-merge on body-gate refusal
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.body_gate.outputs.refuse == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Ownership guard, mirroring the error-revoke: a body edit fires an
+          # `edited` event whose newer run re-gates from the new body, and a
+          # push moves the head — skip only on a POSITIVE head-moved read; if
+          # the read fails, revoke anyway (fail toward safety).
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+          if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns the arm decision; skipping stale revoke."
+            exit 0
+          fi
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
+          echo "Auto-merge state after body-gate revoke: $state"
+          if [ "$state" = "ON" ]; then
+            echo "::error::auto-merge still ON after --disable-auto — investigate"
+            exit 1
+          fi
+
+      - name: Comment when the body gate refuses
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.body_gate.outputs.refuse == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REASON: ${{ steps.body_gate.outputs.reason }}
+        run: |
+          set -euo pipefail
+          marker="<!-- claude-author-automerge:body-gate -->"
+          existing=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/$PR/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
+          {
+            echo "$marker"
+            echo "**Auto-merge withheld — the PR body would close an issue you probably meant to keep open.**"
+            echo ""
+            echo "$REASON"
+            echo ""
+            echo "GitHub's closing-keyword parser reads the keyword and the number and ignores the rest of the line, so \`closes #N follow-up (b)\` closes #N in full on merge. Edit the body (\`part of #N\`, \`addresses #N …\`) — the \`edited\` event re-runs this gate — or merge manually if the issue should close."
+          } > /tmp/automerge-body-gate.md
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "/repos/${GITHUB_REPOSITORY}/issues/comments/$existing" \
+              -f body="$(cat /tmp/automerge-body-gate.md)" >/dev/null
+          else
+            gh pr comment "$PR" --body-file /tmp/automerge-body-gate.md
+          fi
+
       # Option A: explicit human approval via label.
       # Run BEFORE the risk-tier path-scan so a PR the scan can't
       # classify can still bypass-merge. Historically that meant any
@@ -1196,7 +1316,8 @@ jobs:
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
           steps.hold.outputs.hold != '1' &&
-          steps.base_gate.outputs.refuse != '1' && (
+          steps.base_gate.outputs.refuse != '1' &&
+          steps.body_gate.outputs.refuse != '1' && (
             steps.risk.outputs.risky != '1' ||
             steps.bypass_label.outputs.bypass == '1' ||
             steps.bypass_codex.outputs.bypass == '1'
@@ -1432,6 +1553,7 @@ jobs:
           steps.classifier_verdict.outputs.blocked != '1' &&
           steps.hold.outputs.hold != '1' &&
           steps.base_gate.outputs.refuse != '1' &&
+          steps.body_gate.outputs.refuse != '1' &&
           steps.quiet_findings.outputs.clear == '1' && (
             steps.risk.outputs.risky != '1' ||
             steps.bypass_label.outputs.bypass == '1' ||
@@ -1770,6 +1892,7 @@ jobs:
           BLOCKED: ${{ steps.classifier_verdict.outputs.blocked }}
           HOLD: ${{ steps.hold.outputs.hold }}
           BASE_REFUSE: ${{ steps.base_gate.outputs.refuse }}
+          BODY_REFUSE: ${{ steps.body_gate.outputs.refuse }}
           RISKY: ${{ steps.risk.outputs.risky }}
           BYPASS_LBL: ${{ steps.bypass_label.outputs.bypass }}
           BYPASS_CDX: ${{ steps.bypass_codex.outputs.bypass }}
@@ -1792,6 +1915,8 @@ jobs:
             decision="automerge:blocked-classifier"
           elif [ "${ARM_STOOD_DOWN:-}" = "base" ] || [ "${BASE_REFUSE:-}" = "1" ]; then
             decision="automerge:refused-base"
+          elif [ "${BODY_REFUSE:-}" = "1" ]; then
+            decision="automerge:refused-body"
           elif [ "${RISKY:-}" = "1" ] && [ "${BYPASS_LBL:-}" != "1" ] && [ "${BYPASS_CDX:-}" != "1" ]; then
             decision="automerge:blocked-risk-tier"
           elif [ "${QF_REASON:-}" = "findings" ]; then
@@ -1857,6 +1982,7 @@ jobs:
             automerge:withheld-findings)  color="d93f0b"; desc="Automerge arbiter: review findings postdate the last commit — push a fix or merge manually" ;;
             automerge:withheld-quiet-cap) color="fbca04"; desc="Automerge arbiter: review activity never went quiet — the next PR event retries" ;;
             automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
+            automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: PR body closes an issue with a qualifier (closes #N …) — rewrite as 'part of #N' or click-merge" ;;
           esac
           # create-else-EDIT (not a create-retry): create's failure is the
           # EXPECTED already-exists conflict, and the edit refreshes a
@@ -1903,6 +2029,7 @@ jobs:
           (steps.classifier_verdict.outcome == 'failure' ||
            steps.hold.outcome == 'failure' ||
            steps.base_gate.outcome == 'failure' ||
+           steps.body_gate.outcome == 'failure' ||
            steps.risk.outcome == 'failure' ||
            steps.quiet_findings.outcome == 'failure' ||
            steps.setup_node.outcome == 'failure' ||

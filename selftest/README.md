@@ -21,6 +21,16 @@ arbitrary helper scripts; that's a different kind of repo.
 - `test_automerge_risk_patterns.sh` / `test_bb_automerge_risk_patterns.sh`
   — risk-tier regex behavior, driven by the shared corpus in
   `risk_patterns_corpus.txt`.
+- `test_automerge_body_gate.sh` — the PR-body closing-keyword gate in
+  `claude-author-automerge.yml`. `closes #N <qualifier>` closes N in FULL on
+  merge (GitHub reads the keyword and the number, nothing after them);
+  topcoder1/webcrawl#509 was closed that way on 2026-09-04 by "closes #509
+  follow-up (b)". The gate abstains (declines to arm, revokes a stale arm,
+  leaves a sticky comment, publishes `automerge:refused-body`) when a
+  closing reference is followed by a qualifier; bare references and lists
+  ("closes #1 and #2", "fixes #1, #2, #3.") clear. Runs the extracted step
+  against 14 bodies and pins the wiring into the arm, quiet-period and
+  error-revoke conditions.
 - `test_classify_nocase.sh` — `classify.mjs` case-folds pattern matching for
   `blocked`/`sensitive` **only**. minimatch defaults to case-sensitive, so a
   lowercase `**/secrets*` missed `docs/SECRETS.md` and a production secrets
