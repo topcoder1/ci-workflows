@@ -126,6 +126,31 @@ expect_gate "11. 'RESOLVES #3 — see notes' refuses (case-insensitive)" "RESOLV
 expect_gate "12. empty body clears" "" 0
 expect_gate "13. 'Fixes #12: the parser' refuses" "Fixes #12: the parser now rejects it" 1
 expect_gate "14. 'closed #4 & #5' clears" "closed #4 & #5" 0
+# Repository-qualified and URL references close too (codex round 1, P2).
+expect_gate "15. 'Fixes owner/repo#123 partial' refuses" "Fixes owner/repo#123 partial" 1 "owner/repo#123 partial"
+expect_gate "16. 'Fixes owner/repo#123' clears" "Fixes owner/repo#123" 0
+expect_gate "17. 'Resolves https://github.com/o/r/issues/12 (partly)' refuses" \
+  "Resolves https://github.com/o/r/issues/12 (partly)" 1
+expect_gate "18. 'closes https://github.com/o/r/issues/12' clears" "closes https://github.com/o/r/issues/12" 0
+expect_gate "19. 'closes #1, owner/repo#2 and https://github.com/o/r/pull/3.' clears" \
+  "closes #1, owner/repo#2 and https://github.com/o/r/pull/3." 0
+
+# The gate publishes a hash of the body it judged, so the arm step can
+# re-bind to it (a body edit fires no caller event).
+run_gate "Closes #12."
+if [ -n "$(out_get body_sha)" ] && [ "$(printf '%s' "$(out_get body_sha)" | wc -c | tr -d ' ')" = "16" ]; then
+  echo "✓ 20. body_sha output published (16 hex chars)"
+else
+  echo "✗ 20. body_sha output missing or malformed: '$(out_get body_sha)'"
+  failed=1
+fi
+sha_a=$(out_get body_sha); run_gate "Closes #12. (edited)"; sha_b=$(out_get body_sha)
+if [ "$sha_a" != "$sha_b" ]; then
+  echo "✓ 21. body_sha changes when the body changes"
+else
+  echo "✗ 21. body_sha identical for different bodies"
+  failed=1
+fi
 
 # ---------------------------------------------------------------------------
 # Wiring pins.
@@ -145,6 +170,11 @@ pin "error-revoke counts a failed body gate" "steps.body_gate.outcome == 'failur
 pin "a body refusal revokes an existing arm" "- name: Revoke auto-merge on body-gate refusal" 1
 pin "decision-label publisher knows the verdict" "automerge:refused-body" 2
 pin "a refusal leaves a sticky comment" "claude-author-automerge:body-gate" 1
+pin "the sticky-comment lookup paginates" "issues/\$PR/comments?per_page=100\" --paginate" 1
+pin "the arm step re-binds to the body the gate judged" "GATE_BODY_SHA: \${{ steps.body_gate.outputs.body_sha }}" 1
+pin "a body change at arm time stands down as 'body'" "stood_down=body" 1
+pin "exactly one stand-down reason is published" "STOOD_DOWN_PUBLISHED" 2
+pin "the decision label reads the body stand-down" "\"\${ARM_STOOD_DOWN:-}\" = \"body\"" 1
 
 echo ""
 if [ "$failed" -gt 0 ]; then
