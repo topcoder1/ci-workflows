@@ -110,6 +110,14 @@ arbitrary helper scripts; that's a different kind of repo.
   when nothing was recoverable or the fallback could not be posted; every
   guard-side read error (API failure, missing/malformed transcript,
   unrecognized phrasing) is a warning and exit 0.
+- `test_codex_model_pin.py` — pins `codex-review.yml`'s Codex model
+  (`CODEX_MODEL`: hardcoded expectation plus typo/drop-flag/drop-anchor/
+  defang negative controls), and executes the step's shipped provenance +
+  refusal bash against synthetic `codex.out` fixtures: a different model
+  reds the run; a missing, re-cased, CRLF or out-of-region banner only warns.
+  Background: the 2026-09-04 `@openai/codex@latest` bump silently flipped
+  the bundled default to gpt-6-astra, which then reported zero regressions
+  in 88 fleet reviews against a 16% baseline on gpt-5.6-sol.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.
