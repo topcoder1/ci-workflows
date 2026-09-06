@@ -144,6 +144,11 @@ expect_gate "24. 'Closes #1; #2 and #3' clears" "Closes #1; #2 and #3" 0
 expect_gate "25. bare mixed-case URL clears" "Closes https://GitHub.com/o/r/issues/12" 0
 expect_gate "26. mixed-case URL with a qualifier refuses" \
   "Closes https://GitHub.com/o/r/issues/12 partially" 1
+# codex round 3: GitHub's documented multi-issue form repeats the keyword —
+# only "Fixes #1, fixes #2" closes both, and it is not a qualifier.
+expect_gate "27. 'Fixes #1, fixes #2' clears" "Fixes #1, fixes #2" 0
+expect_gate "28. 'Closes #1 and closes owner/repo#2.' clears" "Closes #1 and closes owner/repo#2." 0
+expect_gate "29. 'Fixes #1, fixes #2 (partial)' still refuses" "Fixes #1, fixes #2 (partial)" 1
 
 # The gate publishes a hash of the body it judged, so the arm step can
 # re-bind to it (a body edit fires no caller event).
@@ -188,6 +193,9 @@ pin "the sticky-comment lookup paginates" "issues/\$PR/comments?per_page=100\" -
 # piped shape; it carries `|| true`, so it degrades to an empty result and a
 # duplicate comment rather than aborting — reported on the PR, not fixed here.)
 pin "the body-gate sticky lookup avoids the SIGPIPE-prone head -1" 'existing=${existing_all%%' 1
+# codex round 3: the advisory comment must not redden a completed refusal.
+pin "both comment writes degrade to a warning" "could not update the body-gate comment" 1
+pin "the comment post degrades to a warning too" "could not post the body-gate comment" 1
 pin "the arm step re-binds to the body the gate judged" "GATE_BODY_SHA: \${{ steps.body_gate.outputs.body_sha }}" 1
 pin "a body change at arm time stands down as 'body'" "stood_down=body" 1
 pin "exactly one stand-down reason is published" "STOOD_DOWN_PUBLISHED" 2

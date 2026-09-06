@@ -967,9 +967,12 @@ jobs:
           while IFS= read -r m; do
             [ -z "$m" ] && continue
             # Drop the keyword and its first reference, then every further
-            # reference joined by a separator, then trailing punctuation.
-            # Whatever is left is a qualifier. `~` delimits sed because the
-            # URL form carries slashes. The finder is case-insensitive, so
+            # reference joined by a separator — each optionally re-stating the
+            # keyword, which is GitHub's documented multi-issue form
+            # ("Fixes #1, fixes #2"; only the repeated keyword actually closes
+            # both) — then trailing punctuation. Whatever is left is a
+            # qualifier. `~` delimits sed because the URL form carries
+            # slashes. The finder is case-insensitive, so
             # the stripper works on a CASE-FOLDED copy: `sed -E … I` is
             # GNU-only and the selftest also runs on a BSD-sed Mac, so a
             # mixed-case "https://GitHub.com/o/r/issues/12" must fold rather
@@ -977,7 +980,7 @@ jobs:
             m_lc=$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')
             rest=$(printf '%s' "$m_lc" \
               | sed -E "s~^[[:alpha:]]+:?[[:space:]]+${ref}~~" \
-              | sed -E "s~^(${sep}${ref})*~~" \
+              | sed -E "s~^(${sep}(${kw}:?[[:space:]]+)?${ref})*~~" \
               | sed -E 's~^[[:space:]]*[.,;:!)]*[[:space:]]*~~')
             if [ -n "$rest" ]; then
               refuse=1
@@ -1059,11 +1062,18 @@ jobs:
             echo ""
             echo "GitHub's closing-keyword parser reads the keyword and the reference and ignores the rest of the line, so \`closes #N follow-up (b)\` closes #N in full on merge. Edit the body (\`part of #N\`, \`addresses #N …\`) and then push a commit or re-apply a label — a body edit alone fires no workflow run — or merge manually if the issue should close."
           } > /tmp/automerge-body-gate.md
+          # Best-effort: this step only REPORTS a decision the gate already
+          # made and the revoke already enforced. A transient comments-API
+          # error or a missing permission must not turn a completed refusal
+          # into a red run (the decision is in the run log and the
+          # automerge:refused-body label either way).
           if [ -n "$existing" ]; then
             gh api -X PATCH "/repos/${GITHUB_REPOSITORY}/issues/comments/$existing" \
-              -f body="$(cat /tmp/automerge-body-gate.md)" >/dev/null
+              -f body="$(cat /tmp/automerge-body-gate.md)" >/dev/null \
+              || echo "::warning::could not update the body-gate comment (non-fatal — the gate decision stands)."
           else
-            gh pr comment "$PR" --body-file /tmp/automerge-body-gate.md
+            gh pr comment "$PR" --body-file /tmp/automerge-body-gate.md \
+              || echo "::warning::could not post the body-gate comment (non-fatal — the gate decision stands)."
           fi
 
       # Option A: explicit human approval via label.
