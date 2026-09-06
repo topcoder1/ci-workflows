@@ -947,9 +947,15 @@ jobs:
           refuse=0
           reason=""
           body=$(printf '%s' "${PR_BODY:-}")
+          # `sha256sum` is coreutils; stock macOS has only `shasum`, and this
+          # step is executed verbatim by selftest/test_automerge_body_gate.sh
+          # on the operator's Mac.
+          sha256_of() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+          }
           # The sha covers the RAW body: the arm step re-binds to it to catch
           # any edit, semantic or not.
-          body_sha=$(printf '%s' "$body" | sha256sum | cut -c1-16)
+          body_sha=$(printf '%s' "$body" | sha256_of | cut -c1-16)
           # A reference GitHub's parser closes: #N, owner/repo#N, or the
           # issue/PR URL. Kept in one variable so the finder and the
           # stripper below cannot drift apart.
@@ -992,12 +998,18 @@ jobs:
               }
               if (fence) { if (line ~ /^[[:space:]]*(```|~~~)/) fence = 0; next }
               if (line ~ /^[[:space:]]*(```|~~~)/) { fence = 1; next }
-              while (match(line, /<!--.*-->/)) {
-                line = substr(line, 1, RSTART - 1) substr(line, RSTART + RLENGTH)
+              # SHORTEST match, spliced by index: a greedy /<!--.*-->/ spans
+              # two comments and would delete the VISIBLE clause between them
+              # ("<!-- a --> closes #9 follow-up <!-- b -->"), which GitHub
+              # does read.
+              while ((s = index(line, "<!--")) > 0) {
+                tail = substr(line, s + 4)
+                e = index(tail, "-->")
+                if (e == 0) { line = substr(line, 1, s - 1); comment = 1; break }
+                line = substr(line, 1, s - 1) substr(tail, e + 3)
               }
-              if (match(line, /<!--/)) { line = substr(line, 1, RSTART - 1); comment = 1 }
               print line
-            }' | sed -E 's/`[^`]*`//g')
+            }' | sed -E 's/```+[^`]*```+//g; s/``[^`]*``//g; s/`[^`]*`//g')
 
           # One line per closing reference (`-o`: the match only, through the
           # end of that line — `.` never crosses a newline, grep is line
@@ -1708,11 +1720,17 @@ jobs:
             # the PR carries `automerge:refused-base` instead of silence.
             # Only on the clean path: a failed disarm exits 1 above and
             # must stay an unlabeled red run.
-            # The body branch below publishes its own reason first and sets
-            # STOOD_DOWN_PUBLISHED, so exactly one `stood_down=` line is
-            # written; every other clean stand-down is a base one.
-            if [ "$1" = "0" ] && [ "${STOOD_DOWN_PUBLISHED:-0}" != "1" ]; then
-              echo "stood_down=base" >> "$GITHUB_OUTPUT"
+            # Published only on the CLEAN path — after the disarm above has
+            # been verified off. Emitting before that would let the decision
+            # label announce a benign stand-down while a stale arm survives.
+            # The body branch sets STOOD_DOWN_BODY before calling; every other
+            # clean stand-down is a base one.
+            if [ "$1" = "0" ]; then
+              if [ "${STOOD_DOWN_BODY:-0}" = "1" ]; then
+                echo "stood_down=body" >> "$GITHUB_OUTPUT"
+              else
+                echo "stood_down=base" >> "$GITHUB_OUTPUT"
+              fi
             fi
             exit "$1"
           }
@@ -1747,8 +1765,7 @@ jobs:
           now_body_sha=$(printf '%s' "$now_body" | sha256sum | cut -c1-16)
           if [ -n "${GATE_BODY_SHA:-}" ] && [ "$now_body_sha" != "$GATE_BODY_SHA" ]; then
             echo "::notice::PR body changed since this run's gate read — not arming, and disarming: no event fires on a body edit, so an arm validated against the old body must not survive. Push a commit or re-apply a label to re-gate."
-            echo "stood_down=body" >> "$GITHUB_OUTPUT"
-            STOOD_DOWN_PUBLISHED=1
+            STOOD_DOWN_BODY=1
             disarm_then_exit 0
           fi
           if [ "$now_base" != "$DEFAULT_BRANCH" ]; then

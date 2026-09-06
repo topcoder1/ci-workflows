@@ -182,6 +182,15 @@ expect_gate "38. a multi-line HTML comment is not a closing reference" \
   "$(printf '<!--\ncloses #509 follow-up (b)\n-->\nvisible')" 0
 expect_gate "39. a real reference OUTSIDE the code span still refuses" \
   "$(printf 'Fixes #7 (partial)\n\n```\nunrelated\n```')" 1
+# codex round 6: a greedy <!--.*--> spans two comments and deletes the VISIBLE
+# clause between them — which GitHub does read.
+expect_gate "40. a visible clause BETWEEN two comments still refuses" \
+  "<!-- a --> closes #509 follow-up <!-- b -->" 1
+expect_gate "41. two comments around clean prose still clear" \
+  "<!-- a --> nothing to see <!-- b --> Closes #12." 0
+# codex round 6: code spans may use runs of backticks.
+expect_gate "42. a double-backtick code span is not a closing reference" \
+  'Docs: ``Fixes #12 (partial)`` — quoted.' 0
 
 # The gate publishes a hash of the body it judged, so the arm step can
 # re-bind to it (a body edit fires no caller event).
@@ -236,7 +245,10 @@ pin "the error-revoke retries a failed body disarm" "steps.body_revoke.outcome =
 pin "the error-revoke retries a failed pre-arm stand-down" "steps.arm.outcome == 'failure'" 1
 pin "the arm step re-binds to the body the gate judged" "GATE_BODY_SHA: \${{ steps.body_gate.outputs.body_sha }}" 1
 pin "a body change at arm time stands down as 'body'" "stood_down=body" 1
-pin "exactly one stand-down reason is published" "STOOD_DOWN_PUBLISHED" 2
+# codex round 6: the reason is published only after the disarm is verified —
+# emitting first would announce a benign stand-down over a surviving arm.
+pin "the stand-down reason is set before, published after, the disarm" "STOOD_DOWN_BODY" 2
+pin "the body sha uses a macOS-portable hasher" "shasum -a 256" 1
 pin "the decision label reads the body stand-down" "\"\${ARM_STOOD_DOWN:-}\" = \"body\"" 1
 # codex round 5: a body that merely CHANGED is not a qualifier refusal; the
 # label must not tell the operator to rewrite a reference that isn't there.
