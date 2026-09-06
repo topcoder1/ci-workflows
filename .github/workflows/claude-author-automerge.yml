@@ -940,11 +940,15 @@ jobs:
           steps.hold.outputs.hold != '1'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           refuse=0
           reason=""
           body=$(printf '%s' "${PR_BODY:-}")
+          # The sha covers the RAW body: the arm step re-binds to it to catch
+          # any edit, semantic or not.
           body_sha=$(printf '%s' "$body" | sha256sum | cut -c1-16)
           # A reference GitHub's parser closes: #N, owner/repo#N, or the
           # issue/PR URL. Kept in one variable so the finder and the
@@ -959,12 +963,48 @@ jobs:
           # ANOTHER reference follows it, so a trailing "." before prose is
           # still a qualifier.
           sep='[[:space:]]*(,|;|\.)?[[:space:]]*(and|&|/)?[[:space:]]*'
+          # GitHub applies closing keywords ONLY on a merge into the default
+          # branch. On an opted-in release/feature base a qualified reference
+          # closes nothing, so refusing there would block a merge over a
+          # non-issue. Still publish body_sha so the arm's re-bind works.
+          if [ -n "$BASE_REF" ] && [ -n "$DEFAULT_BRANCH" ] && [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+            {
+              echo "refuse=0"
+              echo "reason="
+              echo "body_sha=$body_sha"
+            } >> "$GITHUB_OUTPUT"
+            echo "Base '$BASE_REF' is not the default branch ('$DEFAULT_BRANCH') — closing keywords do not apply on merge; gate not consulted."
+            exit 0
+          fi
+
+          # Strip the Markdown regions GitHub does NOT read as closing
+          # references before matching: fenced code blocks, HTML comments
+          # (including multi-line), and inline code spans. Without this a PR
+          # body that DOCUMENTS the hazard — a test plan quoting
+          # `Fixes #12 (partial)` — refuses itself.
+          # shellcheck disable=SC2016  # $0/RSTART are awk fields, not shell
+          semantic=$(printf '%s\n' "$body" | awk '
+            BEGIN { fence = 0; comment = 0 }
+            {
+              line = $0
+              if (comment) {
+                if (line ~ /-->/) { comment = 0; sub(/^.*-->/, "", line) } else { next }
+              }
+              if (fence) { if (line ~ /^[[:space:]]*(```|~~~)/) fence = 0; next }
+              if (line ~ /^[[:space:]]*(```|~~~)/) { fence = 1; next }
+              while (match(line, /<!--.*-->/)) {
+                line = substr(line, 1, RSTART - 1) substr(line, RSTART + RLENGTH)
+              }
+              if (match(line, /<!--/)) { line = substr(line, 1, RSTART - 1); comment = 1 }
+              print line
+            }' | sed -E 's/`[^`]*`//g')
+
           # One line per closing reference (`-o`: the match only, through the
           # end of that line — `.` never crosses a newline, grep is line
           # oriented, and unlike [^[:cntrl:]] it keeps a TAB, so
           # "Fixes #12<TAB>(partial)" is still seen as qualified).
           # `|| true`: no match is the common case.
-          refs=$(printf '%s\n' "$body" \
+          refs=$(printf '%s\n' "$semantic" \
             | grep -oiE "\\b${kw}:?[[:space:]]+${ref}.*" \
             || true)
           while IFS= read -r m; do
@@ -1988,7 +2028,12 @@ jobs:
             decision="automerge:blocked-classifier"
           elif [ "${ARM_STOOD_DOWN:-}" = "base" ] || [ "${BASE_REFUSE:-}" = "1" ]; then
             decision="automerge:refused-base"
-          elif [ "${ARM_STOOD_DOWN:-}" = "body" ] || [ "${BODY_REFUSE:-}" = "1" ]; then
+          elif [ "${ARM_STOOD_DOWN:-}" = "body" ]; then
+            # Distinct from a qualifier refusal: the body merely CHANGED after
+            # this run gated it, and may well be clean. Telling the operator to
+            # rewrite a reference that isn't there would be a false instruction.
+            decision="automerge:body-changed"
+          elif [ "${BODY_REFUSE:-}" = "1" ]; then
             decision="automerge:refused-body"
           elif [ "${RISKY:-}" = "1" ] && [ "${BYPASS_LBL:-}" != "1" ] && [ "${BYPASS_CDX:-}" != "1" ]; then
             decision="automerge:blocked-risk-tier"
@@ -2056,6 +2101,7 @@ jobs:
             automerge:withheld-quiet-cap) color="fbca04"; desc="Automerge arbiter: review activity never went quiet — the next PR event retries" ;;
             automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
             automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: PR body closes an issue with a qualifier (closes #N …) — rewrite as 'part of #N' or click-merge" ;;
+            automerge:body-changed)       color="bfd4f2"; desc="Automerge arbiter: the PR body changed after this run gated it — push a commit or re-apply a label to re-gate, or click-merge" ;;
           esac
           # create-else-EDIT (not a create-retry): create's failure is the
           # EXPECTED already-exists conflict, and the edit refreshes a

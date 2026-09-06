@@ -70,11 +70,13 @@ else
   echo "✓ no \${{ }} interpolation inside the run block"
 fi
 
+CASE_BASE=main
 run_gate() {
   OUT_FILE="$T/gh-output.txt"
   : > "$OUT_FILE"
   set +e
-  GATE_LOG=$(cd "$T" && PR_BODY="$1" GITHUB_OUTPUT="$OUT_FILE" bash gate.sh 2>&1)
+  GATE_LOG=$(cd "$T" && PR_BODY="$1" BASE_REF="$CASE_BASE" DEFAULT_BRANCH=main \
+    GITHUB_OUTPUT="$OUT_FILE" bash gate.sh 2>&1)
   GATE_RC=$?
   set -e
 }
@@ -155,6 +157,31 @@ expect_gate "29. 'Fixes #1, fixes #2 (partial)' still refuses" "Fixes #1, fixes 
 expect_gate "30. 'Fixes #1. Fixes #2.' clears" "Fixes #1. Fixes #2." 0
 expect_gate "31. 'Fixes #12. Some notes about #34' refuses" "Fixes #12. Some notes about #34" 1
 expect_gate "32. 'Closes #1. And closes #2' clears" "Closes #1. And closes #2" 0
+# codex round 5: GitHub applies closing keywords only on a merge into the
+# DEFAULT branch — on an opted-in release base a qualified reference closes
+# nothing, so refusing there would block a merge over a non-issue.
+CASE_BASE=release/2026.09
+expect_gate "33. a non-default base is not gated" "closes #509 follow-up (b)" 0
+run_gate "closes #509 follow-up (b)"
+if [ -n "$(out_get body_sha)" ]; then
+  echo "✓ 34. a non-default base still publishes body_sha (the arm re-bind keeps working)"
+else
+  echo "✗ 34. body_sha missing on the non-default-base path"
+  failed=1
+fi
+CASE_BASE=main
+# codex round 5: GitHub does not read closing references inside code spans,
+# fenced blocks or HTML comments — a PR body DOCUMENTING the hazard (this
+# repo's own PR bodies do) must not refuse itself.
+expect_gate "35. an inline code span is not a closing reference" \
+  'A test plan quoting `Fixes #12 (partial)` is documentation, not a closer.' 0
+expect_gate "36. a fenced block is not a closing reference" "$(printf 'Docs.\n\n```\ncloses #509 follow-up (b)\n```\n\nNothing closes.')" 0
+expect_gate "37. an HTML comment is not a closing reference" \
+  "<!-- closes #509 follow-up (b) --> visible text" 0
+expect_gate "38. a multi-line HTML comment is not a closing reference" \
+  "$(printf '<!--\ncloses #509 follow-up (b)\n-->\nvisible')" 0
+expect_gate "39. a real reference OUTSIDE the code span still refuses" \
+  "$(printf 'Fixes #7 (partial)\n\n```\nunrelated\n```')" 1
 
 # The gate publishes a hash of the body it judged, so the arm step can
 # re-bind to it (a body edit fires no caller event).
@@ -211,6 +238,9 @@ pin "the arm step re-binds to the body the gate judged" "GATE_BODY_SHA: \${{ ste
 pin "a body change at arm time stands down as 'body'" "stood_down=body" 1
 pin "exactly one stand-down reason is published" "STOOD_DOWN_PUBLISHED" 2
 pin "the decision label reads the body stand-down" "\"\${ARM_STOOD_DOWN:-}\" = \"body\"" 1
+# codex round 5: a body that merely CHANGED is not a qualifier refusal; the
+# label must not tell the operator to rewrite a reference that isn't there.
+pin "a changed body gets its own decision label" "automerge:body-changed" 2
 
 echo ""
 if [ "$failed" -gt 0 ]; then
