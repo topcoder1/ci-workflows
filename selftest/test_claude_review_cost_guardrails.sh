@@ -21,7 +21,8 @@
 #      the lost-findings guard.
 #   3. The Claude Code CLI is PINNED (`CLAUDE_CODE_VERSION`, semver, >= 2.1.217
 #      = the floor for --max-budget-usd counting subagent spend), the install
-#      step targets it AND refuses to review on any other version.
+#      step targets it AND refuses to review on any other version. The action
+#      consumes that verified executable instead of installing its own version.
 #   4. The guard step receives the cap (`MAX_BUDGET_USD`) and names the
 #      budget-stop subtype `error_max_budget_usd`.
 #
@@ -136,6 +137,21 @@ else:
         following = [l.strip() for l in lines[idx + 1: idx + 3] if l.strip() and not l.strip().startswith("#")]
         if not following or following[0] != "exit 1":
             problems.append("the unpinned-binary refusal is not followed by `exit 1` — it must fail closed")
+
+# The action installs its own CLI unless the verified path is passed explicitly.
+# Pre-install verification alone passed this test while the live action replaced
+# 2.1.233 with 2.1.232 (TechRecon #1005, run 34323700381).
+if install is not None and review is not None:
+    install_id = install.get("id")
+    expected_path = "${{ steps." + str(install_id) + ".outputs.executable }}"
+    actual_path = (review.get("with") or {}).get("path_to_claude_code_executable")
+    if not install_id or actual_path != expected_path:
+        problems.append("review must consume the pre-install step's verified executable output")
+    output_line = 'echo "executable=$HOME/.local/bin/claude" >> "$GITHUB_OUTPUT"'
+    if output_line not in run:
+        problems.append("pre-install does not export its verified Claude executable")
+    elif '"$HOME/.local/bin/claude" --version\n' not in run or run.index(output_line) < run.index('"$HOME/.local/bin/claude" --version\n'):
+        problems.append("executable output must be written after final version verification")
 
 # ---- 4. guard wiring ---------------------------------------------------------------
 guard = by_id.get("guard")

@@ -239,6 +239,7 @@ jobs:
       # This makes the failure load-bearing instead of silent. Remove this
       # step once anthropics/claude-code-action#1290 ships a fix.
       - name: Pre-install Claude Code binary (workaround anthropics/claude-code-action#1290)
+        id: claude_install
         if: ${{ steps.bot_check.outputs.skipped != 'true' }}
         run: |
           set -euo pipefail
@@ -282,6 +283,7 @@ jobs:
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/claude" --version
+          echo "executable=$HOME/.local/bin/claude" >> "$GITHUB_OUTPUT"
 
       # Wall-clock anchor for the lost-findings guard below: only comments the
       # review bot creates AFTER this instant count as this run's output. A
@@ -310,6 +312,8 @@ jobs:
         uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Use the verified pin; otherwise the action installs its own CLI version.
+          path_to_claude_code_executable: ${{ steps.claude_install.outputs.executable }}
           # Allow bot-initiated PRs (dependabot, renovate). Without this the
           # action rejects all bot actors, turning this required check into a
           # permanent block on every dep-bump PR.
