@@ -123,8 +123,10 @@ fi
 # The helper's own body legitimately contains `exit 1` (the "still ON after
 # --disable-auto" escalation), so strip the function before scanning for
 # bare exits in the rejection paths.
+# Drain the input after the arm marker: an early awk exit can SIGPIPE echo
+# under pipefail, making this structural check fail without an assertion.
 prearm=$(echo "$enable_block" \
-  | awk '/gh pr merge --auto/{exit} {print}' \
+  | awk '/gh pr merge --auto/{armed=1} !armed {print}' \
   | awk '/disarm_then_exit\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf')
 if echo "$enable_block" | grep -q 'disarm_then_exit()' \
   && ! echo "$prearm" | grep -qE '^ *exit [01]$'; then

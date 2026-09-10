@@ -191,6 +191,21 @@ esac
 STUB
 chmod +x "$T/bin/gh"
 
+# Inject parser errors only in the extracted guard; ordinary grep calls and
+# the test assertions keep using the real executable.
+REAL_GREP=$(command -v grep)
+cat > "$T/bin/grep" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${GUARD_GREP_FAIL_PATTERN:-}" ] && [ "$arg" = "$GUARD_GREP_FAIL_PATTERN" ]; then
+    echo "synthetic claim-parser grep error" >&2
+    exit 2
+  fi
+done
+exec "$REAL_GREP" "$@"
+STUB
+chmod +x "$T/bin/grep"
+
 SINCE="2026-08-16T03:52:32Z"
 
 # --- fixtures: GitHub comment listings -------------------------------------
@@ -276,7 +291,8 @@ run_guard() {
         EXECUTION_FILE="${EXECUTION_FILE:-}" \
         GH_PULLS_JSON="${GH_PULLS_JSON:-$T/none.json}" GH_ISSUES_JSON="${GH_ISSUES_JSON:-$T/none.json}" \
         GH_PULLS_FAIL="${GH_PULLS_FAIL:-0}" GH_ISSUES_FAIL="${GH_ISSUES_FAIL:-0}" GH_POST_FAIL="${GH_POST_FAIL:-0}" \
-        /bin/bash "$T/guard.sh" 2>&1)
+        REAL_GREP="$REAL_GREP" GUARD_GREP_FAIL_PATTERN="${GUARD_GREP_FAIL_PATTERN:-}" \
+        /bin/bash -e -o pipefail "$T/guard.sh" 2>&1)
   RC=$?
   set -e
   echo "$OUT" > "$T/out.$name.txt"
@@ -337,6 +353,51 @@ if [ "$RC" -eq 0 ] && ! posted && grep -qF "summary claims 0 inline finding(s); 
   pass "S4 'No issues found': exit 0, no comment"
 else
   fail "S4 (rc=$RC):"; sed 's/^/    /' "$T/out.s4.txt"
+fi
+
+# --- S4b: ordinary prose mentioning inline is still a clean review ------------
+# The runner supplies bash -e, while the extracted step enables pipefail.
+# A normal grep no-match must not abort before CLAIMED defaults to zero.
+issue_json "No issues found. The tests use inline comparisons for boundary cases." > "$T/i4b.json"
+EXECUTION_FILE="$T/x2.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i4b.json" run_guard s4b
+if [ "$RC" -eq 0 ] && ! posted && grep -qF "summary claims 0 inline finding(s); 0 inline" "$T/out.s4b.txt"; then
+  pass "S4b clean prose containing inline: exit 0 under runner errexit, no comment"
+else
+  fail "S4b (rc=$RC):"; sed 's/^/    /' "$T/out.s4b.txt"
+fi
+
+# --- S4c: multiple supported claims preserve numeric maximum and enforcement --
+issue_json "Flagged 2 bugs inline." \
+  | jq --arg body "FLAGGED 12 problems inline. Flagged 3 findings inline." \
+      '. + [.[0] | .id = 901 | .body = $body]' > "$T/i4c.json"
+EXECUTION_FILE="$T/x2.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i4c.json" run_guard s4c
+if [ "$RC" -eq 1 ] && posted && posted_has "flagged 12 issue(s) inline, but 0 inline comments were posted" \
+   && grep -qF "summary claims 12 inline finding(s); 0 inline" "$T/out.s4c.txt"; then
+  pass "S4c maximum claim 12 / posted 0: real lost findings still fail"
+else
+  fail "S4c (rc=$RC):"; sed 's/^/    /' "$T/out.s4c.txt"
+fi
+
+# --- S4d/e: only grep status 1 is absence; parser errors must remain fatal ------
+for pattern in 'flagged +[0-9]+ +(issues?|bugs?|findings?|problems?)' '[0-9]+'; do
+  EXECUTION_FILE="$T/x2.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i4c.json" \
+    GUARD_GREP_FAIL_PATTERN="$pattern" run_guard s4error
+  if [ "$RC" -ne 0 ] && ! posted \
+     && grep -qF "synthetic claim-parser grep error" "$T/out.s4error.txt" \
+     && ! grep -qF "summary claims" "$T/out.s4error.txt"; then
+    pass "S4 parser error in $pattern: nonzero exit before any zero-claim verdict"
+  else
+    fail "S4 parser error in $pattern (rc=$RC):"; sed 's/^/    /' "$T/out.s4error.txt"
+  fi
+done
+
+# --- S4f: an explicit zero claim is still clean --------------------------------
+issue_json "Flagged 0 issues inline — no changes needed." > "$T/i4f.json"
+EXECUTION_FILE="$T/x2.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i4f.json" run_guard s4f
+if [ "$RC" -eq 0 ] && ! posted && grep -qF "summary claims 0 inline finding(s); 0 inline" "$T/out.s4f.txt"; then
+  pass "S4f explicit zero claim: exit 0, no comment"
+else
+  fail "S4f (rc=$RC):"; sed 's/^/    /' "$T/out.s4f.txt"
 fi
 
 # --- S5: subagent/skill report in the transcript is recoverable -------------------
