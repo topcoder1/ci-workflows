@@ -736,6 +736,51 @@ test("an unreadable ledger replaces prior success with failure", () => {
   assert.equal(api.checks.at(-1).conclusion, "failure");
 });
 
+for (const operation of ["evaluate", "record"]) {
+  test(`${operation} rechecks risk expiry after slow publication verification`, () => {
+    const api = ready();
+    api.seed(event(api, "finding"), 40);
+    api.seed(
+      event(api, "disposition", {
+        action: "accepted_risk",
+        expiresAt: "2026-09-10T12:00:01Z",
+      }),
+      30,
+    );
+    let clock = new Date("2026-09-10T12:00:00Z");
+    let snapshots = 0;
+    api.beforeCall = ({ method, endpoint }) => {
+      if (
+        method === "GET" &&
+        endpoint === `repos/${controlRepository}/git/ref/heads/main` &&
+        ++snapshots === (operation === "evaluate" ? 2 : 4)
+      ) {
+        // Evaluation was valid when started. Metadata verification crosses
+        // the expiry without changing the PR, policy, or ledger identities.
+        clock = new Date("2026-09-10T12:00:02Z");
+      }
+    };
+    const instance = controller(api, { now: () => clock });
+    const result =
+      operation === "evaluate"
+        ? instance.evaluate({ publish: true })
+        : instance.record({
+            event: event(api, "review", { id: "review-after-risk" }),
+            publish: true,
+          });
+    assert.equal(clock.toISOString(), "2026-09-10T12:00:02.000Z");
+    assert.equal(result.result.decision, "hold");
+    assert.equal(result.check.conclusion, "failure");
+    assert.equal(api.checks.at(-1).conclusion, "failure");
+    assert.equal(JSON.parse(api.checks.at(-1).output.summary).decision, "hold");
+    assert.equal(
+      api.calls.some((call) => call.body?.conclusion === "success"),
+      false,
+    );
+    assert.equal(api.value(lockPath).owner, null);
+  });
+}
+
 function abandonedOperation(api, status = "completed") {
   const lock = {
     schemaVersion: 1,
@@ -782,6 +827,85 @@ test("recovery refuses changed owner or blob SHA before publication", () => {
   }
 });
 
+test("a recovery that loses the ownership CAS cannot write any checks", () => {
+  const api = ready();
+  const expected = abandonedOperation(api);
+  api.calls = [];
+  let raced = false;
+  api.beforeCall = ({ method, endpoint }) => {
+    if (
+      raced ||
+      method !== "PUT" ||
+      endpoint !== `repos/${controlRepository}/contents/${lockPath}`
+    )
+      return;
+    raced = true;
+    api.setFile(lockPath, {
+      ...api.value(lockPath),
+      owner: "concurrent-recovery-owner",
+      sequence: 2,
+    });
+  };
+  assert.throws(() => controller(api).recover(expected), /409/);
+  assert.equal(api.value(lockPath).owner, "concurrent-recovery-owner");
+  assert.equal(api.checks.length, 0);
+  assert.equal(
+    api.calls.some(
+      (call) => call.endpoint.includes("/check-runs") && call.method !== "GET",
+    ),
+    false,
+  );
+});
+
+test("an uncertain recovery claim retains new owner identity and original check receipt", () => {
+  const api = ready();
+  controller(api).evaluate({ publish: true });
+  const originalCheck = api.checks.at(-1);
+  abandonedOperation(api);
+  const receipt = {
+    id: originalCheck.id,
+    headSha: originalCheck.head_sha,
+    appId,
+  };
+  api.setFile(lockPath, { ...api.value(lockPath), check: receipt });
+  const expected = {
+    expectedOwner: api.value(lockPath).owner,
+    expectedLockSha: api.files.get(lockPath).sha,
+  };
+  api.calls = [];
+  let lost = false;
+  api.afterCall = ({ method, endpoint }) => {
+    if (
+      lost ||
+      method !== "PUT" ||
+      endpoint !== `repos/${controlRepository}/contents/${lockPath}`
+    )
+      return;
+    lost = true;
+    const error = new Error("Synthetic recovery claim response lost");
+    error.uncertainWrite = true;
+    throw error;
+  };
+  assert.throws(() => controller(api).recover(expected), /claim response lost/);
+  const claimed = api.value(lockPath);
+  assert.notEqual(claimed.owner, expected.expectedOwner);
+  assert.equal(typeof claimed.owner, "string");
+  assert.equal(claimed.sequence, 2);
+  assert.deepEqual(claimed.recoveryOf, {
+    owner: expected.expectedOwner,
+    blobSha: expected.expectedLockSha,
+  });
+  assert.deepEqual(claimed.check, receipt);
+  assert.equal(claimed.startedAt, "2026-09-10T12:00:00.000Z");
+  assert.ok(["local", "actions"].includes(claimed.execution.kind));
+  assert.equal(
+    api.calls.some(
+      (call) => call.endpoint.includes("/check-runs") && call.method !== "GET",
+    ),
+    false,
+  );
+});
+
 test("stopped-owner recovery publishes failure and clears only its exact lock", () => {
   const api = ready();
   const expected = abandonedOperation(api);
@@ -819,26 +943,17 @@ test("recovery also invalidates an owned prior successful check", () => {
 test("recovery cannot clear a lock replaced while failure was being published", () => {
   const api = ready();
   const expected = abandonedOperation(api);
-  let reads = 0;
-  api.beforeCall = ({ method, endpoint }) => {
-    if (
-      method !== "GET" ||
-      !endpoint.startsWith(
-        `repos/${controlRepository}/contents/${lockPath}?`,
-      ) ||
-      ++reads !== 2
-    )
-      return;
+  let replaced = false;
+  api.afterCall = ({ method, body }) => {
+    if (replaced || method !== "PATCH" || body.conclusion !== "failure") return;
+    replaced = true;
     api.setFile(lockPath, {
       ...api.value(lockPath),
       owner: "replacement-owner",
-      sequence: 2,
+      sequence: 3,
     });
   };
-  assert.throws(
-    () => controller(api).recover(expected),
-    /conditional ownership/,
-  );
+  assert.throws(() => controller(api).recover(expected), /ownership/);
   assert.equal(api.value(lockPath).owner, "replacement-owner");
   assert.equal(api.checks.at(-1).conclusion, "failure");
 });
