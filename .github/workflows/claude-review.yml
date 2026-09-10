@@ -588,9 +588,12 @@ jobs:
           # starts reddening clean runs.
           CLAIMED=0
           if printf '%s' "$SUMMARIES" | grep -qi 'inline'; then
+            # grep status 1 means no claim, not a failed review. Preserve
+            # all other errors under the runner's errexit and pipefail.
             CLAIMED=$(printf '%s\n' "$SUMMARIES" \
-                      | grep -oiE 'flagged +[0-9]+ +(issues?|bugs?|findings?|problems?)' \
-                      | grep -oE '[0-9]+' | sort -n | tail -1)
+                      | { grep -oiE 'flagged +[0-9]+ +(issues?|bugs?|findings?|problems?)' || [ "$?" -eq 1 ]; } \
+                      | { grep -oE '[0-9]+' || [ "$?" -eq 1 ]; } \
+                      | sort -n | tail -1)
             CLAIMED=${CLAIMED:-0}
           fi
           if [ -z "$SUMMARIES" ]; then
