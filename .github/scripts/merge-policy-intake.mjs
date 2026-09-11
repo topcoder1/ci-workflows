@@ -1,7 +1,7 @@
 // Disconnected structured-review intake. Readers and protected configuration are
 // trust inputs; this module does not authenticate GitHub or publish decisions.
 import { createHash } from "node:crypto";
-import { TextDecoder } from "node:util";
+import { TextDecoder, types } from "node:util";
 import { validateContext, validatePolicy } from "./merge-policy-core.mjs";
 import { appendEvent } from "./merge-policy-state.mjs";
 
@@ -45,7 +45,10 @@ function requireThat(condition, code = "invalid_input") {
 }
 function shape(value, names) {
   requireThat(
-    value !== null && typeof value === "object" && !Array.isArray(value),
+    value !== null &&
+      typeof value === "object" &&
+      !types.isProxy(value) &&
+      !Array.isArray(value),
   );
   requireThat([Object.prototype, null].includes(Object.getPrototypeOf(value)));
   const own = Reflect.ownKeys(value);
@@ -58,7 +61,8 @@ function shape(value, names) {
   }
 }
 // Inspect descriptors before reading values. Bound even protected inputs, and do
-// not invoke accessors, toJSON, iterators, or user-defined prototype methods.
+// reject proxies before reflection; do not invoke accessors, toJSON, iterators,
+// or user-defined prototype methods.
 function copyData(value) {
   const ancestors = new Set();
   let nodes = 0;
@@ -78,7 +82,12 @@ function copyData(value) {
       requireThat(Number.isFinite(item));
       return item;
     }
-    requireThat(item && typeof item === "object" && !ancestors.has(item));
+    requireThat(
+      item &&
+        typeof item === "object" &&
+        !types.isProxy(item) &&
+        !ancestors.has(item),
+    );
     const array = Array.isArray(item);
     requireThat(
       array
@@ -171,6 +180,62 @@ function validateProducer(producer) {
   matches(producer.lane, ID);
   positive(producer.publisherActorId);
   matches(producer.artifactName, /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.json$/);
+}
+function freezeData(value) {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeData(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+// Validate protected repository-wide authority, without authenticating a caller
+// or applying the selected PR's author/reviewer separation rule.
+export function validateProducerConfiguration(input) {
+  try {
+    shape(input, ["configuration", "policy"]);
+    const { configuration, policy } = copyData(input);
+    validatePolicy(policy);
+    shape(configuration, ["schemaVersion", "repository", "producers"]);
+    requireThat(
+      configuration.schemaVersion === 1 &&
+        configuration.repository === policy.repository,
+    );
+    const { producers } = configuration;
+    requireThat(
+      Array.isArray(producers) && producers.length <= INTAKE_LIMITS.producers,
+      "producer_limit",
+    );
+    const ids = new Set();
+    const identities = new Set();
+    for (const producer of producers) {
+      validateProducer(producer);
+      const identity = canonical([
+        producer.repositoryId,
+        producer.workflowId,
+        producer.workflowRevision,
+      ]);
+      requireThat(
+        !ids.has(producer.id) && !identities.has(identity),
+        "ambiguous_producer",
+      );
+      ids.add(producer.id);
+      identities.add(identity);
+      requireThat(
+        Object.hasOwn(policy.reviewActors, producer.lane) &&
+          policy.reviewActors[producer.lane].includes(
+            producer.publisherActorId,
+          ),
+        "unauthorized_producer",
+      );
+    }
+    // Empty configuration is a valid suspension. Intake still needs a selected
+    // producer; no historical authority is recovered by emptying this array.
+    return freezeData(configuration);
+  } catch (error) {
+    if (error instanceof IntakeError) throw error;
+    throw new IntakeError("invalid_input");
+  }
 }
 function validateMetadata(metadata, producer, request, target) {
   requireThat(
@@ -267,7 +332,13 @@ export async function prepareReviewIntake(input) {
     requireThat(
       typeof readMetadata === "function" && typeof readArtifact === "function",
     );
-    const { request, producers, policy, context, ledger } = copyData(
+    const {
+      request,
+      producers: configuredProducers,
+      policy,
+      context,
+      ledger,
+    } = copyData(
       select(input, ["request", "producers", "policy", "context", "ledger"]),
     );
     shape(request, ["producerId", "runId", "runAttempt", "artifactId"]);
@@ -277,36 +348,19 @@ export async function prepareReviewIntake(input) {
     validatePolicy(policy);
     validateContext(context);
     requireThat(context.repository === policy.repository);
-    requireThat(
-      Array.isArray(producers) &&
-        producers.length > 0 &&
-        producers.length <= INTAKE_LIMITS.producers,
-      "producer_limit",
-    );
-    const ids = new Set();
-    const identities = new Set();
-    for (const entry of producers) {
-      validateProducer(entry);
-      const identity = canonical([
-        entry.repositoryId,
-        entry.workflowId,
-        entry.workflowRevision,
-      ]);
-      requireThat(
-        !ids.has(entry.id) && !identities.has(identity),
-        "ambiguous_producer",
-      );
-      ids.add(entry.id);
-      identities.add(identity);
-    }
+    const { producers } = validateProducerConfiguration({
+      configuration: {
+        schemaVersion: 1,
+        repository: context.repository,
+        producers: configuredProducers,
+      },
+      policy,
+    });
+    requireThat(producers.length > 0, "producer_limit");
     const producer = producers.find((entry) => entry.id === request.producerId);
     requireThat(producer, "unknown_producer");
     requireThat(
-      Object.hasOwn(policy.reviewActors, producer.lane) &&
-        policy.reviewActors[producer.lane].includes(
-          producer.publisherActorId,
-        ) &&
-        producer.publisherActorId !== context.authorId,
+      producer.publisherActorId !== context.authorId,
       "unauthorized_producer",
     );
     const target = select(context, TARGET_FIELDS);
