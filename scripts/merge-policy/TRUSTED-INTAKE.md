@@ -101,6 +101,8 @@ These modules require a trusted caller outside PR-controlled execution. Reading 
 
 ## Existing producers and validation limits
 
+The separate [data-only producer implementation](DATA-ONLY-PRODUCER.md) now measures an ancestor-only local comparison, makes one structured API call with no tools and emits the existing canonical receipt after explicit completion. Its library result still reports GitHub identity and execution authentication as false. The dispatch context must come from a separately trusted caller; these new files do not make the existing workflows below acceptable intake sources or authenticate a first-attempt execution.
+
 Current Claude output is primarily comments and a local transcript; its delivery guard does not prove the complete finding set. Current Codex output is prose plus a classifier that can call unrecognized nonempty text clean. Codex also reviews a default merge checkout with a separately fetched base. Neither is an acceptable structured receipt or actual-comparison attestation. Their mutable workflow/helper references must also be addressed before trusted integration.
 
 The next live integration must add opt-in complete structured output, capture the actual reviewed commits, authenticate the approved workflow and executable dependencies, and retrieve the artifact with the bounds above. Keep existing comments as presentation. Synthetic tests exercise this module's validation behavior; they do not prove model completeness, real producer authenticity, App-source enforcement or merge blocking.

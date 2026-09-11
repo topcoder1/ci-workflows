@@ -1,24 +1,59 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
-import { collectReviewComparison, REVIEW_COMPARISON_LIMITS } from "../.github/scripts/merge-policy-review-comparison.mjs";
+import {
+  collectReviewComparison,
+  REVIEW_COMPARISON_LIMITS,
+} from "../.github/scripts/merge-policy-review-comparison.mjs";
 
 const gitEnv = {
-  PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C",
-  GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_AUTHOR_NAME: "Synthetic reviewer fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
-  GIT_COMMITTER_NAME: "Synthetic reviewer fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+  PATH: "/usr/bin:/bin",
+  LANG: "C",
+  LC_ALL: "C",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_AUTHOR_NAME: "Synthetic reviewer fixture",
+  GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+  GIT_COMMITTER_NAME: "Synthetic reviewer fixture",
+  GIT_COMMITTER_EMAIL: "fixture@example.invalid",
 };
-function fixture(t, initial = { "changed.txt": "before\n", "unchanged.txt": "unchanged\n" }) {
+function fixture(
+  t,
+  initial = { "changed.txt": "before\n", "unchanged.txt": "unchanged\n" },
+) {
   const root = mkdtempSync(join(tmpdir(), "review-comparison-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const git = (...args) => execFileSync("/usr/bin/git", args, { cwd: root, env: gitEnv, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 }).trim();
-  const gitInput = (input, ...args) => execFileSync("/usr/bin/git", args, { cwd: root, env: gitEnv, input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 }).trim();
+  const git = (...args) =>
+    execFileSync("/usr/bin/git", args, {
+      cwd: root,
+      env: gitEnv,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+  const gitInput = (input, ...args) =>
+    execFileSync("/usr/bin/git", args, {
+      cwd: root,
+      env: gitEnv,
+      input,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
   git("init", "-q");
   let number = 0;
   function write(path, content) {
@@ -38,7 +73,11 @@ function fixture(t, initial = { "changed.txt": "before\n", "unchanged.txt": "unc
   return { root, git, gitInput, write, commit, baseSha };
 }
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const collect = (f, headSha, options, baseSha = f.baseSha) => collectReviewComparison({ repositoryPath: f.root, baseSha, headSha }, options);
+const collect = (f, headSha, options, baseSha = f.baseSha) =>
+  collectReviewComparison(
+    { repositoryPath: f.root, baseSha, headSha },
+    options,
+  );
 async function failure(operation, code) {
   await assert.rejects(operation, (error) => {
     assert.equal(error.name, "ReviewComparisonError");
@@ -51,7 +90,11 @@ async function failure(operation, code) {
 
 test("measures exact committed before/after bytes, objects, inventory and deterministic hash", async (t) => {
   const f = fixture(t);
-  const headSha = f.commit({ "changed.txt": "after\n", "added.txt": "new", "unchanged.txt": null });
+  const headSha = f.commit({
+    "changed.txt": "after\n",
+    "added.txt": "new",
+    "unchanged.txt": null,
+  });
   f.write("changed.txt", "UNCOMMITTED working tree must not be reviewed");
   f.write("untracked.txt", "Untracked content must not appear");
   const result = await collect(f, headSha);
@@ -61,7 +104,14 @@ test("measures exact committed before/after bytes, objects, inventory and determ
   assert.equal(result.comparisonKind, "git-ancestor-text-v1");
   assert.equal(result.baseTreeOid, f.git("rev-parse", `${f.baseSha}^{tree}`));
   assert.equal(result.headTreeOid, f.git("rev-parse", `${headSha}^{tree}`));
-  assert.deepEqual(result.files.map(({ path, status }) => [path, status]), [["added.txt", "A"], ["changed.txt", "M"], ["unchanged.txt", "D"]]);
+  assert.deepEqual(
+    result.files.map(({ path, status }) => [path, status]),
+    [
+      ["added.txt", "A"],
+      ["changed.txt", "M"],
+      ["unchanged.txt", "D"],
+    ],
+  );
   assert.equal(result.files[0].before, null);
   assert.equal(result.files[0].after.text, "new");
   assert.equal(result.files[1].before.text, "before\n");
@@ -76,18 +126,32 @@ test("measures exact committed before/after bytes, objects, inventory and determ
       const bytes = Buffer.from(snapshot.text);
       assert.equal(snapshot.byteLength, bytes.length);
       assert.equal(snapshot.sha256, sha256(bytes));
-      assert.equal(snapshot.oid, createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"));
+      assert.equal(
+        snapshot.oid,
+        createHash("sha1")
+          .update(`blob ${bytes.length}\0`)
+          .update(bytes)
+          .digest("hex"),
+      );
       total += bytes.length;
     }
   }
   assert.equal(result.totalContentBytes, total);
-  const { comparisonSha256, githubIdentityAuthenticated, reviewCompleted, enforcementPublished, ...measured } = result;
+  const {
+    comparisonSha256,
+    githubIdentityAuthenticated,
+    reviewCompleted,
+    enforcementPublished,
+    ...measured
+  } = result;
   assert.equal(comparisonSha256, sha256(Buffer.from(JSON.stringify(measured))));
   assert.equal(githubIdentityAuthenticated, false);
   assert.equal(reviewCompleted, false);
   assert.equal(enforcementPublished, false);
   assert.ok(Object.isFrozen(result) && Object.isFrozen(result.files));
-  assert.throws(() => { result.files[1].after.text = "mutated"; }, TypeError);
+  assert.throws(() => {
+    result.files[1].after.text = "mutated";
+  }, TypeError);
   assert.equal(Object.hasOwn(result, "repositoryPath"), false);
   assert.equal(Object.hasOwn(result, "outcome"), false);
   assert.equal((await collect(f, headSha)).comparisonSha256, comparisonSha256);
@@ -111,7 +175,13 @@ test("renames are represented completely as add/delete", async (t) => {
   const f = fixture(t, { "old.txt": "same\n" });
   const head = f.commit({ "old.txt": null, "new.txt": "same\n" });
   const result = await collect(f, head);
-  assert.deepEqual(result.files.map((file) => [file.path, file.status]), [["new.txt", "A"], ["old.txt", "D"]]);
+  assert.deepEqual(
+    result.files.map((file) => [file.path, file.status]),
+    [
+      ["new.txt", "A"],
+      ["old.txt", "D"],
+    ],
+  );
   assert.equal(result.totalContentBytes, 10);
 });
 test("mode-only changes remain visible and executable files are data only", async (t) => {
@@ -142,7 +212,10 @@ for (const [name, content] of [
 ]) {
   test(`refuses binary or unsafe text: ${name}`, async (t) => {
     const f = fixture(t);
-    await failure(collect(f, f.commit({ "changed.txt": content })), "unsupported_binary");
+    await failure(
+      collect(f, f.commit({ "changed.txt": content })),
+      "unsupported_binary",
+    );
   });
 }
 test("refuses symbolic links", async (t) => {
@@ -154,7 +227,10 @@ test("refuses gitlink/submodule entries without opening a submodule", async (t) 
   const f = fixture(t);
   f.git("update-index", "--add", "--cacheinfo", `160000,${f.baseSha},module`);
   f.git("commit", "-q", "-m", "submodule fixture");
-  await failure(collect(f, f.git("rev-parse", "HEAD")), "unsupported_file_mode");
+  await failure(
+    collect(f, f.git("rev-parse", "HEAD")),
+    "unsupported_file_mode",
+  );
 });
 test("refuses control and separator-ambiguous paths", async (t) => {
   for (const path of ["line\nbreak.txt", "back\\slash.txt", "bidi\u202etxt"]) {
@@ -166,31 +242,64 @@ test("refuses malformed UTF8 path bytes", async (t) => {
   const f = fixture(t);
   // APFS refuses malformed path bytes; Git tree objects can still contain them.
   const blob = f.gitInput("text", "hash-object", "-w", "--stdin");
-  const treeBytes = Buffer.concat([Buffer.from(`100644 blob ${blob}\t`), Buffer.from([0xff]), Buffer.from(".txt\0")]);
+  const treeBytes = Buffer.concat([
+    Buffer.from(`100644 blob ${blob}\t`),
+    Buffer.from([0xff]),
+    Buffer.from(".txt\0"),
+  ]);
   const tree = f.gitInput(treeBytes, "mktree", "-z");
-  const head = f.gitInput("malformed path", "commit-tree", tree, "-p", f.baseSha);
+  const head = f.gitInput(
+    "malformed path",
+    "commit-tree",
+    tree,
+    "-p",
+    f.baseSha,
+  );
   await failure(collect(f, head), "unsupported_path");
 });
 test("refuses more files than the complete inventory bound", async (t) => {
   const f = fixture(t);
-  const changes = Object.fromEntries(Array.from({ length: REVIEW_COMPARISON_LIMITS.files + 1 }, (_, i) => [`file-${i}.txt`, "x"]));
+  const changes = Object.fromEntries(
+    Array.from({ length: REVIEW_COMPARISON_LIMITS.files + 1 }, (_, i) => [
+      `file-${i}.txt`,
+      "x",
+    ]),
+  );
   await failure(collect(f, f.commit(changes)), "file_limit");
 });
 test("refuses oversized blobs before collecting blob contents", async (t) => {
   const f = fixture(t);
-  await failure(collect(f, f.commit({ "changed.txt": "x".repeat(REVIEW_COMPARISON_LIMITS.blobBytes + 1) })), "blob_limit");
+  await failure(
+    collect(
+      f,
+      f.commit({
+        "changed.txt": "x".repeat(REVIEW_COMPARISON_LIMITS.blobBytes + 1),
+      }),
+    ),
+    "blob_limit",
+  );
 });
 test("aggregate limit counts repeated before/after bytes, including duplicate objects", async (t) => {
   const contents = "x".repeat(40000);
-  const initial = Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`file-${i}.txt`, contents]));
+  const initial = Object.fromEntries(
+    Array.from({ length: 4 }, (_, i) => [`file-${i}.txt`, contents]),
+  );
   const f = fixture(t, initial);
-  const changed = Object.fromEntries(Object.keys(initial).map((path) => [path, `${contents.slice(0, -1)}y`]));
+  const changed = Object.fromEntries(
+    Object.keys(initial).map((path) => [path, `${contents.slice(0, -1)}y`]),
+  );
   await failure(collect(f, f.commit(changed)), "content_limit");
 });
 test("raw subprocess output is bounded even for oversized commit objects", async (t) => {
   const f = fixture(t);
   const tree = f.git("rev-parse", `${f.baseSha}^{tree}`);
-  const head = f.gitInput("x".repeat(REVIEW_COMPARISON_LIMITS.commitBytes * 4), "commit-tree", tree, "-p", f.baseSha);
+  const head = f.gitInput(
+    "x".repeat(REVIEW_COMPARISON_LIMITS.commitBytes * 4),
+    "commit-tree",
+    tree,
+    "-p",
+    f.baseSha,
+  );
   await failure(collect(f, head), "subprocess_output_limit");
 });
 test("refuses diverged histories instead of treating merge-base as requested base", async (t) => {
@@ -205,9 +314,28 @@ test("refuses multiple merge bases in criss-cross history", async (t) => {
   const tree = f.git("rev-parse", `${f.baseSha}^{tree}`);
   const left = f.gitInput("left", "commit-tree", tree, "-p", f.baseSha);
   const right = f.gitInput("right", "commit-tree", tree, "-p", f.baseSha);
-  const first = f.gitInput("first merge", "commit-tree", tree, "-p", left, "-p", right);
-  const second = f.gitInput("second merge", "commit-tree", tree, "-p", right, "-p", left);
-  assert.equal(f.git("merge-base", "--all", first, second).split("\n").length, 2);
+  const first = f.gitInput(
+    "first merge",
+    "commit-tree",
+    tree,
+    "-p",
+    left,
+    "-p",
+    right,
+  );
+  const second = f.gitInput(
+    "second merge",
+    "commit-tree",
+    tree,
+    "-p",
+    right,
+    "-p",
+    left,
+  );
+  assert.equal(
+    f.git("merge-base", "--all", first, second).split("\n").length,
+    2,
+  );
   await failure(collect(f, second, undefined, first), "ambiguous_merge_base");
 });
 test("exact commit input excludes refs, abbreviated IDs, missing objects and annotated tags", async (t) => {
@@ -216,13 +344,22 @@ test("exact commit input excludes refs, abbreviated IDs, missing objects and ann
   await failure(collect(f, f.baseSha.slice(0, 8)), "invalid_input");
   await failure(collect(f, "f".repeat(40)), "invalid_git_objects");
   f.git("tag", "-a", "synthetic", "-m", "annotated");
-  await failure(collect(f, f.git("rev-parse", "synthetic")), "invalid_git_objects");
+  await failure(
+    collect(f, f.git("rev-parse", "synthetic")),
+    "invalid_git_objects",
+  );
 });
 test("replace refs cannot substitute the measured commit or blob contents", async (t) => {
   const f = fixture(t);
   const head = f.commit({ "changed.txt": "actual new bytes" });
   const baseTree = f.git("rev-parse", `${f.baseSha}^{tree}`);
-  const replacement = f.gitInput("replacement commit", "commit-tree", baseTree, "-p", f.baseSha);
+  const replacement = f.gitInput(
+    "replacement commit",
+    "commit-tree",
+    baseTree,
+    "-p",
+    f.baseSha,
+  );
   f.git("replace", head, replacement);
   const result = await collect(f, head);
   assert.equal(result.files[0].after.text, "actual new bytes");
@@ -239,28 +376,65 @@ test("shallow histories and legacy graft overrides are refused", async (t) => {
 test("repository subdirectories cannot silently select a parent repository", async (t) => {
   const f = fixture(t);
   mkdirSync(join(f.root, "nested"));
-  await failure(collectReviewComparison({ repositoryPath: join(f.root, "nested"), baseSha: f.baseSha, headSha: f.baseSha }), "unsupported_repository");
+  await failure(
+    collectReviewComparison({
+      repositoryPath: join(f.root, "nested"),
+      baseSha: f.baseSha,
+      headSha: f.baseSha,
+    }),
+    "unsupported_repository",
+  );
 });
 test("no attributes, textconv, filter, hook or inherited Git execution override runs", async (t) => {
-  const f = fixture(t, { ".gitattributes": "*.txt diff=hostile filter=hostile\n", "changed.txt": "before" });
+  const f = fixture(t, {
+    ".gitattributes": "*.txt diff=hostile filter=hostile\n",
+    "changed.txt": "before",
+  });
   const head = f.commit({ "changed.txt": "after" });
   const marker = join(f.root, "executed-marker");
   const helper = join(f.root, "hostile-helper");
-  writeFileSync(helper, `#!/bin/sh\nprintf executed > '${marker.replaceAll("'", "'\\''")}'\nexit 1\n`, { mode: 0o755 });
-  for (const key of ["diff.external", "diff.hostile.command", "diff.hostile.textconv", "filter.hostile.clean", "filter.hostile.smudge", "core.fsmonitor"]) f.git("config", key, helper);
+  writeFileSync(
+    helper,
+    `#!/bin/sh\nprintf executed > '${marker.replaceAll("'", "'\\''")}'\nexit 1\n`,
+    { mode: 0o755 },
+  );
+  for (const key of [
+    "diff.external",
+    "diff.hostile.command",
+    "diff.hostile.textconv",
+    "filter.hostile.clean",
+    "filter.hostile.smudge",
+    "core.fsmonitor",
+  ])
+    f.git("config", key, helper);
   f.git("config", "filter.hostile.required", "true");
   const hooks = join(f.root, ".git", "hooks");
-  for (const name of ["post-checkout", "pre-commit", "post-index-change"]) writeFileSync(join(hooks, name), `#!/bin/sh\nexec '${helper}'\n`, { mode: 0o755 });
-  const fakeBin = join(f.root, "fake-bin"); mkdirSync(fakeBin);
-  writeFileSync(join(fakeBin, "git"), `#!/bin/sh\nexec '${helper}'\n`, { mode: 0o755 });
+  for (const name of ["post-checkout", "pre-commit", "post-index-change"])
+    writeFileSync(join(hooks, name), `#!/bin/sh\nexec '${helper}'\n`, {
+      mode: 0o755,
+    });
+  const fakeBin = join(f.root, "fake-bin");
+  mkdirSync(fakeBin);
+  writeFileSync(join(fakeBin, "git"), `#!/bin/sh\nexec '${helper}'\n`, {
+    mode: 0o755,
+  });
   const overrides = {
-    PATH: fakeBin, GIT_EXEC_PATH: fakeBin, GIT_EXTERNAL_DIFF: helper,
-    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: helper,
-    GIT_DIR: join(f.root, "wrong-git-dir"), GIT_WORK_TREE: join(f.root, "wrong-worktree"),
-    GIT_OBJECT_DIRECTORY: join(f.root, "wrong-objects"), GIT_INDEX_FILE: join(f.root, "wrong-index"),
-    GIT_TRACE: marker, GIT_TRACE2_EVENT: marker,
+    PATH: fakeBin,
+    GIT_EXEC_PATH: fakeBin,
+    GIT_EXTERNAL_DIFF: helper,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.fsmonitor",
+    GIT_CONFIG_VALUE_0: helper,
+    GIT_DIR: join(f.root, "wrong-git-dir"),
+    GIT_WORK_TREE: join(f.root, "wrong-worktree"),
+    GIT_OBJECT_DIRECTORY: join(f.root, "wrong-objects"),
+    GIT_INDEX_FILE: join(f.root, "wrong-index"),
+    GIT_TRACE: marker,
+    GIT_TRACE2_EVENT: marker,
   };
-  const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
   try {
     Object.assign(process.env, overrides);
     const result = await collect(f, head);
@@ -269,7 +443,8 @@ test("no attributes, textconv, filter, hook or inherited Git execution override 
     assert.equal(existsSync(marker), false);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 });
@@ -279,7 +454,9 @@ test("missing promisor objects fail without launching a remote helper", async (t
   const blob = f.git("rev-parse", `${head}:changed.txt`);
   const marker = join(f.root, "fetch-marker");
   const helper = join(f.root, "remote-helper");
-  writeFileSync(helper, `#!/bin/sh\nprintf attempted > '${marker}'\nexit 1\n`, { mode: 0o755 });
+  writeFileSync(helper, `#!/bin/sh\nprintf attempted > '${marker}'\nexit 1\n`, {
+    mode: 0o755,
+  });
   f.git("config", "extensions.partialClone", "origin");
   f.git("config", "remote.origin.promisor", "true");
   f.git("config", "remote.origin.url", `ext::${helper}`);
@@ -289,8 +466,19 @@ test("missing promisor objects fail without launching a remote helper", async (t
   assert.equal(existsSync(marker), false);
 });
 test("pre-aborted parent rejects without reading the repository", async () => {
-  const controller = new AbortController(); controller.abort(new Error("private reason"));
-  await failure(collectReviewComparison({ repositoryPath: "/does-not-exist", baseSha: "a".repeat(40), headSha: "b".repeat(40) }, { signal: controller.signal }), "aborted");
+  const controller = new AbortController();
+  controller.abort(new Error("private reason"));
+  await failure(
+    collectReviewComparison(
+      {
+        repositoryPath: "/does-not-exist",
+        baseSha: "a".repeat(40),
+        headSha: "b".repeat(40),
+      },
+      { signal: controller.signal },
+    ),
+    "aborted",
+  );
 });
 for (const mode of ["deadline", "parent abort"]) {
   test(`${mode} terminates a real Git subprocess stalled reading configuration`, async (t) => {
@@ -300,19 +488,54 @@ for (const mode of ["deadline", "parent abort"]) {
     f.git("config", "include.path", fifo);
     const controller = new AbortController();
     const started = performance.now();
-    const timer = mode === "parent abort" ? setTimeout(() => controller.abort(new Error("private reason")), 30) : undefined;
+    const timer =
+      mode === "parent abort"
+        ? setTimeout(() => controller.abort(new Error("private reason")), 30)
+        : undefined;
     try {
-      await failure(collect(f, f.baseSha, { signal: controller.signal, deadlineMs: mode === "deadline" ? 30 : 1000 }), mode === "deadline" ? "deadline_exceeded" : "aborted");
+      await failure(
+        collect(f, f.baseSha, {
+          signal: controller.signal,
+          deadlineMs: mode === "deadline" ? 30 : 1000,
+        }),
+        mode === "deadline" ? "deadline_exceeded" : "aborted",
+      );
       assert.ok(performance.now() - started < 1000);
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+    }
   });
 }
 test("input accessors and unknown fields are refused without invoking getters", async () => {
   let invoked = false;
   const input = { baseSha: "a".repeat(40), headSha: "b".repeat(40) };
-  Object.defineProperty(input, "repositoryPath", { enumerable: true, get() { invoked = true; return "/tmp"; } });
+  Object.defineProperty(input, "repositoryPath", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      return "/tmp";
+    },
+  });
   await failure(collectReviewComparison(input), "invalid_input");
   assert.equal(invoked, false);
-  await failure(collectReviewComparison({ repositoryPath: "/tmp", baseSha: "a".repeat(40), headSha: "b".repeat(40), extra: true }), "invalid_input");
-  await failure(collectReviewComparison({ repositoryPath: "/tmp", baseSha: "a".repeat(40), headSha: "b".repeat(40) }, { deadlineMs: 10001 }), "invalid_input");
+  await failure(
+    collectReviewComparison({
+      repositoryPath: "/tmp",
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      extra: true,
+    }),
+    "invalid_input",
+  );
+  await failure(
+    collectReviewComparison(
+      {
+        repositoryPath: "/tmp",
+        baseSha: "a".repeat(40),
+        headSha: "b".repeat(40),
+      },
+      { deadlineMs: 10001 },
+    ),
+    "invalid_input",
+  );
 });
