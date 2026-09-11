@@ -1599,6 +1599,8 @@ for (const change of ["workflow", "actor", "removal"]) {
         () => instance.evaluate(),
         /Previously recorded producer configuration is missing/,
       );
+    else if (change === "actor")
+      assert.throws(() => instance.evaluate(), /unauthorized_producer/);
     else assert.equal(instance.evaluate().result.decision, "hold");
     assert.equal(api.value(ledgerPath).revision, 1);
   });
@@ -1616,5 +1618,151 @@ test("atomic review intake producer opt-in invalidates legacy review and deletio
     () => instance.evaluate(),
     /Previously recorded producer configuration is missing/,
   );
+  assert.equal(mutations(api).length, 0);
+});
+
+function validProducerConfiguration() {
+  return {
+    schemaVersion: 1,
+    repository,
+    producers: [
+      {
+        id: "independent",
+        repository: controlRepository,
+        repositoryId: 91,
+        workflowId: 123,
+        workflowPath: ".github/workflows/review.yml",
+        workflowRevision: "d".repeat(40),
+        lane: "claude",
+        publisherActorId: actorId,
+        artifactName: "review-receipt.json",
+      },
+    ],
+  };
+}
+
+for (const [name, change] of [
+  [
+    "malformed entry",
+    (config) => {
+      config.producers[0].workflowRevision = "main";
+    },
+  ],
+  [
+    "duplicate alias",
+    (config) => {
+      config.producers.push({ ...config.producers[0], workflowId: 456 });
+    },
+  ],
+  [
+    "duplicate immutable identity",
+    (config) => {
+      config.producers.push({ ...config.producers[0], id: "alias" });
+    },
+  ],
+  [
+    "unauthorized lane",
+    (config) => {
+      config.producers[0].lane = "other";
+    },
+  ],
+  [
+    "unauthorized publisher",
+    (config) => {
+      config.producers[0].publisherActorId = 999;
+    },
+  ],
+  [
+    "unauthorized unselected entry",
+    (config) => {
+      config.producers.push({
+        ...config.producers[0],
+        id: "other",
+        workflowId: 456,
+        publisherActorId: 999,
+      });
+    },
+  ],
+  [
+    "oversized producer list",
+    (config) => {
+      config.producers = Array(17).fill(config.producers[0]);
+    },
+  ],
+]) {
+  for (const publish of [false, true]) {
+    test(`${publish ? "publishing" : "read-only"} evaluation rejects ${name} despite current-digest clean evidence`, () => {
+      const api = new FakeGitHub();
+      const instance = controller(api);
+      const config = validProducerConfiguration();
+      api.setFile(producersPath, config);
+      api.seed(event(api), 20);
+      assert.equal(instance.evaluate({ publish }).result.decision, "pass");
+      change(config);
+      api.setFile(producersPath, config);
+      // Model a persisted review with the new exact digest: digest mismatch is
+      // deliberately not the reason this configuration must be refused.
+      api.seed(event(api, "review", { id: "review-current-config" }), 20);
+      const ledgerBefore = api.value(ledgerPath);
+      assert.equal(
+        ledgerBefore.events.at(-1).policyDigest,
+        api.context.policyDigest,
+      );
+      api.calls.length = 0;
+      assert.throws(
+        () => instance.evaluate({ publish }),
+        /^IntakeError: Review intake: /,
+      );
+      assert.deepEqual(api.value(ledgerPath), ledgerBefore);
+      if (publish) {
+        assert.equal(api.checks.at(-1).conclusion, "failure");
+        assert.ok(
+          !api.calls.some(
+            ({ method, body }) =>
+              method === "PATCH" && body.conclusion === "success",
+          ),
+        );
+        assert.equal(api.value(lockPath).owner, null);
+      } else {
+        assert.equal(api.checks.length, 0);
+        assert.equal(mutations(api).length, 0);
+      }
+    });
+  }
+}
+
+test("validated snapshot preserves exact producer bytes in authority digest", () => {
+  const api = new FakeGitHub();
+  const configuration = validProducerConfiguration();
+  // Deliberately use different whitespace and field order from the writer.
+  const bytes = Buffer.from(
+    JSON.stringify({
+      producers: configuration.producers,
+      repository,
+      schemaVersion: 1,
+    }) + "\n\n",
+  );
+  api.files.set(producersPath, { bytes, sha: hash(bytes) });
+  api.history.add(producersPath);
+  api.commit();
+  const expected = policyDigest(api.files.get(policyPath).bytes, bytes);
+  const snapshot = controller(api).snapshot({ allowMissingLedger: true });
+  assert.equal(snapshot.context.policyDigest, expected);
+  assert.equal(snapshot.producersSha, hash(bytes));
+  assert.ok(Object.isFrozen(snapshot.producers));
+  assert.ok(Object.isFrozen(snapshot.producers[0]));
+  assert.deepEqual(api.files.get(producersPath).bytes, bytes);
+  assert.equal(mutations(api).length, 0);
+});
+
+test("empty protected configuration remains readable and cannot revive earlier acceptance", () => {
+  const api = new FakeGitHub();
+  const instance = controller(api);
+  api.setFile(producersPath, validProducerConfiguration());
+  api.seed(event(api), 20);
+  assert.equal(instance.evaluate().result.decision, "pass");
+  api.setFile(producersPath, { schemaVersion: 1, repository, producers: [] });
+  assert.deepEqual(instance.snapshot().producers, []);
+  assert.equal(instance.evaluate().result.decision, "hold");
   assert.equal(mutations(api).length, 0);
 });

@@ -11,7 +11,10 @@ import {
   validatePolicy,
 } from "./merge-policy-core.mjs";
 import { appendEvent, emptyLedger } from "./merge-policy-state.mjs";
-import { prepareReviewIntake } from "./merge-policy-intake.mjs";
+import {
+  prepareReviewIntake,
+  validateProducerConfiguration,
+} from "./merge-policy-intake.mjs";
 
 export const CHECK_NAME = "merge-policy / decision";
 const REPO = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/;
@@ -182,22 +185,12 @@ export class PolicyController {
       controlSha,
       !includeProducers,
     );
+    let producerConfiguration;
     if (producers) {
-      const config = producers.value;
-      assert(
-        config &&
-          typeof config === "object" &&
-          !Array.isArray(config) &&
-          same(Object.keys(config).sort(), [
-            "producers",
-            "repository",
-            "schemaVersion",
-          ]) &&
-          config.schemaVersion === 1 &&
-          config.repository === this.repository &&
-          Array.isArray(config.producers),
-        "Invalid protected producer configuration",
-      );
+      producerConfiguration = validateProducerConfiguration({
+        configuration: producers.value,
+        policy: policy.value,
+      });
     } else {
       const history = this.api.call(
         "GET",
@@ -273,7 +266,10 @@ export class PolicyController {
       ledger: ledger?.value ?? emptyLedger(this.repository, this.pullRequest),
       ledgerSha: ledger?.sha ?? null,
       ...(producers
-        ? { producers: producers.value.producers, producersSha: producers.sha }
+        ? {
+            producers: producerConfiguration.producers,
+            producersSha: producers.sha,
+          }
         : {}),
     };
   }

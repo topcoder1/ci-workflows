@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   INTAKE_LIMITS,
   prepareReviewIntake,
+  validateProducerConfiguration,
 } from "../.github/scripts/merge-policy-intake.mjs";
 import { evaluate } from "../.github/scripts/merge-policy-core.mjs";
 import { emptyLedger } from "../.github/scripts/merge-policy-state.mjs";
@@ -140,6 +141,293 @@ function decision(input, ledger) {
     now: "2026-09-11T01:00:00Z",
   });
 }
+
+function configurationFixture() {
+  const { input } = fixture();
+  return {
+    configuration: {
+      schemaVersion: 1,
+      repository: input.context.repository,
+      producers: input.producers,
+    },
+    policy: input.policy,
+  };
+}
+
+test("protected configuration returns detached deeply frozen authority without changing input", () => {
+  const input = configurationFixture();
+  const original = clone(input);
+  const result = validateProducerConfiguration(input);
+  assert.deepEqual(result, original.configuration);
+  assert.deepEqual(input, original);
+  assert.notEqual(result, input.configuration);
+  assert.notEqual(result.producers, input.configuration.producers);
+  assert.notEqual(result.producers[0], input.configuration.producers[0]);
+  for (const value of [result, result.producers, result.producers[0]])
+    assert.ok(Object.isFrozen(value));
+  input.configuration.producers[0].workflowRevision = "e".repeat(40);
+  input.policy.reviewActors.independent.length = 0;
+  assert.deepEqual(result, original.configuration);
+  assert.throws(() => result.producers.push({}), TypeError);
+  assert.throws(() => {
+    result.producers[0].publisherActorId = 999;
+  }, TypeError);
+});
+
+test("protected configuration accepts plain null-prototype objects", () => {
+  const input = configurationFixture();
+  Object.setPrototypeOf(input, null);
+  Object.setPrototypeOf(input.configuration, null);
+  Object.setPrototypeOf(input.configuration.producers[0], null);
+  assert.equal(
+    validateProducerConfiguration(input).producers[0].id,
+    "independent",
+  );
+});
+
+test("empty protected configuration suspends intake without accepting a selected producer", async () => {
+  const input = configurationFixture();
+  input.configuration.producers = [];
+  const result = validateProducerConfiguration(input);
+  assert.deepEqual(result.producers, []);
+  assert.ok(Object.isFrozen(result.producers));
+  const delivery = fixture();
+  delivery.input.producers = result.producers;
+  await fails(delivery.input, "producer_limit");
+  assert.equal(delivery.state.calls.length, 0);
+});
+
+for (const [name, change] of [
+  [
+    "wrong repository",
+    ({ configuration }) => {
+      configuration.repository = "other/application";
+    },
+  ],
+  [
+    "wrong schema",
+    ({ configuration }) => {
+      configuration.schemaVersion = 2;
+    },
+  ],
+  [
+    "missing envelope field",
+    ({ configuration }) => {
+      delete configuration.schemaVersion;
+    },
+  ],
+  [
+    "unknown envelope field",
+    ({ configuration }) => {
+      configuration.accepted = true;
+    },
+  ],
+  [
+    "unexpected input",
+    (input) => {
+      input.actorId = 200;
+    },
+  ],
+  [
+    "invalid policy",
+    ({ policy }) => {
+      policy.requiredReviews = ["unknown"];
+    },
+  ],
+  [
+    "non-array producers",
+    ({ configuration }) => {
+      configuration.producers = {};
+    },
+  ],
+  [
+    "too many producers",
+    ({ configuration }) => {
+      configuration.producers = Array(17).fill(configuration.producers[0]);
+    },
+  ],
+  [
+    "missing producer field",
+    ({ configuration }) => {
+      delete configuration.producers[0].artifactName;
+    },
+  ],
+  [
+    "unknown producer field",
+    ({ configuration }) => {
+      configuration.producers[0].accepted = true;
+    },
+  ],
+  [
+    "invalid producer repository",
+    ({ configuration }) => {
+      configuration.producers[0].repository = "../control";
+    },
+  ],
+  [
+    "mutable workflow revision",
+    ({ configuration }) => {
+      configuration.producers[0].workflowRevision = "main";
+    },
+  ],
+  [
+    "invalid workflow path",
+    ({ configuration }) => {
+      configuration.producers[0].workflowPath = "../review.yml";
+    },
+  ],
+  [
+    "invalid artifact name",
+    ({ configuration }) => {
+      configuration.producers[0].artifactName = "../receipt.json";
+    },
+  ],
+  [
+    "duplicate alias",
+    ({ configuration }) => {
+      configuration.producers.push({
+        ...configuration.producers[0],
+        workflowId: 456,
+      });
+    },
+  ],
+  [
+    "duplicate immutable identity",
+    ({ configuration }) => {
+      configuration.producers.push({
+        ...configuration.producers[0],
+        id: "alias",
+      });
+    },
+  ],
+  [
+    "unauthorized lane",
+    ({ configuration }) => {
+      configuration.producers[0].lane = "other";
+    },
+  ],
+  [
+    "unauthorized publisher",
+    ({ configuration }) => {
+      configuration.producers[0].publisherActorId = 999;
+    },
+  ],
+  [
+    "unauthorized unselected producer",
+    ({ configuration }) => {
+      configuration.producers.push({
+        ...configuration.producers[0],
+        id: "other",
+        workflowId: 456,
+        publisherActorId: 999,
+      });
+    },
+  ],
+]) {
+  test(`protected configuration rejects ${name}`, () => {
+    const input = configurationFixture();
+    change(input);
+    assert.throws(
+      () => validateProducerConfiguration(input),
+      /^IntakeError: Review intake: /,
+    );
+  });
+}
+
+test("protected configuration refuses executable or oversized structures without invoking user code", () => {
+  let invoked = 0;
+  const getter = () => {
+    invoked++;
+    throw new Error("sensitive getter output");
+  };
+  const changes = [
+    (input) => {
+      Object.defineProperty(input, "configuration", {
+        enumerable: true,
+        get: getter,
+      });
+    },
+    ({ configuration }) => {
+      Object.defineProperty(configuration.producers[0], "lane", {
+        enumerable: true,
+        get: getter,
+      });
+    },
+    ({ policy }) => {
+      Object.defineProperty(policy.reviewActors, "independent", {
+        enumerable: true,
+        get: getter,
+      });
+    },
+    ({ configuration }) => {
+      Object.defineProperty(configuration.producers[0], "hidden", { value: 1 });
+    },
+    ({ configuration }) => {
+      configuration.producers.length = 2;
+    },
+    ({ configuration }) => {
+      configuration.producers[0].cycle = configuration;
+    },
+    ({ configuration }) => {
+      configuration.producers[0].toJSON = getter;
+    },
+    ({ configuration }) => {
+      configuration.producers[0][Symbol.iterator] = getter;
+    },
+    ({ configuration }) => {
+      configuration.producers[0].id = "x".repeat(8193);
+    },
+    ({ configuration }) => {
+      configuration.producers = new Array(1_000_000);
+    },
+    ({ configuration }) => {
+      let nested = configuration;
+      for (let i = 0; i < 18; i++) nested = nested.child = {};
+    },
+  ];
+  for (const change of changes) {
+    const input = configurationFixture();
+    change(input);
+    assert.throws(
+      () => validateProducerConfiguration(input),
+      (error) => {
+        assert.match(error.message, /^Review intake: /);
+        assert.ok(!error.message.includes("sensitive"));
+        return true;
+      },
+    );
+  }
+  assert.equal(invoked, 0);
+});
+
+test("repository authority permits a future PR author while intake still refuses selected self-review", async () => {
+  const { input, state } = fixture();
+  input.context.authorId = input.producers[0].publisherActorId;
+  assert.doesNotThrow(() =>
+    validateProducerConfiguration({
+      configuration: {
+        schemaVersion: 1,
+        repository: input.context.repository,
+        producers: input.producers,
+      },
+      policy: input.policy,
+    }),
+  );
+  await fails(input, "unauthorized_producer");
+  assert.equal(state.calls.length, 0);
+});
+
+test("intake validates policy authority for every configured producer before any reader runs", async () => {
+  const { input, state } = fixture();
+  input.producers.push({
+    ...input.producers[0],
+    id: "unselected",
+    workflowId: 456,
+    publisherActorId: 999,
+  });
+  await fails(input, "unauthorized_producer");
+  assert.equal(state.calls.length, 0);
+});
 
 test("complete finding receipt yields one atomic candidate, preserves text and leaves caller state unchanged", async () => {
   const { input, state } = fixture();
