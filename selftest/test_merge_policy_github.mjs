@@ -1110,6 +1110,12 @@ test("atomic review intake persists all findings and terminal review in one CAS"
   assert.equal(result.enforcementPublished, false);
   assert.equal(Object.hasOwn(result, "result"), false);
   assert.equal(api.value(lockPath).owner, null);
+  const persistedHold = api.value(lockPath).intake;
+  assert.equal(persistedHold.phase, "completed");
+  assert.equal(persistedHold.generation, api.value(lockPath).sequence);
+  assert.deepEqual(persistedHold.selector, input.request);
+  assert.equal(persistedHold.binding.headSha, api.context.headSha);
+  assert.equal(persistedHold.candidate.ledgerRevision, result.ledgerRevision);
   assert.equal(
     api.calls.some(({ endpoint }) => endpoint === "user"),
     false,
@@ -1231,6 +1237,9 @@ test("atomic review intake rejects a bad later finding without persisting the va
   assert.equal(api.value(ledgerPath), null);
   assert.equal(ledgerWrites(api).length, 0);
   assert.equal(api.value(lockPath).owner, null);
+  assert.equal(api.value(lockPath).intake.phase, "failed");
+  assert.equal(api.value(lockPath).intake.failureCode, "VALIDATION_FAILED");
+  assert.equal(instance.evaluate().result.code, "REVIEW_INTAKE_UNRESOLVED");
 });
 
 test("atomic review intake rejects changed duplicates and partially persisted receipts", async (t) => {
