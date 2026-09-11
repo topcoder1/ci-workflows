@@ -15,6 +15,14 @@ import {
   prepareReviewIntake,
   validateProducerConfiguration,
 } from "./merge-policy-intake.mjs";
+import {
+  blockedDecision,
+  createIntakeHold,
+  assertIntakeTransition,
+  unresolvedIntake,
+  validateBinding,
+  validateIntakeHold,
+} from "./merge-policy-intake-hold.mjs";
 
 export const CHECK_NAME = "merge-policy / decision";
 const REPO = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/;
@@ -38,6 +46,43 @@ function positive(value, name) {
 }
 function same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+function validateLock(value) {
+  assert(
+    value && typeof value === "object" && !Array.isArray(value),
+    "Invalid publication lock",
+  );
+  assert(
+    value.schemaVersion === 1 || value.schemaVersion === 2,
+    "Invalid publication lock",
+  );
+  assert(
+    typeof value.owner === "string" || value.owner === null,
+    "Invalid publication lock owner",
+  );
+  assert(
+    Number.isSafeInteger(value.sequence) &&
+      value.sequence >= 0 &&
+      value.sequence < Number.MAX_SAFE_INTEGER,
+    "Invalid publication lock sequence",
+  );
+  if (value.schemaVersion === 2)
+    assert(
+      typeof value.startedAt === "string",
+      "Invalid publication lock timestamp",
+    );
+  if (value.schemaVersion === 2) {
+    assert(
+      Object.hasOwn(value, "intake"),
+      "Invalid publication lock intake state",
+    );
+    try {
+      validateIntakeHold(value.intake, value.sequence);
+    } catch (error) {
+      throw new Error(error.message);
+    }
+  }
+  return value;
 }
 export function policyDigest(policyBytes, producerBytes) {
   if (producerBytes === undefined)
@@ -259,12 +304,26 @@ export class PolicyController {
         "Previously recorded ledger is missing; restore state before proceeding",
       );
     }
+    const lock = this.document(this.lockPath, controlSha, true);
+    if (!lock) {
+      const history = this.api.call(
+        "GET",
+        `repos/${this.controlRepository}/commits?sha=${controlSha}&path=${encodeURIComponent(this.lockPath)}&per_page=1`,
+      );
+      assert(
+        Array.isArray(history) && history.length === 0,
+        "Previously recorded publication lock is missing; restore lock state before proceeding",
+      );
+    } else validateLock(lock.value);
     return {
       context,
       policy: policy.value,
       policySha: policy.sha,
       ledger: ledger?.value ?? emptyLedger(this.repository, this.pullRequest),
       ledgerSha: ledger?.sha ?? null,
+      lock: lock?.value ?? null,
+      lockSha: lock?.sha ?? null,
+      intake: lock?.value?.intake ?? null,
       ...(producers
         ? {
             producers: producerConfiguration.producers,
@@ -273,27 +332,37 @@ export class PolicyController {
         : {}),
     };
   }
-  lock() {
+  lock({ intake = undefined, intakeSelector = undefined } = {}) {
     const previous = this.document(this.lockPath, "main", true);
     if (previous) {
-      assert(
-        previous.value?.schemaVersion === 1 &&
-          Number.isSafeInteger(previous.value.sequence) &&
-          previous.value.sequence >= 0 &&
-          previous.value.sequence < Number.MAX_SAFE_INTEGER,
-        "Invalid publication lock",
-      );
+      validateLock(previous.value);
       assert(
         previous.value.owner === null,
         "Policy operation already active; reconcile the owning run before recovery",
       );
+      assert(
+        !unresolvedIntake(previous.value),
+        "Trusted review intake is unresolved; reconcile the intake generation before starting another operation",
+      );
     }
+    const sequence = (previous?.value.sequence ?? 0) + 1;
+    assert(
+      !(intake !== undefined && intakeSelector !== undefined),
+      "Specify either an intake hold or its selector",
+    );
+    const persistedIntake =
+      intakeSelector !== undefined
+        ? createIntakeHold(intakeSelector, sequence)
+        : intake === undefined
+          ? (previous?.value?.intake ?? null)
+          : validateIntakeHold(intake, sequence);
     const lock = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       owner: randomUUID(),
-      sequence: (previous?.value.sequence ?? 0) + 1,
+      sequence,
       startedAt: this.now().toISOString(),
       execution: executionIdentity(),
+      intake: persistedIntake,
     };
     this.write(
       this.lockPath,
@@ -305,6 +374,7 @@ export class PolicyController {
   }
   assertLock(lock) {
     const document = this.document(this.lockPath);
+    validateLock(document.value);
     assert(
       same(document.value, lock),
       "Policy operation ownership changed; obsolete publisher refused",
@@ -313,6 +383,7 @@ export class PolicyController {
   }
   unlock(lock) {
     const current = this.assertLock(lock);
+    validateLock(current.value);
     this.write(
       this.lockPath,
       { ...lock, owner: null },
@@ -322,6 +393,7 @@ export class PolicyController {
   }
   noteCheck(lock, check) {
     const current = this.assertLock(lock);
+    validateLock(current.value);
     const next = {
       ...lock,
       check: { id: check.id, headSha: check.head_sha, appId: check.app.id },
@@ -366,6 +438,7 @@ export class PolicyController {
       "Recovery requires exact lock owner and blob SHA",
     );
     const current = this.document(this.lockPath);
+    validateLock(current.value);
     assert(
       current.sha === expectedLockSha && current.value.owner === expectedOwner,
       "Recovery lock identity changed",
@@ -374,23 +447,21 @@ export class PolicyController {
       this.ownerStopped(current.value.execution),
       "Owning operation is still active; recovery refused",
     );
-    assert(
-      current.value.schemaVersion === 1 &&
-        Number.isSafeInteger(current.value.sequence) &&
-        current.value.sequence >= 0 &&
-        current.value.sequence < Number.MAX_SAFE_INTEGER,
-      "Invalid recovery lock",
-    );
     // Claim a new active owner before touching checks. A delayed competing
     // recoverer must lose this CAS without invalidating a newer decision.
     const lock = {
       ...current.value,
+      schemaVersion: 2,
       owner: randomUUID(),
       sequence: current.value.sequence + 1,
       startedAt: this.now().toISOString(),
       execution: executionIdentity(),
+      intake: current.value.intake
+        ? { ...current.value.intake, generation: current.value.sequence + 1 }
+        : null,
       recoveryOf: { owner: expectedOwner, blobSha: expectedLockSha },
     };
+    validateLock(lock);
     this.write(
       this.lockPath,
       lock,
@@ -436,6 +507,8 @@ export class PolicyController {
     };
   }
   decide(snapshot) {
+    if (unresolvedIntake(snapshot.lock))
+      return blockedDecision(snapshot.intake);
     return evaluate({
       policy: snapshot.policy,
       context: snapshot.context,
@@ -673,6 +746,45 @@ export class PolicyController {
       );
     }
   }
+  updateIntake(lock, patch, message) {
+    const current = this.assertLock(lock);
+    validateLock(current.value);
+    assert(
+      current.value.schemaVersion === 2 && current.value.intake,
+      "No intake hold is active",
+    );
+    const nextHold = { ...current.value.intake, ...patch };
+    if (patch.phase !== undefined)
+      assertIntakeTransition(current.value.intake.phase, patch.phase);
+    validateIntakeHold(nextHold, current.value.sequence);
+    const next = { ...current.value, intake: nextHold };
+    this.write(
+      this.lockPath,
+      next,
+      current.sha,
+      message ?? `Advance review intake ${this.repository}#${this.pullRequest}`,
+    );
+    Object.assign(lock, next);
+    return next;
+  }
+  intakeBinding(snapshot, producer) {
+    const binding = {
+      repository: snapshot.context.repository,
+      pullRequest: snapshot.context.pullRequest,
+      headSha: snapshot.context.headSha,
+      baseSha: snapshot.context.baseSha,
+      authorId: snapshot.context.authorId,
+      policyDigest: snapshot.context.policyDigest,
+      producersSha: snapshot.producersSha,
+      producerRepositoryId: producer.repositoryId,
+      workflowId: producer.workflowId,
+      workflowRevision: producer.workflowRevision,
+      lane: producer.lane,
+      publisherActorId: producer.publisherActorId,
+    };
+    validateBinding(binding);
+    return binding;
+  }
   // Trusted library entry point only: the adapters authenticate the producer;
   // producer authority comes from protected control state, never caller JSON.
   // Persist one complete receipt without creating or changing any GitHub check.
@@ -690,7 +802,7 @@ export class PolicyController {
         ),
       "Review batch requires only a request and trusted readers",
     );
-    const lock = this.lock();
+    const lock = this.lock({ intakeSelector: input.request });
     let writeAttempted = false;
     let writeAcknowledged = false;
     let writeConfirmed = false;
@@ -699,6 +811,21 @@ export class PolicyController {
         allowMissingLedger: true,
         includeProducers: true,
       });
+      const producer = snapshot.producers.find(
+        (candidate) => candidate.id === input.request.producerId,
+      );
+      assert(producer, "Review producer selector is not configured");
+      this.updateIntake(
+        lock,
+        {
+          binding: this.intakeBinding(snapshot, producer),
+          ledgerBefore: {
+            sha: snapshot.ledgerSha,
+            revision: snapshot.ledger.revision,
+          },
+        },
+        `Bind review intake ${this.repository}#${this.pullRequest}`,
+      );
       const candidate = await prepareReviewIntake({
         request: input.request,
         readers: input.readers,
@@ -710,6 +837,22 @@ export class PolicyController {
       this.verifyFresh(snapshot, lock);
       this.assertLock(lock);
       let expectedLedgerSha = snapshot.ledgerSha;
+      const ledgerBytesSha256 = createHash("sha256")
+        .update(`${JSON.stringify(candidate.ledger, null, 2)}\n`)
+        .digest("hex");
+      this.updateIntake(
+        lock,
+        {
+          phase: "ledger_pending",
+          candidate: {
+            receiptId: candidate.receiptId,
+            artifactSha256: candidate.artifactSha256,
+            ledgerBytesSha256,
+            ledgerRevision: candidate.ledger.revision,
+          },
+        },
+        `Prepare review receipt ${candidate.receiptId}`,
+      );
       if (candidate.changed) {
         // There is exactly one durable transition for all findings and the
         // terminal review. Never split a receipt across single-event record().
@@ -732,6 +875,11 @@ export class PolicyController {
           "Invalid review batch write receipt",
         );
       }
+      this.updateIntake(
+        lock,
+        { phase: "receipt_committed" },
+        `Commit review receipt ${candidate.receiptId}`,
+      );
       const current = this.snapshot({ includeProducers: true });
       this.assertLock(lock);
       assert(
@@ -745,6 +893,11 @@ export class PolicyController {
           current.policySha === snapshot.policySha &&
           current.producersSha === snapshot.producersSha,
         "State changed after review intake; no current receipt confirmation issued",
+      );
+      this.updateIntake(
+        lock,
+        { phase: "completed" },
+        `Complete review intake ${candidate.receiptId}`,
       );
       this.unlock(lock);
       return {
@@ -768,23 +921,33 @@ export class PolicyController {
         error.uncertainWrite ||
         error.retainLock ||
         (writeAttempted && !writeConfirmed && !rejectedWrite);
-      if (!retainLock) {
-        try {
-          this.unlock(lock);
-        } catch {
-          const failure = new Error(
-            "Review batch failed; operation lock retained for explicit reconciliation",
-          );
-          failure.retainLock = true;
-          throw failure;
-        }
-        throw error;
+      if (retainLock) {
+        const failure = new Error(
+          `${error.message}; operation lock retained for explicit reconciliation`,
+        );
+        failure.retainLock = true;
+        throw failure;
       }
-      const failure = new Error(
-        `${error.message}; operation lock retained for explicit reconciliation`,
-      );
-      failure.retainLock = true;
-      throw failure;
+      try {
+        this.updateIntake(
+          lock,
+          {
+            phase: "failed",
+            failureCode: rejectedWrite
+              ? "LEDGER_WRITE_REJECTED"
+              : "VALIDATION_FAILED",
+          },
+          `Fail review intake ${this.repository}#${this.pullRequest}`,
+        );
+        this.unlock(lock);
+      } catch {
+        const failure = new Error(
+          "Review batch failed; operation lock retained for explicit reconciliation",
+        );
+        failure.retainLock = true;
+        throw failure;
+      }
+      throw error;
     }
   }
 }
