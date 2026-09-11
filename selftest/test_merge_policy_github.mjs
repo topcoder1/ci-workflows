@@ -1455,6 +1455,11 @@ for (const existing of [false, true]) {
     assert.equal(api.value(ledgerPath).events.at(-1).id, "concurrent");
     assert.equal(api.value(ledgerPath).revision, existing ? 2 : 1);
     assert.equal(api.value(lockPath).owner, null);
+    assert.equal(api.value(lockPath).intake.phase, "failed");
+    assert.equal(
+      api.value(lockPath).intake.failureCode,
+      "LEDGER_WRITE_REJECTED",
+    );
   });
 }
 
