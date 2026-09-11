@@ -887,3 +887,431 @@ test("producer and origin input accessors are not invoked", () => {
   assert.throws(() => fixture({ origins }), { code: "invalid_input" });
   assert.equal(invoked, false);
 });
+
+// These injected responses exercise a supported contract; they do not establish
+// the shape of a native GitHub tag dispatch or authenticate historical execution.
+const tagName = "review-probe-v1.0";
+const workflowRef = `refs/tags/${tagName}`;
+const refRoot = "https://api.github.com/repos/example/reviewer/git";
+const tagURL = `${refRoot}/ref/tags/${tagName}`;
+const branchURL = `${refRoot}/ref/heads/${tagName}`;
+const firstAttemptURL = `${runURL}/attempts/1`;
+const tagSelector = () => ({ ...selector(), runAttempt: 1 });
+const tagProducer = () => ({ ...producer(), workflowRef });
+function tagRef() {
+  return {
+    ref: workflowRef,
+    url: `${refRoot}/${workflowRef}`,
+    object: {
+      type: "commit",
+      sha: revision,
+      url: `${refRoot}/commits/${revision}`,
+    },
+  };
+}
+function tagRun() {
+  return {
+    ...run(),
+    run_attempt: 1,
+    head_branch: tagName,
+    path: `${producer().workflowPath}@${tagName}`,
+  };
+}
+function tagFixture(options = {}) {
+  return fixture({
+    ...options,
+    producer: options.producer ?? tagProducer(),
+    respond: async (request) => {
+      const custom = await options.respond?.(request);
+      if (custom !== undefined) return custom;
+      if (request.url === tagURL) return json(tagRef());
+      if (request.url === branchURL) return new Response(null, { status: 404 });
+      if (request.url === runURL || request.url === firstAttemptURL)
+        return json(tagRun());
+    },
+  });
+}
+const tagFails = (client, code, options) =>
+  fails(client, code, tagSelector(), options);
+
+test("tag opt-in binds exact current lightweight ref before and after the complete artifact read", async () => {
+  const f = tagFixture();
+  assert.equal(f.credentialCalls(), 0);
+  assert.deepEqual(f.calls, []);
+  const result = await f.client.read(tagSelector());
+  assert.deepEqual(
+    f.calls.map(({ url }) => url),
+    [
+      tagURL,
+      branchURL,
+      runURL,
+      firstAttemptURL,
+      artifactURL,
+      zipURL,
+      signedURL,
+      runURL,
+      artifactURL,
+      tagURL,
+      branchURL,
+    ],
+  );
+  assert.deepEqual(result.currentTagRefSnapshot, {
+    ref: workflowRef,
+    sha: revision,
+  });
+  assert.ok(Object.isFrozen(result.currentTagRefSnapshot));
+  assert.equal(result.producer.workflowRef, workflowRef);
+  assert.equal(result.run.attempt, 1);
+  assert.equal(result.artifactAttemptAuthenticated, false);
+  assert.equal(result.executionComparisonAuthenticated, false);
+  assert.equal(result.enforcementPublished, false);
+  assert.equal(Object.hasOwn(result, "historicalRefAuthenticated"), false);
+  assert.equal(Object.hasOwn(result, "executionAuthenticated"), false);
+  assert.equal(f.credentialCalls(), 1);
+  for (const { url, init } of f.calls) {
+    assert.equal(init.method, "GET");
+    assert.equal(init.redirect, "manual");
+    if (url === signedURL)
+      assert.deepEqual(init.headers, { accept: "application/octet-stream" });
+    else assert.equal(init.headers.authorization, "Bearer synthetic-token");
+  }
+});
+test("tag opt-in accepts only the other explicitly enumerated full-ref path spelling", async () => {
+  const f = tagFixture({
+    respond: ({ url }) =>
+      url === runURL || url === firstAttemptURL
+        ? json({
+            ...tagRun(),
+            path: `${producer().workflowPath}@${workflowRef}`,
+          })
+        : undefined,
+  });
+  const result = await f.client.read(tagSelector());
+  assert.equal(
+    result.run.workflowPath,
+    `${producer().workflowPath}@${workflowRef}`,
+  );
+  assert.deepEqual(result.currentTagRefSnapshot, {
+    ref: workflowRef,
+    sha: revision,
+  });
+});
+test("callers without workflowRef retain their old request sequence and result shape", async () => {
+  const f = fixture();
+  const result = await f.client.read(selector());
+  assert.equal(Object.hasOwn(result, "currentTagRefSnapshot"), false);
+  assert.equal(Object.hasOwn(result.producer, "workflowRef"), false);
+  assert.deepEqual(
+    f.calls.map(({ url }) => url),
+    [runURL, attemptURL, artifactURL, zipURL, signedURL, runURL, artifactURL],
+  );
+});
+test("opt-in workflowRef is copied at construction and must be an inert property", async () => {
+  const p = tagProducer();
+  const f = tagFixture({ producer: p });
+  p.workflowRef = "refs/tags/other";
+  assert.deepEqual((await f.client.read(tagSelector())).currentTagRefSnapshot, {
+    ref: workflowRef,
+    sha: revision,
+  });
+  let invoked = false;
+  const accessor = producer();
+  Object.defineProperty(accessor, "workflowRef", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      return workflowRef;
+    },
+  });
+  assert.throws(() => tagFixture({ producer: accessor }), {
+    code: "invalid_input",
+  });
+  assert.equal(invoked, false);
+});
+for (const unsafe of [
+  undefined,
+  "refs/heads/review",
+  "refs/tags/",
+  "refs/tags/nested/name",
+  "refs/tags/a..b",
+  "refs/tags/a.lock",
+  "refs/tags/a.",
+  "refs/tags/a@b",
+  "refs/tags/a%2fb",
+  "refs/tags/a\nb",
+  `refs/tags/${"a".repeat(65)}`,
+]) {
+  test(`refuses unsafe workflowRef configuration (${String(unsafe).length})`, () => {
+    assert.throws(
+      () => tagFixture({ producer: { ...producer(), workflowRef: unsafe } }),
+      { code: "invalid_input" },
+    );
+  });
+}
+test("tag opt-in refuses rerun selectors before credential access", async () => {
+  const f = tagFixture();
+  await fails(f.client, "unsupported_run_attempt", selector());
+  assert.equal(f.credentialCalls(), 0);
+  assert.deepEqual(f.calls, []);
+});
+const refMutations = [
+  [
+    "wrong ref",
+    (ref) => {
+      ref.ref = "refs/tags/other";
+    },
+  ],
+  [
+    "wrong SHA",
+    (ref) => {
+      ref.object.sha = "b".repeat(40);
+    },
+  ],
+  [
+    "annotated tag",
+    (ref) => {
+      ref.object.type = "tag";
+    },
+  ],
+  [
+    "wrong ref repository",
+    (ref) => {
+      ref.url = ref.url.replace("example/reviewer", "other/reviewer");
+    },
+  ],
+  [
+    "wrong object repository",
+    (ref) => {
+      ref.object.url = ref.object.url.replace(
+        "example/reviewer",
+        "other/reviewer",
+      );
+    },
+  ],
+  [
+    "wrong object URL SHA",
+    (ref) => {
+      ref.object.url = `${refRoot}/commits/${"b".repeat(40)}`;
+    },
+  ],
+];
+for (const [name, mutate] of refMutations) {
+  test(`refuses tag metadata ${name}`, async () => {
+    const f = tagFixture({
+      respond: ({ url }) => {
+        if (url !== tagURL) return;
+        const ref = tagRef();
+        mutate(ref);
+        return json(ref);
+      },
+    });
+    await tagFails(f.client, "workflow_ref_binding_mismatch");
+    assert.equal(f.calls.length, 1);
+  });
+}
+test("tag opt-in rejects a same-name branch even when both refs point at the approved SHA", async () => {
+  const f = tagFixture({
+    respond: ({ url }) =>
+      url === branchURL
+        ? json({ ...tagRef(), ref: `refs/heads/${tagName}` })
+        : undefined,
+  });
+  await tagFails(f.client, "ambiguous_workflow_ref");
+  assert.equal(f.calls.length, 2);
+});
+for (const path of [
+  producer().workflowPath,
+  `${producer().workflowPath}@${revision}`,
+  `${producer().workflowPath}@other`,
+  `${producer().workflowPath}@refs/heads/${tagName}`,
+  `${producer().workflowPath}@${tagName}@other`,
+]) {
+  test(`opt-in refuses unbound path spelling (${path.length})`, async () => {
+    const f = tagFixture({
+      respond: ({ url }) =>
+        url === runURL ? json({ ...tagRun(), path }) : undefined,
+    });
+    await tagFails(f.client, "unsupported_execution");
+  });
+}
+test("tag run head_branch must exactly equal the bound tag name", async () => {
+  for (const head_branch of [undefined, "other", workflowRef]) {
+    const f = tagFixture({
+      respond: ({ url }) =>
+        url === runURL ? json({ ...tagRun(), head_branch }) : undefined,
+    });
+    await tagFails(f.client, "unsupported_execution");
+  }
+});
+test("tag current run and selected attempt must both remain first-attempt success", async () => {
+  for (const changedURL of [runURL, firstAttemptURL]) {
+    const f = tagFixture({
+      respond: ({ url }) =>
+        url === changedURL ? json({ ...tagRun(), run_attempt: 2 }) : undefined,
+    });
+    await tagFails(f.client, "run_not_current_success");
+  }
+});
+test("tag mode retains authenticated numeric run repository binding", async () => {
+  const f = tagFixture({
+    respond: ({ url }) =>
+      url === runURL
+        ? json({
+            ...tagRun(),
+            repository: { id: 12, full_name: producer().repository },
+          })
+        : undefined,
+  });
+  await tagFails(f.client, "run_binding_mismatch");
+});
+for (const [name, response, code] of [
+  [
+    "tag deleted",
+    () => new Response(null, { status: 404 }),
+    "metadata_http_error",
+  ],
+  [
+    "tag moved",
+    () =>
+      json({
+        ...tagRef(),
+        object: { ...tagRef().object, sha: "b".repeat(40) },
+      }),
+    "workflow_ref_binding_mismatch",
+  ],
+  [
+    "tag replaced by annotated tag",
+    () => json({ ...tagRef(), object: { ...tagRef().object, type: "tag" } }),
+    "workflow_ref_binding_mismatch",
+  ],
+]) {
+  test(`refuses post-download race: ${name}`, async () => {
+    const f = tagFixture({
+      respond: ({ url, count }) =>
+        url === tagURL && count === 2 ? response() : undefined,
+    });
+    await tagFails(f.client, code);
+    assert.equal(f.calls.at(-1).url, tagURL);
+    assert.equal(f.calls.length, 10);
+  });
+}
+test("refuses a same-name branch appearing during artifact download", async () => {
+  const f = tagFixture({
+    respond: ({ url, count }) =>
+      url === branchURL && count === 2
+        ? json({ ...tagRef(), ref: `refs/heads/${tagName}` })
+        : undefined,
+  });
+  await tagFails(f.client, "ambiguous_workflow_ref");
+  assert.equal(f.calls.length, 11);
+});
+test("refuses a rerun beginning while the tag-bound archive is downloaded", async () => {
+  const f = tagFixture({
+    respond: ({ url, count }) =>
+      url === runURL && count === 2
+        ? json({ ...tagRun(), run_attempt: 2 })
+        : undefined,
+  });
+  await tagFails(f.client, "run_not_current_success");
+});
+test("fresh reads cannot switch even between supported path spellings", async () => {
+  const f = tagFixture({
+    respond: ({ url, count }) =>
+      url === runURL && count === 2
+        ? json({
+            ...tagRun(),
+            path: `${producer().workflowPath}@${workflowRef}`,
+          })
+        : undefined,
+  });
+  await tagFails(f.client, "metadata_changed");
+});
+test("tag and branch endpoints reject redirects without forwarding any credential", async () => {
+  for (const endpoint of [tagURL, branchURL]) {
+    const f = tagFixture({
+      respond: ({ url }) =>
+        url === endpoint
+          ? new Response(null, {
+              status: 302,
+              headers: { location: signedURL },
+            })
+          : undefined,
+    });
+    await tagFails(f.client, "metadata_http_error");
+    assert.equal(
+      f.calls.some(({ url }) => url === signedURL),
+      false,
+    );
+  }
+});
+test("non404 branch failures are not treated as authenticated absence", async () => {
+  for (const status of [401, 403, 409, 500]) {
+    const f = tagFixture({
+      respond: ({ url }) =>
+        url === branchURL
+          ? new Response("private failure body", { status })
+          : undefined,
+    });
+    await tagFails(f.client, "metadata_http_error");
+  }
+});
+test("tag metadata shares streaming caps and cancellation with the entire read", async () => {
+  let cancelled = false;
+  const f = tagFixture({
+    respond: ({ url }) =>
+      url === tagURL
+        ? new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  Buffer.alloc(GITHUB_ARTIFACT_LIMITS.metadataBytes + 1),
+                );
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+          )
+        : undefined,
+  });
+  await tagFails(f.client, "response_limit");
+  assert.equal(cancelled, true);
+});
+test("deadline includes the final tag recheck and cancels stalled metadata", async () => {
+  let cancelled = false;
+  const f = tagFixture({
+    respond: ({ url, count }) =>
+      url === tagURL && count === 2
+        ? new Response(
+            new ReadableStream({
+              cancel() {
+                cancelled = true;
+              },
+            }),
+          )
+        : undefined,
+  });
+  await tagFails(f.client, "deadline_exceeded", { deadlineMs: 25 });
+  assert.equal(cancelled, true);
+  assert.equal(f.calls.length, 10);
+});
+test("parent abort cancels the initial tag request before any run lookup", async () => {
+  let cancelled = false;
+  const controller = new AbortController();
+  const f = tagFixture({
+    respond: ({ url }) => {
+      if (url !== tagURL) return;
+      setTimeout(() => controller.abort(new Error("private reason")), 10);
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+      );
+    },
+  });
+  await tagFails(f.client, "aborted", { signal: controller.signal });
+  assert.equal(cancelled, true);
+  assert.equal(f.calls.length, 1);
+});
