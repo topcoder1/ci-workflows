@@ -14,6 +14,8 @@ Do not use the shared GitHub Actions identity as a substitute for the dedicated 
 
 Mutable review-comment bodies are intentionally not an authenticated intake. Human operators may submit an event file using their authenticated `gh` identity. A publishing App may submit only evidence generated or verified by its trusted workflow. Reviewer/disposition principals must be explicitly allowlisted and different from the PR author. An App's bot ID is resolved from the actual check-publisher identity; callers cannot supply an actor ID to override it.
 
+The separate [trusted receipt intake](TRUSTED-INTAKE.md) validates structured review artifacts against protected producer configuration and independently obtained run metadata before producing a complete event batch. It has no persistence or publishing path. Its injected adapters must authenticate the real producer and retrieve the bounded artifact; synthetic adapter tests do not establish that trust. The existing Claude and Codex review lanes are not connected to this intake.
+
 ## Control files
 
 For application `owner/repo` and PR 17:
@@ -94,4 +96,4 @@ Limits remain explicit: check writes and merge operations are not one atomic tra
 5. Prove application PRs cannot acquire the App credential, modify the authoritative policy/ledger, or satisfy the required context with a different publisher.
 6. Only then wire actual trusted reviewer receipts and run observationally on TechRecon. No production enforcement is enabled by these source files.
 
-`node --test selftest/test_merge_policy_core.mjs selftest/test_merge_policy_state.mjs selftest/test_merge_policy_github.mjs` runs the local deterministic and mocked-API checks. These tests do not substitute for App-source enforcement and live merge tests on GitHub.
+`node --test selftest/test_merge_policy_core.mjs selftest/test_merge_policy_state.mjs selftest/test_merge_policy_github.mjs selftest/test_merge_policy_intake.mjs` runs the local deterministic and mocked-API checks. These tests do not substitute for authenticated live review producers, App-source enforcement and live merge tests on GitHub.

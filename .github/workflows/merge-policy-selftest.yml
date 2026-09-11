@@ -25,5 +25,5 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-      - name: Test deterministic decisions, journal and GitHub adapter
-        run: node --test selftest/test_merge_policy_core.mjs selftest/test_merge_policy_state.mjs selftest/test_merge_policy_github.mjs
+      - name: Test deterministic decisions, journal, GitHub adapter and trusted intake
+        run: node --test selftest/test_merge_policy_core.mjs selftest/test_merge_policy_state.mjs selftest/test_merge_policy_github.mjs selftest/test_merge_policy_intake.mjs
