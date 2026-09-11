@@ -81,6 +81,34 @@ All events are validated through the existing `appendEvent` journal contract aga
 
 ## Protected controller integration
 
+### Durable intake hold
+
+The controller stores a schema-2 `intake` object in the existing per-PR lock
+document. The initial owner and `validating` hold are written in the same
+conditional update, so a process crash cannot leave an operation owner without
+an unresolved durable block. The hold carries the immutable selector, the
+current target and producer binding, the ledger revision before intake, the
+candidate receipt and ledger digest, and (when a publishing integration is
+used) the check identity and decision digest.
+
+The phases are `validating`, `ledger_pending`, `receipt_committed`,
+`publication_pending`, `failed` and `completed`. Every snapshot and decision
+reads the lock; any phase other than `completed` returns
+`REVIEW_INTAKE_UNRESOLVED`, even when an older clean review is present. Ordinary
+evaluation, event recording, unlock and stopped-owner recovery preserve the
+hold. A definite validation rejection records a bounded failure code before
+releasing the owner; an uncertain ledger, lock or check write retains the
+owner for exact reconciliation. Recovery changes the lock sequence while
+retaining the intake operation identity and unresolved phase.
+
+The durable state is intentionally separate from GitHub check publication.
+The protected-state CAS and a remote check update cannot be one transaction, so
+`publication_pending` is reconciled only with the exact lock SHA, generation,
+operation ID, check identity and current target/configuration. Timestamps are
+diagnostic and never expire a hold automatically. The implementation and its
+state-machine tests live in `.github/scripts/merge-policy-intake-hold.mjs` and
+`selftest/test_merge_policy_intake-hold.mjs`.
+
 The controller loads `producers/<owner>/<repo>.json` from the separate control repository. Its exact envelope is `{ "schemaVersion": 1, "repository": "owner/repo", "producers": [...] }`, where each producer entry follows the contract above. The document is pinned to the same immutable control commit as policy and ledger, and its blob identity is rechecked after the asynchronous readers finish and during persistence confirmation. Its exact bytes also participate in the authority digest used by all controller evaluations, so producer changes invalidate prior acceptance. A missing document with reachable path history fails closed instead of resurrecting legacy policy-only reviews. This does not make already-published GitHub checks immediately self-invalidating; trusted change triggers and live enforcement validation remain required.
 
 The operation accepts only the request selector and trusted reader adapters. It retains the operation lock around intake, the single whole-ledger conditional write and readback. Definite pre-write failures cannot persist any receipt event; uncertain mutation outcomes retain the lock and require reconciliation. Identical complete replay performs no ledger write. No check publication, merge, new CLI command or workflow activation is connected to this API.
