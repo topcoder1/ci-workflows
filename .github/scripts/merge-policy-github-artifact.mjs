@@ -32,7 +32,7 @@ function requireThat(condition, code) {
 function positive(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
-function record(value, fields) {
+function record(value, fields, optional = []) {
   requireThat(
     value && [Object.prototype, null].includes(Object.getPrototypeOf(value)),
     "invalid_input",
@@ -40,7 +40,8 @@ function record(value, fields) {
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
   requireThat(
-    keys.length === fields.length && keys.every((key) => fields.includes(key)),
+    fields.every((key) => keys.includes(key)) &&
+      keys.every((key) => fields.includes(key) || optional.includes(key)),
     "invalid_input",
   );
   const result = {};
@@ -55,7 +56,7 @@ function record(value, fields) {
   return result;
 }
 function producerCopy(value) {
-  const p = record(value, PRODUCER_FIELDS);
+  const p = record(value, PRODUCER_FIELDS, ["workflowRef"]);
   requireThat(
     typeof p.repository === "string" &&
       /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(
@@ -83,6 +84,16 @@ function producerCopy(value) {
       /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.json$/.test(p.artifactName),
     "invalid_input",
   );
+  if (Object.hasOwn(p, "workflowRef")) {
+    requireThat(
+      typeof p.workflowRef === "string" &&
+        /^refs\/tags\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(p.workflowRef) &&
+        !p.workflowRef.includes("..") &&
+        !p.workflowRef.endsWith(".") &&
+        !p.workflowRef.toLowerCase().endsWith(".lock"),
+      "invalid_input",
+    );
+  }
   return Object.freeze(p);
 }
 function storageURL(value) {
@@ -166,12 +177,19 @@ function runFacts(raw, producer, selector) {
       raw.conclusion === "success",
     "run_not_current_success",
   );
-  // Direct dispatch is the only supported execution mode. A mutable path suffix
-  // or any reusable workflow needs a separately authenticated execution chain.
+  const tagName = producer.workflowRef?.slice("refs/tags/".length);
+  const expectedPath = tagName
+    ? (raw.path === `${producer.workflowPath}@${tagName}` ||
+        raw.path === `${producer.workflowPath}@${producer.workflowRef}`) &&
+      raw.head_branch === tagName
+    : raw.path === producer.workflowPath ||
+      raw.path === `${producer.workflowPath}@${producer.workflowRevision}`;
+  // The opt-in named path requires separately checked current tag metadata.
+  // Neither that snapshot nor an approved SHA proves historical ref protection
+  // or the complete executing workflow/dependency chain.
   requireThat(
     raw.event === "workflow_dispatch" &&
-      (raw.path === producer.workflowPath ||
-        raw.path === `${producer.workflowPath}@${producer.workflowRevision}`) &&
+      expectedPath &&
       Array.isArray(raw.referenced_workflows) &&
       raw.referenced_workflows.length === 0 &&
       Array.isArray(raw.pull_requests) &&
@@ -193,6 +211,19 @@ function runFacts(raw, producer, selector) {
     updatedAt: date(raw.updated_at),
     startedAt: date(raw.run_started_at),
   });
+}
+function tagRefFacts(raw, producer) {
+  const repositoryURL = `${API}/repos/${producer.repository}`;
+  requireThat(
+    raw?.ref === producer.workflowRef &&
+      raw.url === `${repositoryURL}/git/${producer.workflowRef}` &&
+      raw.object?.type === "commit" &&
+      raw.object.sha === producer.workflowRevision &&
+      raw.object.url ===
+        `${repositoryURL}/git/commits/${producer.workflowRevision}`,
+    "workflow_ref_binding_mismatch",
+  );
+  return Object.freeze({ ref: raw.ref, sha: raw.object.sha });
 }
 function artifactFacts(raw, producer, selector, run) {
   requireThat(
@@ -363,6 +394,11 @@ async function bytes(response, maximum, scope) {
 /** No I/O before read(). tokenProvider and fetchImpl must themselves be trusted.
  * fetchImpl must follow native Node fetch's decoded-response stream contract.
  * Supported HTTP content codings are identity, gzip, deflate and br (one only).
+ * Optional producer.workflowRef supports a current lightweight-tag snapshot,
+ * with no same-name branch and only direct first-attempt dispatch. Both explicit
+ * path spellings (@tagName and @refs/tags/tagName) require the same checked ref.
+ * This needs Contents:read as well as Actions:read. It does not authenticate the
+ * historical dispatch ref, its protection, or the full producer execution.
  * downloadOrigins is an exact administrator-selected origin list, never a URL
  * list extracted from a receipt or PR. No target/intake metadata is returned.
  */
@@ -397,6 +433,10 @@ export function createGitHubArtifactClient({
           record(input, ["runId", "runAttempt", "artifactId"]),
         );
         requireThat(Object.values(selector).every(positive), "invalid_input");
+        requireThat(
+          !trustedProducer.workflowRef || selector.runAttempt === 1,
+          "unsupported_run_attempt",
+        );
         requireThat(
           Number.isSafeInteger(deadlineMs) &&
             deadlineMs > 0 &&
@@ -492,6 +532,27 @@ export function createGitHubArtifactClient({
             throw new ArtifactError("invalid_metadata");
           }
         }
+        async function currentTagRef() {
+          const tagName = trustedProducer.workflowRef.slice(
+            "refs/tags/".length,
+          );
+          const refBase = `${API}/repos/${trustedProducer.repository}/git/ref`;
+          const snapshot = tagRefFacts(
+            await metadata(`${refBase}/tags/${tagName}`),
+            trustedProducer,
+          );
+          const branch = await request(`${refBase}/heads/${tagName}`, true);
+          try {
+            requireThat(branch.status !== 200, "ambiguous_workflow_ref");
+            requireThat(branch.status === 404, "metadata_http_error");
+          } finally {
+            cancelBody(branch);
+          }
+          return snapshot;
+        }
+        const currentTagRefSnapshot = trustedProducer.workflowRef
+          ? await currentTagRef()
+          : undefined;
         const run = runFacts(await metadata(runURL), trustedProducer, selector);
         same(
           runFacts(await metadata(attemptURL), trustedProducer, selector),
@@ -551,12 +612,16 @@ export function createGitHubArtifactClient({
           ),
           artifact,
         );
+        if (currentTagRefSnapshot) {
+          same(await currentTagRef(), currentTagRefSnapshot);
+        }
         scope.check();
         return Object.freeze({
           schemaVersion: 1,
           producer: trustedProducer,
           run,
           artifact,
+          ...(currentTagRefSnapshot ? { currentTagRefSnapshot } : {}),
           get archiveBytes() {
             return Buffer.from(archive);
           },
