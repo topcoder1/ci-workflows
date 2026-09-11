@@ -1,0 +1,57 @@
+# INACTIVE TEMPLATE. Install only after the separately reviewed staging bootstrap.
+# Future path: .github/workflows/merge-policy-selftest.yml in the staging repo.
+# This measurement artifact is never a review receipt or acceptance evidence.
+name: Merge policy transport probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transport-probe:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'topcoder1/techrecon-merge-policy-staging' &&
+      github.repository_id == '1364800834' &&
+      github.run_attempt == '1' &&
+      github.ref == 'refs/tags/merge-policy-transport-probe-v1' &&
+      github.ref_protected == true &&
+      github.sha == github.workflow_sha &&
+      github.workflow_ref == 'topcoder1/techrecon-merge-policy-staging/.github/workflows/merge-policy-selftest.yml@refs/tags/merge-policy-transport-probe-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout approved producer source and history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Set up exact Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.23.2"
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Measure the fixed comparison without a model
+        # Native GITHUB_REPOSITORY/ID, GITHUB_RUN_ATTEMPT, GITHUB_REF/PROTECTED,
+        # GITHUB_SHA and GITHUB_WORKFLOW_SHA/REF are rechecked by the CLI.
+        # No PR checkout, package install, model tool or credential injection.
+        run: node .github/scripts/merge-policy-transport-probe.mjs
+
+      - name: Upload the exact measurement report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: merge-policy-transport-probe.json
+          path: ${{ runner.temp }}/merge-policy-transport-probe/merge-policy-transport-probe.json
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 1
+          include-hidden-files: false
