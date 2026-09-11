@@ -14,13 +14,14 @@ Do not use the shared GitHub Actions identity as a substitute for the dedicated 
 
 Mutable review-comment bodies are intentionally not an authenticated intake. Human operators may submit an event file using their authenticated `gh` identity. A publishing App may submit only evidence generated or verified by its trusted workflow. Reviewer/disposition principals must be explicitly allowlisted and different from the PR author. An App's bot ID is resolved from the actual check-publisher identity; callers cannot supply an actor ID to override it.
 
-The separate [trusted receipt intake](TRUSTED-INTAKE.md) validates structured review artifacts against protected producer configuration and independently obtained run metadata before producing a complete event batch. It has no persistence or publishing path. Its injected adapters must authenticate the real producer and retrieve the bounded artifact; synthetic adapter tests do not establish that trust. The existing Claude and Codex review lanes are not connected to this intake.
+The separate [trusted receipt intake](TRUSTED-INTAKE.md) validates structured review artifacts against protected producer configuration and independently obtained run metadata before producing a complete event batch. The pure intake module has no persistence or publishing path. The controller's separate `recordReviewIntake` API runs intake under its operation lock and conditionally persists the complete candidate in one ledger write. Its injected adapters must authenticate the real producer and retrieve the bounded artifact; synthetic adapter tests do not establish that trust. The existing Claude and Codex review lanes are not connected to this intake.
 
 ## Control files
 
 For application `owner/repo` and PR 17:
 
 - `policies/owner/repo.json`: reviewed per-project policy.
+- `producers/owner/repo.json`: protected producer allowlist for the structured-intake API, with the exact envelope `{ "schemaVersion": 1, "repository": "owner/repo", "producers": [...] }`. Existing record/evaluate commands retain legacy behavior only when this file has never existed. All operations include an existing producer document in evaluated authority; deletion after use requires restoration.
 - `state/owner/repo/17.json`: append-only ledger with revision equal to event count.
 - `locks/owner/repo/17.json`: operation owner, sequence, start time, process/run identity and check receipt.
 
@@ -41,7 +42,7 @@ Policy shape:
 }
 ```
 
-Actor IDs above are synthetic, not configured accounts. Bind real reviewer actors to the trusted review integration before activation. The adapter computes the policy digest from the exact protected policy bytes. Review and disposition records must match the current head, live base and policy digest. Historical findings persist across unrelated commits; a new clean review does not close them. v1 conservatively requires targeted revalidation of closed dispositions after any binding changes.
+Actor IDs above are synthetic, not configured accounts. Bind real reviewer actors to the trusted review integration before activation. For repositories that have never configured structured producers, the adapter preserves the policy-only digest of exact protected policy bytes. Once a producer document exists, evaluated authority incorporates both policy and producer bytes in a domain-separated digest. Adding, changing or removing producer authority therefore cannot silently preserve prior review acceptance. A missing producer document with reachable file history is rejected; removing the file does not restore legacy acceptance. Review and disposition records must match the current head, live base and policy digest. Historical findings persist across unrelated commits; a new clean review does not close them. v1 conservatively requires targeted revalidation of closed dispositions after any binding changes.
 
 ## Commands
 
@@ -66,6 +67,16 @@ node .github/scripts/merge-policy-github.mjs evaluate \
 `record --publish --expected-app-id ...` uses the authenticated dedicated App principal and publishes the updated decision. The App must independently verify the event before this call. Non-publishing commands return `enforcementPublished: false`; they do not claim GitHub is holding the PR. CLI exit codes: 0 for accepted/read-only utility results, 1 for a policy hold, and 2 for invalid input or infrastructure failure. A recorded finding commonly exits 1 because the resulting decision correctly blocks merging; do not blindly resubmit it. Identical event IDs are idempotent, while changed duplicates are rejected.
 
 Events share `id`, `type`, `headSha`, `baseSha`, `policyDigest`, nonempty `reason` and an HTTPS GitHub `evidenceUrl`. The journal assigns authenticated `actorId`. A finding adds `findingId`, `title`, priority 0–3 and repository-relative `path`. A review adds `lane`, `outcome` (`clean`, `findings`, `not_applicable`, `error`) and `findingIds`. A findings review must reference previously delivered finding records in the same scope. A disposition adds `findingId`, action (`fixed`, `disproved`, `accepted_risk`, `reopen`), and a strictly valid UTC `expiresAt` for accepted risk. Consult the engine tests for complete valid examples.
+
+## Atomic receipt persistence API
+
+Trusted controller code may call `await controller.recordReviewIntake({ request, readers })`. This API is deliberately absent from the CLI and existing workflows. The request selects one producer run/attempt/artifact; the metadata and artifact readers are trusted adapters supplied by the control process. The API accepts no caller policy, ledger, context, actor ID or prevalidated candidate.
+
+The operation acquires the existing PR lock, reads the policy, producer allowlist and ledger from one immutable control commit, and obtains live PR head/base context. It invokes the complete receipt validator, then rechecks context, configuration versions, ledger version and lock ownership before one conditional ledger write. An identical complete replay performs no ledger write. A changed duplicate or partial prior receipt is rejected. Existing unresolved findings survive a later clean review.
+
+Readback verifies the entire persisted ledger and returned blob identity. The result reports receipt identity, digest, changed state and verified ledger version with `enforcementPublished: false`. It does not create a check or merge a PR. Definite pre-write rejection releases an owned lock; an uncertain write or unverified readback retains it for the existing explicit recovery procedure. Do not retry an uncertain write under a different receipt identity. A context or producer-authority change after persistence does not erase historical review records. Subsequent evaluations compare them against the current combined authority digest, so stale records cannot regain acceptance merely because the intake operation released its lock.
+
+Atomicity covers one complete receipt in one ledger file. It does not make PR changes, policy/configuration changes, check publication and merges a single transaction. Actual authenticated reviewer producers, bounded network/artifact adapters and live App enforcement tests remain activation prerequisites.
 
 ## Publication and recovery
 
