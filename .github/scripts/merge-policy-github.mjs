@@ -11,6 +11,7 @@ import {
   validatePolicy,
 } from "./merge-policy-core.mjs";
 import { appendEvent, emptyLedger } from "./merge-policy-state.mjs";
+import { prepareReviewIntake } from "./merge-policy-intake.mjs";
 
 export const CHECK_NAME = "merge-policy / decision";
 const REPO = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/;
@@ -35,8 +36,18 @@ function positive(value, name) {
 function same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
-function digest(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
+export function policyDigest(policyBytes, producerBytes) {
+  if (producerBytes === undefined)
+    return createHash("sha256").update(policyBytes).digest("hex");
+  // Length framing binds the exact two protected documents unambiguously. Keep
+  // the legacy policy-only digest only when no producer document is present.
+  return createHash("sha256")
+    .update("merge-policy-with-producers-v1\0")
+    .update(`${policyBytes.length}\0`)
+    .update(policyBytes)
+    .update(`${producerBytes.length}\0`)
+    .update(producerBytes)
+    .digest("hex");
 }
 function executionIdentity() {
   return process.env.GITHUB_ACTIONS === "true"
@@ -114,6 +125,7 @@ export class PolicyController {
     this.now = now;
     const stem = `${repository}/${pullRequest}`;
     this.policyPath = `policies/${repository}.json`;
+    this.producersPath = `producers/${repository}.json`;
     this.ledgerPath = `state/${stem}.json`;
     this.lockPath = `locks/${stem}.json`;
   }
@@ -153,7 +165,7 @@ export class PolicyController {
       body,
     );
   }
-  snapshot({ allowMissingLedger = false } = {}) {
+  snapshot({ allowMissingLedger = false, includeProducers = false } = {}) {
     const controlSha = this.api.call(
       "GET",
       `repos/${this.controlRepository}/git/ref/heads/main`,
@@ -165,6 +177,37 @@ export class PolicyController {
       policy.value.repository === this.repository,
       "Policy repository mismatch",
     );
+    const producers = this.document(
+      this.producersPath,
+      controlSha,
+      !includeProducers,
+    );
+    if (producers) {
+      const config = producers.value;
+      assert(
+        config &&
+          typeof config === "object" &&
+          !Array.isArray(config) &&
+          same(Object.keys(config).sort(), [
+            "producers",
+            "repository",
+            "schemaVersion",
+          ]) &&
+          config.schemaVersion === 1 &&
+          config.repository === this.repository &&
+          Array.isArray(config.producers),
+        "Invalid protected producer configuration",
+      );
+    } else {
+      const history = this.api.call(
+        "GET",
+        `repos/${this.controlRepository}/commits?sha=${controlSha}&path=${encodeURIComponent(this.producersPath)}&per_page=1`,
+      );
+      assert(
+        Array.isArray(history) && history.length === 0,
+        "Previously recorded producer configuration is missing; restore configuration before proceeding",
+      );
+    }
     const pr = this.api.call(
       "GET",
       `repos/${this.repository}/pulls/${this.pullRequest}`,
@@ -196,7 +239,7 @@ export class PolicyController {
       pullRequest: this.pullRequest,
       headSha: pr.head?.sha,
       baseSha,
-      policyDigest: digest(policy.bytes),
+      policyDigest: policyDigest(policy.bytes, producers?.bytes),
       authorId: pr.user?.id,
       draft: pr.draft,
       state: pr.merged_at ? "MERGED" : pr.state === "open" ? "OPEN" : "CLOSED",
@@ -229,6 +272,9 @@ export class PolicyController {
       policySha: policy.sha,
       ledger: ledger?.value ?? emptyLedger(this.repository, this.pullRequest),
       ledgerSha: ledger?.sha ?? null,
+      ...(producers
+        ? { producers: producers.value.producers, producersSha: producers.sha }
+        : {}),
     };
   }
   lock() {
@@ -405,11 +451,13 @@ export class PolicyController {
     this.assertLock(lock);
     const current = this.snapshot({
       allowMissingLedger: snapshot.ledgerSha === null,
+      includeProducers: snapshot.producersSha !== undefined,
     });
     assert(
       same(current.context, snapshot.context) &&
         current.policySha === snapshot.policySha &&
-        current.ledgerSha === snapshot.ledgerSha,
+        current.ledgerSha === snapshot.ledgerSha &&
+        current.producersSha === snapshot.producersSha,
       "State changed during evaluation; stale publication refused",
     );
   }
@@ -627,6 +675,120 @@ export class PolicyController {
       throw new Error(
         `${error.message}${retainLock ? "; operation lock retained for explicit reconciliation" : ""}`,
       );
+    }
+  }
+  // Trusted library entry point only: the adapters authenticate the producer;
+  // producer authority comes from protected control state, never caller JSON.
+  // Persist one complete receipt without creating or changing any GitHub check.
+  async recordReviewIntake(input) {
+    assert(
+      input &&
+        [Object.prototype, null].includes(Object.getPrototypeOf(input)) &&
+        Reflect.ownKeys(input).length === 2 &&
+        Reflect.ownKeys(input).every((key) =>
+          ["readers", "request"].includes(key),
+        ) &&
+        Object.values(Object.getOwnPropertyDescriptors(input)).every(
+          (descriptor) =>
+            descriptor.enumerable && Object.hasOwn(descriptor, "value"),
+        ),
+      "Review batch requires only a request and trusted readers",
+    );
+    const lock = this.lock();
+    let writeAttempted = false;
+    let writeAcknowledged = false;
+    let writeConfirmed = false;
+    try {
+      const snapshot = this.snapshot({
+        allowMissingLedger: true,
+        includeProducers: true,
+      });
+      const candidate = await prepareReviewIntake({
+        request: input.request,
+        readers: input.readers,
+        producers: snapshot.producers,
+        policy: snapshot.policy,
+        context: snapshot.context,
+        ledger: snapshot.ledger,
+      });
+      this.verifyFresh(snapshot, lock);
+      this.assertLock(lock);
+      let expectedLedgerSha = snapshot.ledgerSha;
+      if (candidate.changed) {
+        // There is exactly one durable transition for all findings and the
+        // terminal review. Never split a receipt across single-event record().
+        assert(
+          Buffer.byteLength(`${JSON.stringify(candidate.ledger, null, 2)}\n`) <=
+            MAX_BYTES,
+          "Control document exceeds size limit",
+        );
+        writeAttempted = true;
+        const written = this.write(
+          this.ledgerPath,
+          candidate.ledger,
+          snapshot.ledgerSha,
+          `Record complete policy receipt ${candidate.receiptId}`,
+        );
+        writeAcknowledged = true;
+        expectedLedgerSha = written?.content?.sha;
+        assert(
+          SHA.test(expectedLedgerSha),
+          "Invalid review batch write receipt",
+        );
+      }
+      const current = this.snapshot({ includeProducers: true });
+      this.assertLock(lock);
+      assert(
+        current.ledgerSha === expectedLedgerSha &&
+          same(current.ledger, candidate.ledger),
+        "Review batch readback does not match the complete candidate",
+      );
+      writeConfirmed = true;
+      assert(
+        same(current.context, snapshot.context) &&
+          current.policySha === snapshot.policySha &&
+          current.producersSha === snapshot.producersSha,
+        "State changed after review intake; no current receipt confirmation issued",
+      );
+      this.unlock(lock);
+      return {
+        receiptId: candidate.receiptId,
+        artifactSha256: candidate.artifactSha256,
+        changed: candidate.changed,
+        ledgerRevision: current.ledger.revision,
+        ledgerSha: current.ledgerSha,
+        enforcementPublished: false,
+      };
+    } catch (error) {
+      // A definite HTTP rejection cannot have committed the ledger. An absent
+      // acknowledgement or failed readback might have: keep the lock for an
+      // explicit reconciliation rather than silently replaying the batch.
+      const rejectedWrite =
+        !writeAcknowledged &&
+        Number.isInteger(error.status) &&
+        error.status >= 400 &&
+        error.status < 500;
+      const retainLock =
+        error.uncertainWrite ||
+        error.retainLock ||
+        (writeAttempted && !writeConfirmed && !rejectedWrite);
+      if (!retainLock) {
+        try {
+          this.unlock(lock);
+        } catch {
+          const failure = new Error(
+            "Review batch failed; operation lock retained for explicit reconciliation",
+          );
+          failure.retainLock = true;
+          throw failure;
+        }
+        throw error;
+      }
+      const failure = new Error(
+        `${error.message}; operation lock retained for explicit reconciliation`,
+      );
+      failure.retainLock = true;
+      throw failure;
     }
   }
 }

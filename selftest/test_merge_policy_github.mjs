@@ -7,6 +7,7 @@ import {
   PolicyController,
   parseArgs,
   parseDocument,
+  policyDigest,
 } from "../.github/scripts/merge-policy-github.mjs";
 import {
   appendEvent,
@@ -19,6 +20,7 @@ const pullRequest = 7;
 const appId = 7001;
 const actorId = 50;
 const policyPath = `policies/${repository}.json`;
+const producersPath = `producers/${repository}.json`;
 const ledgerPath = `state/${repository}/${pullRequest}.json`;
 const lockPath = `locks/${repository}/${pullRequest}.json`;
 const hash = (value, algorithm = "sha1") =>
@@ -94,7 +96,10 @@ class FakeGitHub {
       pullRequest,
       headSha: this.pr.head.sha,
       baseSha: this.baseSha,
-      policyDigest: hash(this.files.get(policyPath).bytes, "sha256"),
+      policyDigest: policyDigest(
+        this.files.get(policyPath).bytes,
+        this.files.get(producersPath)?.bytes,
+      ),
       authorId: this.pr.user.id,
       draft: this.pr.draft,
       state: "OPEN",
@@ -967,4 +972,649 @@ test("argument parsing rejects mutable source-comment intake and duplicate optio
     ["unknown"],
   ])
     assert.throws(() => parseArgs(args));
+});
+
+// The injected readers attest synthetic evidence only. This fixture deliberately
+// uses a publisher distinct from GET /user to prove authority comes from the
+// pinned producer document, not the caller's human account or receipt claims.
+function batchFixture(t, findingCount = 2) {
+  const api = new FakeGitHub();
+  const producer = {
+    id: "independent",
+    repository: controlRepository,
+    repositoryId: 91,
+    workflowId: 123,
+    workflowPath: ".github/workflows/review.yml",
+    workflowRevision: "d".repeat(40),
+    lane: "claude",
+    publisherActorId: actorId,
+    artifactName: "review-receipt.json",
+  };
+  api.setFile(producersPath, {
+    schemaVersion: 1,
+    repository,
+    producers: [producer],
+  });
+  const request = {
+    producerId: producer.id,
+    runId: 456,
+    runAttempt: 1,
+    artifactId: 789,
+  };
+  const producerRun = {
+    repository: producer.repository,
+    repositoryId: producer.repositoryId,
+    workflowId: producer.workflowId,
+    workflowPath: producer.workflowPath,
+    workflowRevision: producer.workflowRevision,
+    runId: request.runId,
+    runAttempt: request.runAttempt,
+  };
+  const target = Object.fromEntries(
+    ["repository", "pullRequest", "headSha", "baseSha", "policyDigest"].map(
+      (key) => [key, api.context[key]],
+    ),
+  );
+  const state = {
+    metadataReads: 0,
+    artifactReads: 0,
+    receipt: {
+      schemaVersion: 1,
+      producer: clone(producerRun),
+      target: clone(target),
+      lane: producer.lane,
+      complete: true,
+      outcome: findingCount ? "findings" : "clean",
+      findingCount,
+      summary: "Complete synthetic review.",
+      findings: Array.from({ length: findingCount }, (_, index) => ({
+        key: `finding-${index}`,
+        title: `Finding ${index}`,
+        priority: 1,
+        path: `src/example-${index}.mjs`,
+        reason: `Independent evidence for finding ${index}.`,
+      })),
+    },
+    metadata: {
+      schemaVersion: 1,
+      producer: clone(producerRun),
+      target: clone(target),
+      status: "completed",
+      conclusion: "success",
+      latestRunAttempt: 1,
+      artifact: {
+        id: request.artifactId,
+        name: producer.artifactName,
+        byteLength: 0,
+        sha256: "",
+      },
+    },
+  };
+  function seal() {
+    state.bytes = Buffer.from(JSON.stringify(state.receipt));
+    state.metadata.artifact.byteLength = state.bytes.length;
+    state.metadata.artifact.sha256 = hash(state.bytes, "sha256");
+  }
+  seal();
+  const input = {
+    request,
+    readers: {
+      metadata: async (...args) => {
+        state.metadataReads++;
+        await state.onMetadata?.(...args);
+        return clone(state.metadata);
+      },
+      artifact: async (...args) => {
+        state.artifactReads++;
+        await state.onArtifact?.(...args);
+        return Buffer.from(state.bytes);
+      },
+    },
+  };
+  t.after(() => {
+    assert.equal(api.checks.length, 0);
+    assert.ok(
+      mutations(api).every(
+        ({ method, endpoint }) =>
+          method === "PUT" &&
+          [lockPath, ledgerPath].some(
+            (path) =>
+              endpoint === `repos/${controlRepository}/contents/${path}`,
+          ),
+      ),
+      "batch intake may mutate only its protected lock and ledger",
+    );
+  });
+  return { api, input, state, seal, instance: controller(api) };
+}
+
+test("atomic review intake persists all findings and terminal review in one CAS", async (t) => {
+  const { api, input, instance } = batchFixture(t, 3);
+  const visible = [];
+  api.afterCall = ({ method, endpoint }) => {
+    if (method === "PUT" && endpoint.endsWith(`/contents/${ledgerPath}`))
+      visible.push(api.value(ledgerPath));
+  };
+  const result = await instance.recordReviewIntake(input);
+  assert.equal(ledgerWrites(api).length, 1);
+  assert.equal(ledgerWrites(api)[0].body.sha, undefined);
+  assert.equal(visible.length, 1);
+  assert.deepEqual(
+    visible[0].events.map((item) => item.type),
+    ["finding", "finding", "finding", "review"],
+  );
+  assert.ok(visible[0].events.every((item) => item.actorId === actorId));
+  assert.equal(result.ledgerRevision, 4);
+  assert.equal(result.ledgerSha, api.files.get(ledgerPath).sha);
+  assert.equal(result.changed, true);
+  assert.equal(result.enforcementPublished, false);
+  assert.equal(Object.hasOwn(result, "result"), false);
+  assert.equal(api.value(lockPath).owner, null);
+  assert.equal(
+    api.calls.some(({ endpoint }) => endpoint === "user"),
+    false,
+  );
+  const documentReads = api.calls.filter(
+    ({ method, endpoint }) =>
+      method === "GET" &&
+      [policyPath, producersPath, ledgerPath].some((path) =>
+        endpoint.startsWith(`repos/${controlRepository}/contents/${path}?ref=`),
+      ),
+  );
+  for (let i = 0; i < documentReads.length; i += 3) {
+    const refs = documentReads
+      .slice(i, i + 3)
+      .map(({ endpoint }) => endpoint.split("?ref=")[1]);
+    assert.equal(new Set(refs).size, 1);
+    assert.match(refs[0], /^[a-f0-9]{40}$/);
+  }
+});
+
+test("atomic review intake replays clean receipts without another ledger write", async (t) => {
+  const { api, input, instance } = batchFixture(t, 0);
+  const first = await instance.recordReviewIntake(input);
+  const replay = await instance.recordReviewIntake(input);
+  assert.equal(first.changed, true);
+  assert.equal(replay.changed, false);
+  assert.equal(replay.ledgerRevision, 1);
+  assert.equal(replay.ledgerSha, first.ledgerSha);
+  assert.equal(replay.receiptId, first.receiptId);
+  assert.equal(ledgerWrites(api).length, 1);
+});
+
+test("atomic review intake preserves existing findings when a clean review arrives", async (t) => {
+  const { api, input, instance } = batchFixture(t, 0);
+  api.seed(event(api, "finding"), 40);
+  const previousSha = api.files.get(ledgerPath).sha;
+  const result = await instance.recordReviewIntake(input);
+  assert.equal(result.ledgerRevision, 2);
+  assert.equal(ledgerWrites(api)[0].body.sha, previousSha);
+  assert.equal(api.value(ledgerPath).events[0].findingId, "defect-1");
+  assert.equal(instance.evaluate().result.decision, "hold");
+});
+
+test("atomic review intake refuses caller authority, publication options and accessors before locking", async (t) => {
+  for (const key of [
+    "producers",
+    "policy",
+    "context",
+    "ledger",
+    "actorId",
+    "events",
+    "publish",
+    "producersPath",
+  ]) {
+    const { api, input, instance } = batchFixture(t);
+    await assert.rejects(
+      instance.recordReviewIntake({ ...input, [key]: "author claim" }),
+      /requires only/,
+    );
+    assert.equal(api.calls.length, 0);
+  }
+  const { api, input, instance } = batchFixture(t);
+  let accessed = false;
+  Object.defineProperty(input, "readers", {
+    get() {
+      accessed = true;
+      throw new Error("secret");
+    },
+  });
+  await assert.rejects(instance.recordReviewIntake(input), /requires only/);
+  assert.equal(accessed, false);
+  assert.equal(api.calls.length, 0);
+});
+
+test("atomic review intake refuses absent, malformed, ambiguous and unauthorized protected producers", async (t) => {
+  for (const change of [
+    "missing",
+    "schema",
+    "repository",
+    "unknown",
+    "empty",
+    "duplicate",
+    "unauthorized",
+    "self-review",
+  ]) {
+    const { api, input, state, instance } = batchFixture(t);
+    const config = api.value(producersPath);
+    if (change === "missing") api.deleteFile(producersPath);
+    else {
+      if (change === "schema") config.schemaVersion = 2;
+      if (change === "repository") config.repository = "other/repository";
+      if (change === "unknown") config.untrusted = true;
+      if (change === "empty") config.producers = [];
+      if (change === "duplicate")
+        config.producers.push(clone(config.producers[0]));
+      if (change === "unauthorized") config.producers[0].publisherActorId = 999;
+      if (change === "self-review") {
+        const policy = api.value(policyPath);
+        policy.reviewActors.claude.push(api.pr.user.id);
+        api.setFile(policyPath, policy);
+        config.producers[0].publisherActorId = api.pr.user.id;
+      }
+      api.setFile(producersPath, config);
+    }
+    await assert.rejects(instance.recordReviewIntake(input));
+    assert.equal(state.metadataReads, 0, change);
+    assert.equal(ledgerWrites(api).length, 0, change);
+    assert.equal(api.value(lockPath).owner, null, change);
+  }
+});
+
+test("atomic review intake rejects a bad later finding without persisting the valid prefix", async (t) => {
+  const { api, input, state, seal, instance } = batchFixture(t);
+  state.receipt.findings[1].path = "../outside";
+  seal();
+  await assert.rejects(instance.recordReviewIntake(input), {
+    code: "invalid_event_batch",
+  });
+  assert.equal(api.value(ledgerPath), null);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, null);
+});
+
+test("atomic review intake rejects changed duplicates and partially persisted receipts", async (t) => {
+  for (const partial of [false, true]) {
+    const { api, input, state, seal, instance } = batchFixture(t);
+    await instance.recordReviewIntake(input);
+    if (partial) {
+      const ledger = api.value(ledgerPath);
+      ledger.events.pop();
+      ledger.revision--;
+      api.setFile(ledgerPath, ledger);
+    } else {
+      state.receipt.findings[1].reason = "Altered same-run result";
+      seal();
+    }
+    const before = api.value(ledgerPath);
+    api.calls = [];
+    await assert.rejects(instance.recordReviewIntake(input), {
+      code: partial ? "partial_receipt_history" : "invalid_event_batch",
+    });
+    assert.deepEqual(api.value(ledgerPath), before);
+    assert.equal(ledgerWrites(api).length, 0);
+    assert.equal(api.value(lockPath).owner, null);
+  }
+});
+
+test("atomic review intake refuses failed and changed metadata and suppresses reader errors", async (t) => {
+  for (const change of ["failed", "changed", "exception"]) {
+    const { api, input, state, instance } = batchFixture(t);
+    state.onMetadata = () => {
+      if (change === "exception") throw new Error("PRIVATE_TOKEN_OR_RESPONSE");
+      if (change === "failed") state.metadata.conclusion = "failure";
+      if (change === "changed" && state.metadataReads === 2)
+        state.metadata.latestRunAttempt++;
+    };
+    await assert.rejects(instance.recordReviewIntake(input), (error) => {
+      assert.match(error.message, /^Review intake: /);
+      assert.equal(error.message.includes("PRIVATE_TOKEN_OR_RESPONSE"), false);
+      return true;
+    });
+    assert.equal(ledgerWrites(api).length, 0);
+    assert.equal(api.value(lockPath).owner, null);
+  }
+});
+
+test("atomic review intake cancels stalled readers and releases its lock without state writes", async (t) => {
+  const { api, input, state, instance } = batchFixture(t);
+  let signal;
+  state.onArtifact = (_selector, options) => {
+    signal = options.signal;
+    return new Promise(() => {});
+  };
+  await assert.rejects(instance.recordReviewIntake(input), {
+    code: "adapter_timeout",
+  });
+  assert.equal(signal.aborted, true);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, null);
+});
+
+for (const change of ["head", "base", "policy", "producers", "ledger"]) {
+  test(`atomic review intake refuses ${change} changes during artifact retrieval`, async (t) => {
+    const { api, input, state, instance } = batchFixture(t);
+    state.onArtifact = () => {
+      if (change === "head") api.pr.head.sha = "e".repeat(40);
+      if (change === "base") api.baseSha = "f".repeat(40);
+      if (change === "policy") {
+        const policy = api.value(policyPath);
+        policy.dispositionActors.push(999);
+        api.setFile(policyPath, policy);
+      }
+      if (change === "producers") {
+        const config = api.value(producersPath);
+        config.producers[0].workflowRevision = "e".repeat(40);
+        api.setFile(producersPath, config);
+      }
+      if (change === "ledger") api.seed(event(api, "finding"), 40);
+    };
+    await assert.rejects(
+      instance.recordReviewIntake(input),
+      /stale publication refused/,
+    );
+    assert.equal(ledgerWrites(api).length, 0);
+    assert.equal(api.value(lockPath).owner, null);
+    if (change === "ledger")
+      assert.equal(api.value(ledgerPath).events[0].id, "finding-1");
+    else assert.equal(api.value(ledgerPath), null);
+  });
+}
+
+test("atomic review intake refuses an active operation and never reads its receipt", async (t) => {
+  const { api, input, state, instance } = batchFixture(t);
+  const lock = instance.lock();
+  await assert.rejects(instance.recordReviewIntake(input), /already active/);
+  assert.equal(state.metadataReads, 0);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, lock.owner);
+});
+
+test("atomic review intake cannot clear an operation that replaced its lock during verification", async (t) => {
+  const { api, input, state, instance } = batchFixture(t);
+  state.onArtifact = () =>
+    api.setFile(lockPath, { ...api.value(lockPath), owner: "replacement" });
+  await assert.rejects(instance.recordReviewIntake(input), /lock retained/);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, "replacement");
+});
+
+test("atomic review intake rechecks lock ownership after the freshness snapshot", async (t) => {
+  const { api, input, instance } = batchFixture(t);
+  let ledgerReads = 0;
+  api.beforeCall = ({ method, endpoint }) => {
+    if (
+      method === "GET" &&
+      endpoint.startsWith(`repos/${controlRepository}/contents/${ledgerPath}?`)
+    ) {
+      if (++ledgerReads === 2)
+        api.setFile(lockPath, {
+          ...api.value(lockPath),
+          owner: "late-replacement",
+        });
+    }
+  };
+  await assert.rejects(instance.recordReviewIntake(input), /lock retained/);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, "late-replacement");
+});
+
+test("atomic review intake rejects an oversized durable candidate without stranding its lock", async (t) => {
+  const { api, input, state, seal, instance } = batchFixture(t);
+  for (const finding of state.receipt.findings)
+    finding.reason = "x".repeat(3000);
+  seal();
+  const maximum = 2 * 1024 * 1024;
+  const ledger = emptyLedger(repository, pullRequest);
+  const largeEvent = event(api, "finding", {
+    actorId: 40,
+    reason: "x".repeat(4096),
+  });
+  ledger.events = Array.from(
+    { length: Math.floor(maximum / jsonBytes(largeEvent).length) },
+    (_, index) => ({
+      ...largeEvent,
+      id: `historical-${index}`,
+      findingId: `historical-${index}`,
+    }),
+  );
+  ledger.revision = ledger.events.length;
+  while (jsonBytes(ledger).length > maximum - 256) {
+    ledger.events.pop();
+    ledger.revision--;
+  }
+  api.setFile(ledgerPath, ledger);
+  await assert.rejects(
+    instance.recordReviewIntake(input),
+    /Control document exceeds size limit/,
+  );
+  assert.deepEqual(api.value(ledgerPath), ledger);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, null);
+});
+
+for (const existing of [false, true]) {
+  test(`atomic review intake CAS preserves a concurrent ${existing ? "update" : "creation"}`, async (t) => {
+    const { api, input, instance } = batchFixture(t);
+    if (existing) api.seed(event(api), 20);
+    api.beforeCall = ({ method, endpoint }) => {
+      if (method === "PUT" && endpoint.endsWith(`/contents/${ledgerPath}`))
+        api.seed(
+          event(api, "finding", { id: "concurrent", findingId: "concurrent" }),
+          40,
+        );
+    };
+    await assert.rejects(instance.recordReviewIntake(input), /409/);
+    assert.equal(ledgerWrites(api).length, 1);
+    assert.equal(api.value(ledgerPath).events.at(-1).id, "concurrent");
+    assert.equal(api.value(ledgerPath).revision, existing ? 2 : 1);
+    assert.equal(api.value(lockPath).owner, null);
+  });
+}
+
+test("atomic review intake cannot recreate a historically deleted ledger", async (t) => {
+  const { api, input, state, instance } = batchFixture(t);
+  api.seed(event(api), 20);
+  api.deleteFile(ledgerPath);
+  await assert.rejects(
+    instance.recordReviewIntake(input),
+    /Previously recorded ledger is missing/,
+  );
+  assert.equal(state.metadataReads, 0);
+  assert.equal(ledgerWrites(api).length, 0);
+  assert.equal(api.value(lockPath).owner, null);
+});
+
+for (const committed of [false, true]) {
+  for (const status of [null, 503]) {
+    test(`atomic review intake retains uncertain ${status ?? "timeout"} writes with committed=${committed}`, async (t) => {
+      const { api, input, instance } = batchFixture(t);
+      api[committed ? "afterCall" : "beforeCall"] = ({ method, endpoint }) => {
+        if (method === "PUT" && endpoint.endsWith(`/contents/${ledgerPath}`)) {
+          const error = httpError(status);
+          error.uncertainWrite = true;
+          throw error;
+        }
+      };
+      await assert.rejects(instance.recordReviewIntake(input), /lock retained/);
+      assert.equal(ledgerWrites(api).length, 1);
+      assert.equal(api.value(ledgerPath)?.revision ?? 0, committed ? 3 : 0);
+      assert.equal(typeof api.value(lockPath).owner, "string");
+      const metadataReads = api.calls.length;
+      await assert.rejects(
+        instance.recordReviewIntake(input),
+        /already active/,
+      );
+      assert.equal(api.calls.length, metadataReads + 1);
+      assert.equal(ledgerWrites(api).length, 1);
+    });
+  }
+}
+
+for (const failure of [
+  "bad-write-sha",
+  "wrong-readback-sha",
+  "wrong-readback-content",
+  "readback-404",
+  "readback-outage",
+]) {
+  test(`atomic review intake retains its lock for ${failure}`, async (t) => {
+    const { api, input, instance } = batchFixture(t);
+    let written = false;
+    api.beforeCall = ({ method, endpoint }) => {
+      if (
+        written &&
+        method === "GET" &&
+        endpoint.startsWith(
+          `repos/${controlRepository}/contents/${ledgerPath}?`,
+        )
+      ) {
+        if (failure === "readback-404") throw httpError(404);
+        if (failure === "readback-outage") throw httpError(503);
+      }
+    };
+    api.afterCall = ({ method, endpoint }, response) => {
+      if (method === "PUT" && endpoint.endsWith(`/contents/${ledgerPath}`)) {
+        written = true;
+        if (failure === "bad-write-sha") response.content.sha = "bad";
+      }
+      if (
+        written &&
+        method === "GET" &&
+        endpoint.startsWith(
+          `repos/${controlRepository}/contents/${ledgerPath}?`,
+        )
+      ) {
+        if (failure === "wrong-readback-sha") response.sha = "e".repeat(40);
+        if (failure === "wrong-readback-content") {
+          const wrong = emptyLedger(repository, pullRequest);
+          response.content = jsonBytes(wrong).toString("base64");
+        }
+      }
+    };
+    await assert.rejects(instance.recordReviewIntake(input), /lock retained/);
+    assert.equal(ledgerWrites(api).length, 1);
+    assert.equal(api.value(ledgerPath).revision, 3);
+    assert.equal(typeof api.value(lockPath).owner, "string");
+  });
+}
+
+for (const change of ["head", "base", "policy", "producers"]) {
+  test(`atomic review intake does not confirm current evidence after post-write ${change} change`, async (t) => {
+    const { api, input, instance } = batchFixture(t);
+    api.afterCall = ({ method, endpoint }) => {
+      if (method !== "PUT" || !endpoint.endsWith(`/contents/${ledgerPath}`))
+        return;
+      if (change === "head") api.pr.head.sha = "e".repeat(40);
+      if (change === "base") api.baseSha = "e".repeat(40);
+      if (change === "policy") {
+        const policy = api.value(policyPath);
+        policy.dispositionActors.push(999);
+        api.setFile(policyPath, policy);
+      }
+      if (change === "producers") {
+        const config = api.value(producersPath);
+        config.producers[0].workflowRevision = "e".repeat(40);
+        api.setFile(producersPath, config);
+      }
+    };
+    await assert.rejects(
+      instance.recordReviewIntake(input),
+      /State changed after review intake/,
+    );
+    assert.equal(api.value(ledgerPath).revision, 3);
+    assert.equal(ledgerWrites(api).length, 1);
+    assert.equal(api.value(lockPath).owner, null);
+  });
+}
+
+test("atomic review intake remains absent from CLI and preserves never-configured legacy operations", () => {
+  const api = new FakeGitHub();
+  const instance = controller(api);
+  assert.equal(instance.record({ event: event(api) }).changed, true);
+  assert.equal(instance.evaluate().result.decision, "pass");
+  assert.equal(
+    instance.snapshot().context.policyDigest,
+    hash(api.files.get(policyPath).bytes, "sha256"),
+  );
+  const producerHistory = api.calls.filter(({ endpoint }) =>
+    endpoint.includes(`path=${encodeURIComponent(producersPath)}`),
+  );
+  assert.ok(producerHistory.length > 0);
+  assert.ok(
+    producerHistory.every(({ endpoint }) =>
+      /commits\?sha=[a-f0-9]{40}&path=.*&per_page=1$/.test(endpoint),
+    ),
+  );
+  assert.throws(() => parseArgs(["record-review-intake"]), /Command must be/);
+});
+
+test("atomic review intake policy digest binds domain and exact framed document bytes", () => {
+  const policy = Buffer.from("policy");
+  assert.equal(policyDigest(policy), hash(policy, "sha256"));
+  assert.notEqual(policyDigest(policy, Buffer.alloc(0)), policyDigest(policy));
+  assert.notEqual(
+    policyDigest(Buffer.from("ab"), Buffer.from("c")),
+    policyDigest(Buffer.from("a"), Buffer.from("bc")),
+  );
+  assert.notEqual(
+    policyDigest(policy, Buffer.from("producers")),
+    policyDigest(policy, Buffer.from("producers\n")),
+  );
+});
+
+test("atomic review intake clean receipt raced by producer revocation cannot pass later evaluation", async (t) => {
+  const { api, input, instance } = batchFixture(t, 0);
+  api.beforeCall = ({ method, endpoint }) => {
+    if (method === "PUT" && endpoint.endsWith(`/contents/${ledgerPath}`)) {
+      const config = api.value(producersPath);
+      config.producers[0].workflowRevision = "e".repeat(40);
+      api.setFile(producersPath, config);
+    }
+  };
+  await assert.rejects(
+    instance.recordReviewIntake(input),
+    /State changed after review intake/,
+  );
+  assert.equal(api.value(ledgerPath).revision, 1);
+  assert.equal(api.value(lockPath).owner, null);
+  assert.equal(instance.evaluate().result.decision, "hold");
+});
+
+for (const change of ["workflow", "actor", "removal"]) {
+  test(`atomic review intake clean success cannot survive subsequent producer ${change}`, async (t) => {
+    const { api, input, instance } = batchFixture(t, 0);
+    await instance.recordReviewIntake(input);
+    assert.equal(instance.evaluate().result.decision, "pass");
+    if (change === "removal") api.deleteFile(producersPath);
+    else {
+      const config = api.value(producersPath);
+      if (change === "workflow")
+        config.producers[0].workflowRevision = "e".repeat(40);
+      if (change === "actor") config.producers[0].publisherActorId = 999;
+      api.setFile(producersPath, config);
+    }
+    if (change === "removal")
+      assert.throws(
+        () => instance.evaluate(),
+        /Previously recorded producer configuration is missing/,
+      );
+    else assert.equal(instance.evaluate().result.decision, "hold");
+    assert.equal(api.value(ledgerPath).revision, 1);
+  });
+}
+
+test("atomic review intake producer opt-in invalidates legacy review and deletion cannot revive it", () => {
+  const api = new FakeGitHub();
+  const instance = controller(api);
+  api.seed(event(api), 20);
+  assert.equal(instance.evaluate().result.decision, "pass");
+  api.setFile(producersPath, { schemaVersion: 1, repository, producers: [] });
+  assert.equal(instance.evaluate().result.decision, "hold");
+  api.deleteFile(producersPath);
+  assert.throws(
+    () => instance.evaluate(),
+    /Previously recorded producer configuration is missing/,
+  );
+  assert.equal(mutations(api).length, 0);
 });
