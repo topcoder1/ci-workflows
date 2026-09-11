@@ -921,6 +921,16 @@ export class PolicyController {
         error.uncertainWrite ||
         error.retainLock ||
         (writeAttempted && !writeConfirmed && !rejectedWrite);
+      // Once the receipt is marked completed, a later unlock failure cannot
+      // be represented as a failed intake: completed -> failed is invalid and
+      // would misstate a durable commit. Retain the exact lock for recovery.
+      if (lock.intake?.phase === "completed") {
+        const failure = new Error(
+          `${error.message}; operation lock retained for explicit reconciliation`,
+        );
+        failure.retainLock = true;
+        throw failure;
+      }
       if (retainLock) {
         const failure = new Error(
           `${error.message}; operation lock retained for explicit reconciliation`,

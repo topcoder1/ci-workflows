@@ -13,6 +13,7 @@ import {
   appendEvent,
   emptyLedger,
 } from "../.github/scripts/merge-policy-state.mjs";
+import { createIntakeHold } from "../.github/scripts/merge-policy-intake-hold.mjs";
 
 const repository = "policy-staging/example";
 const controlRepository = "policy-staging/control";
@@ -926,6 +927,38 @@ test("stopped-owner recovery publishes failure and clears only its exact lock", 
   );
 });
 
+test("stopped-owner recovery preserves an unresolved intake generation", () => {
+  const api = ready();
+  const intake = createIntakeHold(
+    { producerId: "staging", runId: 101, runAttempt: 1, artifactId: 202 },
+    1,
+  );
+  const lock = {
+    schemaVersion: 2,
+    owner: "staging-owner",
+    sequence: 1,
+    startedAt: "2000-01-01T00:00:00Z",
+    execution: { kind: "actions", repository: controlRepository, runId: 101 },
+    intake,
+  };
+  api.runs.set(101, { id: 101, status: "completed" });
+  api.setFile(lockPath, lock);
+  const result = controller(api).recover({
+    expectedOwner: lock.owner,
+    expectedLockSha: api.files.get(lockPath).sha,
+  });
+  assert.equal(result.recovered, true);
+  const recovered = api.value(lockPath);
+  assert.equal(recovered.owner, null);
+  assert.equal(recovered.intake.phase, "validating");
+  assert.equal(recovered.intake.generation, 2);
+  assert.equal(recovered.intake.operationId, intake.operationId);
+  assert.equal(
+    controller(api).evaluate().result.code,
+    "REVIEW_INTAKE_UNRESOLVED",
+  );
+});
+
 test("recovery also invalidates an owned prior successful check", () => {
   const api = ready();
   controller(api).evaluate({ publish: true });
@@ -1282,6 +1315,8 @@ test("atomic review intake refuses failed and changed metadata and suppresses re
     });
     assert.equal(ledgerWrites(api).length, 0);
     assert.equal(api.value(lockPath).owner, null);
+    assert.equal(api.value(lockPath).intake.phase, "failed");
+    assert.equal(api.value(lockPath).intake.failureCode, "VALIDATION_FAILED");
   }
 });
 
@@ -1298,6 +1333,8 @@ test("atomic review intake cancels stalled readers and releases its lock without
   assert.equal(signal.aborted, true);
   assert.equal(ledgerWrites(api).length, 0);
   assert.equal(api.value(lockPath).owner, null);
+  assert.equal(api.value(lockPath).intake.phase, "failed");
+  assert.equal(api.value(lockPath).intake.failureCode, "VALIDATION_FAILED");
 });
 
 for (const change of ["head", "base", "policy", "producers", "ledger"]) {
