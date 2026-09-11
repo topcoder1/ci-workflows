@@ -49,6 +49,8 @@ The September 11 coordinator evidence packet retains the earlier bounded bootstr
 
 ## Reader compatibility remains unresolved
 
-The current artifact reader accepts a bare workflow path or `workflowPath@<approved source SHA>`. A tag-dispatched run may return a named `path@ref` suffix instead. This probe must establish that actual metadata form. If the reader rejects it, preserve the refusal and review a narrowly scoped adapter change that independently binds the exact selected ref, source commit, workflow identity and execution mode. Do not strip or ignore the suffix to obtain a pass.
+The default artifact reader accepts a bare workflow path or `workflowPath@<approved source SHA>`. Its explicit `producer.workflowRef` option now supports a restricted lightweight tag by authenticating the exact current tag commit and same-name branch absence before and after retrieval. That mode requires attempt1, the exact native tag name in `head_branch`, and only the enumerated short-tag or full-ref workflow-path suffix. Contents read is needed in addition to Actions read. Its returned snapshot does not prove historical protection or full execution provenance, and transient namespace changes between reads remain undetectable without independently enforced controls.
+
+This probe must still establish the actual native metadata form under verified protection. If the reader rejects it, preserve the refusal and review the discrepancy; do not strip or ignore a suffix to obtain a pass. Neither the new mocked HTTP tests nor a local synthetic-runtime CLI smoke proves native GitHub compatibility.
 
 Even after transport succeeds, this report is not a review receipt. Real reviewer execution, independent target/policy authentication, authenticated intake, producer administration, failure recovery and a clean accepted merge remain separate unfinished validations. No production or fleet enforcement is activated by this template.
