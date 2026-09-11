@@ -8,11 +8,11 @@ The only proposed destination is `.github/workflows/merge-policy-selftest.yml` i
 
 The template permits only direct `workflow_dispatch`, without inputs, on attempt 1. Its one job checks repository name and ID, the exact protected tag, the full workflow ref, and equality of `github.sha` and `github.workflow_sha`. The CLI repeats the native runtime checks and verifies that the source checkout's `HEAD` equals `GITHUB_WORKFLOW_SHA`. GitHub context flags and values copied into an artifact are preliminary execution claims; they do not replace independent source, run, identity or effective-protection verification. A skipped job or green run alone is not successful probe evidence.
 
-The source checkout uses that workflow SHA and full history, with persistent checkout credentials, LFS and submodules disabled. There is no target checkout. The approved source history must already contain both fixed target Git objects; the collector fails if either is absent. No command, action, hook, package, dependency or model tool from target PR content is run. The sole shell step invokes the reviewed `.github/scripts/merge-policy-transport-probe.mjs` from the approved source checkout.
+The source checkout uses that workflow SHA and full history, with persistent checkout credentials, LFS and submodules disabled. There is no target checkout. The approved source history must already contain both fixed target Git objects; the collector fails if either is absent. No command, action, hook, package, dependency or model tool from target PR content is run. The CLI uses native `import.meta.main` (Node22.18 or later) so aliased or symlinked entry paths cannot silently skip execution. The sole shell step invokes the reviewed `.github/scripts/merge-policy-transport-probe.mjs` from the approved source checkout.
 
 The template pins the complete action references:
 
-| Component       | Approved selection                                                         |
+| Component       | Pinned candidate                                                           |
 | --------------- | -------------------------------------------------------------------------- |
 | Checkout        | `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`                |
 | Node setup      | `actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38`              |
@@ -31,7 +31,7 @@ The synthetic target is staging PR 1 with:
 - Independently measured comparison SHA256: `cd663d3aa45e822cadb97651940d004b06ede75f8468c25b9d893dfabe67dca7`
 - Measured inventory: 3 changed files, 103,622 bytes of before/after content and 110,131 bytes in the full comparison packet.
 
-The CLI recollects the complete supported comparison and requires its exact expected digest. It always projects a measurement fingerprint report containing every measured path, status, mode, Git blob ID, byte count and blob SHA256, plus the full comparison SHA256. It does not include blob text. This projection is the probe's unconditional format, not a fallback that drops content when an artifact is oversized. The full measured packet exceeds the 64 KiB artifact limit; the complete fingerprint report must itself fit the CLI's 64 KiB bound or the probe fails.
+The CLI recollects the complete supported comparison and requires its exact expected digest. It always projects a measurement fingerprint report containing every measured path, status, mode, Git blob ID, byte count and blob SHA256, plus the full comparison SHA256. It does not include blob text. This projection is the probe's unconditional format, not a fallback that drops content when an artifact is oversized. The full measured packet exceeds the local JSON reader's 64 KiB bound; the complete fingerprint report must itself fit the CLI's 64 KiB bound or the probe fails.
 
 The report is written exclusively to `${RUNNER_TEMP}/merge-policy-transport-probe/merge-policy-transport-probe.json`; a pre-existing output is an error. Upload selects only that exact file, with artifact name `merge-policy-transport-probe.json`, missing-file failure, no overwrite, compression level 0, one-day retention and hidden files excluded. There is no fallback upload of a directory, workspace, partial report or model output.
 
@@ -45,7 +45,7 @@ The report's comparison digest binds the complete measured packet. It cannot be 
 4. Dispatch only the exact protected named tag and capture the returned run ID and URLs. Independently confirm repository ID, workflow ID/path, direct dispatch, selected tag, approved source SHA, current attempt 1, terminal success and the exact artifact ID/digest. Do not select the newest run from a list or treat a rerun as this first-attempt probe. The artifact's one-day retention makes prompt evidence collection necessary; absence or expiry is a failed validation prerequisite.
 5. Keep this no-model probe separate from any later credential-bearing review. Before a future model run, verify the exact secret exposure boundary and repository plan/configuration. A protected tag does not by itself prevent another writable ref from accessing a repository-wide secret. Never expose the App private key or a broad maintainer credential to model execution.
 
-The prior [bounded staging bootstrap plan](/Users/topcoder1/.codex/visualizations/2026/09/08/01a082ed-ba0d-7e32-be86-c191e2f9e630/data-only-producer-2026-09-11/BOOTSTRAP-PLAN.md) records the initial feasibility evidence and unresolved capability checks. Those historical observations are not fresh installation authorization or proof of current GitHub configuration.
+The September 11 coordinator evidence packet retains the earlier bounded bootstrap analysis and unresolved capability checks. GitHub documents the [default-branch registration and dispatch event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch), [named-ref dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event), [runtime variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables) and [pinned upload action](https://github.com/actions/upload-artifact/blob/ea165f8d65b6e75b540449e92b4886f43607fa02/README.md). Historical observations are not fresh installation authorization or proof of current GitHub configuration.
 
 ## Reader compatibility remains unresolved
 
