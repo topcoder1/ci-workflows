@@ -400,6 +400,46 @@ test("protected configuration refuses executable or oversized structures without
   assert.equal(invoked, 0);
 });
 
+test("protected configuration rejects top-level, nested and revoked proxies before traps run", () => {
+  let invoked = 0;
+  const trap = {
+    get() {
+      invoked++;
+      throw new Error("proxy trap");
+    },
+    ownKeys() {
+      invoked++;
+      throw new Error("proxy trap");
+    },
+    getPrototypeOf() {
+      invoked++;
+      throw new Error("proxy trap");
+    },
+    getOwnPropertyDescriptor() {
+      invoked++;
+      throw new Error("proxy trap");
+    },
+  };
+  const topLevel = new Proxy(configurationFixture(), trap);
+  assert.throws(
+    () => validateProducerConfiguration(topLevel),
+    /Review intake:/,
+  );
+
+  const nested = configurationFixture();
+  nested.configuration.producers[0] = new Proxy(
+    nested.configuration.producers[0],
+    trap,
+  );
+  assert.throws(() => validateProducerConfiguration(nested), /Review intake:/);
+
+  const revokedTarget = configurationFixture();
+  const { proxy, revoke } = Proxy.revocable(revokedTarget, trap);
+  revoke();
+  assert.throws(() => validateProducerConfiguration(proxy), /Review intake:/);
+  assert.equal(invoked, 0);
+});
+
 test("repository authority permits a future PR author while intake still refuses selected self-review", async () => {
   const { input, state } = fixture();
   input.context.authorId = input.producers[0].publisherActorId;

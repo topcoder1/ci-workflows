@@ -1,7 +1,7 @@
 // Disconnected structured-review intake. Readers and protected configuration are
 // trust inputs; this module does not authenticate GitHub or publish decisions.
 import { createHash } from "node:crypto";
-import { TextDecoder } from "node:util";
+import { TextDecoder, types } from "node:util";
 import { validateContext, validatePolicy } from "./merge-policy-core.mjs";
 import { appendEvent } from "./merge-policy-state.mjs";
 
@@ -45,7 +45,10 @@ function requireThat(condition, code = "invalid_input") {
 }
 function shape(value, names) {
   requireThat(
-    value !== null && typeof value === "object" && !Array.isArray(value),
+    value !== null &&
+      typeof value === "object" &&
+      !types.isProxy(value) &&
+      !Array.isArray(value),
   );
   requireThat([Object.prototype, null].includes(Object.getPrototypeOf(value)));
   const own = Reflect.ownKeys(value);
@@ -58,7 +61,8 @@ function shape(value, names) {
   }
 }
 // Inspect descriptors before reading values. Bound even protected inputs, and do
-// not invoke accessors, toJSON, iterators, or user-defined prototype methods.
+// reject proxies before reflection; do not invoke accessors, toJSON, iterators,
+// or user-defined prototype methods.
 function copyData(value) {
   const ancestors = new Set();
   let nodes = 0;
@@ -78,7 +82,12 @@ function copyData(value) {
       requireThat(Number.isFinite(item));
       return item;
     }
-    requireThat(item && typeof item === "object" && !ancestors.has(item));
+    requireThat(
+      item &&
+        typeof item === "object" &&
+        !types.isProxy(item) &&
+        !ancestors.has(item),
+    );
     const array = Array.isArray(item);
     requireThat(
       array
