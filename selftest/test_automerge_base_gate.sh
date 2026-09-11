@@ -96,19 +96,21 @@ fi
 # cleared the gate before a retarget would otherwise arm against an
 # unprotected base and — having no required checks there — merge instantly.
 enable_block=$(awk '/name: Enable auto-merge/{f=1} f' "$WF")
-if echo "$enable_block" | grep -q 'could not re-read the base ref before arming'; then
+# Feed these potentially large blocks directly. With pipefail, grep -q may
+# close an echo pipe after a match and turn SIGPIPE into a false gate failure.
+if grep -q 'could not re-read the base ref before arming' <<< "$enable_block"; then
   echo "✓ the arm re-binds to the base this run's gate validated"
 else
   echo "✗ the arm does not revalidate the base — a retarget between the gate read and the arm merges under unvalidated routing"
   failed=1
 fi
-if echo "$enable_block" | grep -q 'is no longer present and the base is not the default branch'; then
+if grep -q 'is no longer present and the base is not the default branch' <<< "$enable_block"; then
   echo "✓ the arm re-checks the opt-in label on a non-default base"
 else
   echo "✗ the arm does not re-check the opt-in label — removing it before the arm still merges on a non-default base"
   failed=1
 fi
-if echo "$enable_block" | grep -q 'became the head branch of an open PR since'; then
+if grep -q 'became the head branch of an open PR since' <<< "$enable_block"; then
   echo "✓ the arm re-lists open heads (a parent PR opened after the gate fires no event for this child)"
 else
   echo "✗ the arm does not re-list open heads — a parent PR opened between gate and arm still merges the child into it"
@@ -128,8 +130,8 @@ fi
 prearm=$(echo "$enable_block" \
   | awk '/gh pr merge --auto/{armed=1} !armed {print}' \
   | awk '/disarm_then_exit\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf')
-if echo "$enable_block" | grep -q 'disarm_then_exit()' \
-  && ! echo "$prearm" | grep -qE '^ *exit [01]$'; then
+if grep -q 'disarm_then_exit()' <<< "$enable_block" \
+  && ! grep -qE '^ *exit [01]$' <<< "$prearm"; then
   echo "✓ every pre-arm rejection disarms an existing arm (no bare exit-without-disarm)"
 else
   echo "✗ a pre-arm rejection exits without disarming — an arm placed by an earlier run survives the rejection"
