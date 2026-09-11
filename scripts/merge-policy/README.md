@@ -107,4 +107,6 @@ Limits remain explicit: check writes and merge operations are not one atomic tra
 5. Prove application PRs cannot acquire the App credential, modify the authoritative policy/ledger, or satisfy the required context with a different publisher.
 6. Only then wire actual trusted reviewer receipts and run observationally on TechRecon. No production enforcement is enabled by these source files.
 
-`node --test selftest/test_merge_policy_core.mjs selftest/test_merge_policy_state.mjs selftest/test_merge_policy_github.mjs selftest/test_merge_policy_intake.mjs` runs the local deterministic and mocked-API checks. These tests do not substitute for authenticated live review producers, App-source enforcement and live merge tests on GitHub.
+The disconnected GitHub artifact client and in-memory ZIP extractor supply bounded, digest-verified storage retrieval. They explicitly leave artifact-attempt and actual-review comparison authentication unproved; they cannot substitute for the trusted execution verifier needed by intake. See [the retrieval boundary](TRUSTED-INTAKE.md#disconnected-artifact-retrieval) before using them.
+
+`node --test selftest/test_merge_policy_core.mjs selftest/test_merge_policy_state.mjs selftest/test_merge_policy_github.mjs selftest/test_merge_policy_intake.mjs selftest/test_merge_policy_github_artifact.mjs selftest/test_merge_policy_artifact_zip.mjs` runs the local deterministic and mocked-API checks. These tests do not substitute for authenticated live review producers, App-source enforcement and live merge tests on GitHub.
