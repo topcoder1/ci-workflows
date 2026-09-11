@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import test from "node:test";
 import { createGitHubArtifactClient, GITHUB_ARTIFACT_LIMITS } from "../.github/scripts/merge-policy-github-artifact.mjs";
 
@@ -254,6 +255,44 @@ test("oversized content-length is rejected without consuming the body", async ()
 test("declared length mismatch and malformed JSON are sanitized", async () => {
   await fails(fixture({ respond: ({ url }) => url === runURL ? json(run(), { headers: { "content-length": "1" } }) : undefined }).client, "response_length_mismatch");
   await fails(fixture({ respond: ({ url }) => url === runURL ? new Response("secret malformed {") : undefined }).client, "invalid_metadata");
+});
+test("decoded gzip metadata and br ZIP use wire lengths only as wire bounds", async () => {
+  const f = fixture({ respond: ({ url }) => {
+    // Native fetch presents decoded streams but preserves encoding and wire
+    // Content-Length headers. These offline fixtures reproduce that contract.
+    if (url === runURL || url === attemptURL || url === artifactURL) {
+      const raw = Buffer.from(JSON.stringify(url === artifactURL ? artifact() : run()));
+      const wireLength = gzipSync(raw).length;
+      assert.notEqual(wireLength, raw.length);
+      return new Response(raw, { headers: { "content-encoding": "gzip", "content-length": String(wireLength) } });
+    }
+    if (url === signedURL) {
+      const wireLength = brotliCompressSync(archive).length;
+      assert.notEqual(wireLength, archive.length);
+      return new Response(archive, { headers: { "content-encoding": "br", "content-length": String(wireLength) } });
+    }
+  } });
+  const result = await f.client.read(selector());
+  assert.deepEqual(result.archiveBytes, archive);
+  assert.equal(result.artifact.archiveByteLength, archive.length);
+  assert.equal(result.artifact.archiveSha256, hash(archive));
+});
+test("small encoded Content-Length cannot bypass the decoded streaming cap", async () => {
+  let cancelled = false;
+  const decoded = Buffer.alloc(GITHUB_ARTIFACT_LIMITS.metadataBytes + 1, 32);
+  const wireLength = gzipSync(decoded).length;
+  assert.ok(wireLength < GITHUB_ARTIFACT_LIMITS.metadataBytes);
+  const body = new ReadableStream({ start(c) { c.enqueue(decoded); }, cancel() { cancelled = true; } });
+  await fails(fixture({ respond: ({ url }) => url === runURL ? new Response(body, { headers: { "content-encoding": "gzip", "content-length": String(wireLength) } }) : undefined }).client, "response_limit");
+  assert.equal(cancelled, true);
+});
+test("unsupported or stacked response encodings are refused and cancelled", async () => {
+  for (const encoding of ["compress", "gzip, br"]) {
+    let cancelled = false;
+    const body = new ReadableStream({ cancel() { cancelled = true; } });
+    await fails(fixture({ respond: ({ url }) => url === runURL ? new Response(body, { headers: { "content-encoding": encoding } }) : undefined }).client, "unsupported_response_encoding");
+    assert.equal(cancelled, true);
+  }
 });
 test("pre-aborted parent prevents credential access and all requests", async () => {
   const f = fixture();

@@ -169,6 +169,12 @@ async function bytes(response, maximum, scope) {
   let reader;
   let finished = false;
   try {
+    const encoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+    requireThat(encoding === undefined || ["identity", "gzip", "deflate", "br"].includes(encoding), "unsupported_response_encoding");
+    const decoded = encoding !== undefined && encoding !== "identity";
+    // Native Node fetch decodes these content codings while retaining the wire
+    // Content-Length. Bound both declared wire size and streamed decoded bytes;
+    // only an identity representation has comparable wire and stream lengths.
     const length = response.headers.get("content-length");
     requireThat(length === null || (/^\d+$/.test(length) && Number(length) <= maximum), "response_limit");
     requireThat(response.body && typeof response.body.getReader === "function", "invalid_response");
@@ -183,7 +189,7 @@ async function bytes(response, maximum, scope) {
       requireThat(total <= maximum, "response_limit");
       chunks.push(Buffer.from(value));
     }
-    requireThat(total > 0 && (length === null || Number(length) === total), "response_length_mismatch");
+    requireThat(total > 0 && (decoded || length === null || Number(length) === total), "response_length_mismatch");
     finished = true;
     return Buffer.concat(chunks, total);
   } finally {
@@ -197,6 +203,8 @@ async function bytes(response, maximum, scope) {
 }
 
 /** No I/O before read(). tokenProvider and fetchImpl must themselves be trusted.
+ * fetchImpl must follow native Node fetch's decoded-response stream contract.
+ * Supported HTTP content codings are identity, gzip, deflate and br (one only).
  * downloadOrigins is an exact administrator-selected origin list, never a URL
  * list extracted from a receipt or PR. No target/intake metadata is returned.
  */
