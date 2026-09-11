@@ -238,6 +238,66 @@ test("refuses control and separator-ambiguous paths", async (t) => {
     await failure(collect(f, f.commit({ [path]: "text" })), "unsupported_path");
   }
 });
+for (const mode of ["unused-input", "required-input"]) {
+  test(`${mode} pipe closure cannot become an accepted comparison`, (t) => {
+    const f = fixture(t);
+    const headSha = f.commit({ "line\nbreak.txt": "text" });
+    // Fault injection is isolated in another Node process. Actual Git commands
+    // still execute: no-input closure must not mask the inventory refusal, and
+    // an error delivering required batch input must remain a hard failure.
+    const script = `
+      import assert from "node:assert/strict";
+      import childProcess from "node:child_process";
+      import { syncBuiltinESMExports } from "node:module";
+      const [moduleUrl, repositoryPath, baseSha, headSha, mode] = process.argv.slice(1);
+      const originalSpawn = childProcess.spawn;
+      let noInputCommands = 0;
+      let batchCommands = 0;
+      childProcess.spawn = (command, args, options) => {
+        assert.equal(command, "/usr/bin/git");
+        const child = originalSpawn(command, args, options);
+        const batch = args.includes("cat-file");
+        if (batch) {
+          batchCommands++;
+          assert.notEqual(child.stdin, null);
+        } else {
+          noInputCommands++;
+        }
+        if (child.stdin && ((mode === "unused-input" && !batch) ||
+                            (mode === "required-input" && batch))) {
+          process.nextTick(() => child.stdin.emit("error",
+            Object.assign(new Error("synthetic closed input"), { code: "EPIPE" })));
+        }
+        return child;
+      };
+      syncBuiltinESMExports();
+      const { collectReviewComparison } = await import(moduleUrl);
+      await assert.rejects(collectReviewComparison({ repositoryPath, baseSha, headSha }), {
+        name: "ReviewComparisonError",
+        code: mode === "unused-input" ? "unsupported_path" : "git_io_failed",
+      });
+      assert.ok(noInputCommands > 0);
+      assert.ok(batchCommands > 0);
+    `;
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        script,
+        new URL(
+          "../.github/scripts/merge-policy-review-comparison.mjs",
+          import.meta.url,
+        ).href,
+        f.root,
+        f.baseSha,
+        headSha,
+        mode,
+      ],
+      { env: gitEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 10000 },
+    );
+  });
+}
 test("refuses malformed UTF8 path bytes", async (t) => {
   const f = fixture(t);
   // APFS refuses malformed path bytes; Git tree objects can still contain them.

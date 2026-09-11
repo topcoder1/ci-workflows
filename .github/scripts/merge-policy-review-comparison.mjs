@@ -196,7 +196,9 @@ async function git(
             env: { ...ENV },
             shell: false,
             detached: true,
-            stdio: ["pipe", "pipe", "pipe"],
+            // Commands with no input may exit before a writable pipe closes.
+            // Only batch commands need a stdin pipe and write-error handling.
+            stdio: [stdin.length === 0 ? "ignore" : "pipe", "pipe", "pipe"],
           });
           scope.add(child);
         } catch {
@@ -204,7 +206,7 @@ async function git(
           return;
         }
         child.on("error", () => fail("git_unavailable"));
-        child.stdin.on("error", () => fail("git_io_failed"));
+        child.stdin?.on("error", () => fail("git_io_failed"));
         child.stdout.on("error", () => fail("git_io_failed"));
         child.stderr.on("error", () => fail("git_io_failed"));
         child.stdout.on("data", (chunk) => {
@@ -247,7 +249,7 @@ async function git(
             exitCode: code,
           });
         });
-        child.stdin.end(stdin);
+        child.stdin?.end(stdin);
       }),
   );
 }
