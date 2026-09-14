@@ -161,10 +161,21 @@ export function createReviewProducer(configuration) {
       let scope;
       let phase = "comparison";
       try {
-        const { repositoryPath, dispatch: rawDispatch } = record(input, [
-          "repositoryPath",
-          "dispatch",
-        ]);
+        const {
+          repositoryPath,
+          dispatch: rawDispatch,
+          expectedComparisonSha256,
+        } = record(
+          input,
+          ["repositoryPath", "dispatch"],
+          ["expectedComparisonSha256"],
+        );
+        requireThat(
+          expectedComparisonSha256 === undefined ||
+            (typeof expectedComparisonSha256 === "string" &&
+              DIGEST.test(expectedComparisonSha256)),
+          "invalid_expected_comparison",
+        );
         requireThat(
           typeof repositoryPath === "string" &&
             repositoryPath.length > 0 &&
@@ -206,6 +217,11 @@ export function createReviewProducer(configuration) {
           "comparison_binding_mismatch",
         );
         requireThat(comparison.files.length > 0, "empty_comparison");
+        requireThat(
+          expectedComparisonSha256 === undefined ||
+            comparison.comparisonSha256 === expectedComparisonSha256,
+          "expected_comparison_mismatch",
+        );
         phase = "provider";
         const result = await reviewer.review(comparison, {
           signal: scope.signal,

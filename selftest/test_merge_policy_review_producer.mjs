@@ -359,6 +359,46 @@ test("unsupported local history and no changed files never acquire credentials",
   assert.equal(c.requests.length, 0);
 });
 
+test("an approved comparison mismatch refuses before credentials or provider work", async (t) => {
+  const f = fixture(t);
+  const c = client();
+  await refuses(
+    c.producer.produce({
+      ...f.input,
+      expectedComparisonSha256: "0".repeat(64),
+    }),
+    "expected_comparison_mismatch",
+  );
+  assert.equal(c.credentials(), 0);
+  assert.equal(c.requests.length, 0);
+});
+
+test("malformed approved comparison digests refuse before reading Git", async (t) => {
+  const f = fixture(t);
+  const c = client();
+  for (const expectedComparisonSha256 of [
+    null,
+    false,
+    1,
+    {},
+    [],
+    "",
+    "a".repeat(63),
+    "A".repeat(64),
+  ]) {
+    await refuses(
+      c.producer.produce({
+        ...f.input,
+        repositoryPath: "/absent",
+        expectedComparisonSha256,
+      }),
+      "invalid_expected_comparison",
+    );
+  }
+  assert.equal(c.credentials(), 0);
+  assert.equal(c.requests.length, 0);
+});
+
 test("provider incompleteness cannot produce a clean receipt", async (t) => {
   const f = fixture(t);
   for (const patch of [
