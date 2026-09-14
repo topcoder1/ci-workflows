@@ -179,7 +179,8 @@ function runFacts(raw, producer, selector) {
   );
   const tagName = producer.workflowRef?.slice("refs/tags/".length);
   const expectedPath = tagName
-    ? (raw.path === `${producer.workflowPath}@${tagName}` ||
+    ? (raw.path === producer.workflowPath ||
+        raw.path === `${producer.workflowPath}@${tagName}` ||
         raw.path === `${producer.workflowPath}@${producer.workflowRef}`) &&
       raw.head_branch === tagName
     : raw.path === producer.workflowPath ||
@@ -395,8 +396,9 @@ async function bytes(response, maximum, scope) {
  * fetchImpl must follow native Node fetch's decoded-response stream contract.
  * Supported HTTP content codings are identity, gzip, deflate and br (one only).
  * Optional producer.workflowRef supports a current lightweight-tag snapshot,
- * with no same-name branch and only direct first-attempt dispatch. Both explicit
- * path spellings (@tagName and @refs/tags/tagName) require the same checked ref.
+ * with no same-name branch and only direct first-attempt dispatch. Bare paths
+ * and explicit suffixes (@tagName and @refs/tags/tagName) require the same
+ * exact head_branch and checked ref.
  * This needs Contents:read as well as Actions:read. It does not authenticate the
  * historical dispatch ref, its protection, or the full producer execution.
  * downloadOrigins is an exact administrator-selected origin list, never a URL

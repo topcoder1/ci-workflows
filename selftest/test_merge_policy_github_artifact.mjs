@@ -976,7 +976,7 @@ test("tag opt-in binds exact current lightweight ref before and after the comple
     else assert.equal(init.headers.authorization, "Bearer synthetic-token");
   }
 });
-test("tag opt-in accepts only the other explicitly enumerated full-ref path spelling", async () => {
+test("tag opt-in accepts the explicitly enumerated full-ref path spelling", async () => {
   const f = tagFixture({
     respond: ({ url }) =>
       url === runURL || url === firstAttemptURL
@@ -1120,7 +1120,6 @@ test("tag opt-in rejects a same-name branch even when both refs point at the app
   assert.equal(f.calls.length, 2);
 });
 for (const path of [
-  producer().workflowPath,
   `${producer().workflowPath}@${revision}`,
   `${producer().workflowPath}@other`,
   `${producer().workflowPath}@refs/heads/${tagName}`,
@@ -1314,4 +1313,127 @@ test("parent abort cancels the initial tag request before any run lookup", async
   await tagFails(f.client, "aborted", { signal: controller.signal });
   assert.equal(cancelled, true);
   assert.equal(f.calls.length, 1);
+});
+
+// GitHub run34675721621 reported a bare path plus an exact tag head_branch.
+// These synthetic fixtures preserve that shape without claiming live execution.
+function bareTagRun() {
+  return { ...tagRun(), path: producer().workflowPath };
+}
+function bareTagFixture(options = {}) {
+  return tagFixture({
+    ...options,
+    respond: async (request) => {
+      const custom = await options.respond?.(request);
+      if (custom !== undefined) return custom;
+      if (request.url === runURL || request.url === firstAttemptURL)
+        return json(bareTagRun());
+    },
+  });
+}
+test("bare tag path accepts exact bindings and retains non-authentication flags", async () => {
+  const f = bareTagFixture();
+  const result = await f.client.read(tagSelector());
+  assert.equal(result.run.workflowPath, producer().workflowPath);
+  assert.deepEqual(result.currentTagRefSnapshot, {
+    ref: workflowRef,
+    sha: revision,
+  });
+  assert.deepEqual(result.archiveBytes, archive);
+  assert.deepEqual(
+    f.calls.map(({ url }) => url),
+    [
+      tagURL,
+      branchURL,
+      runURL,
+      firstAttemptURL,
+      artifactURL,
+      zipURL,
+      signedURL,
+      runURL,
+      artifactURL,
+      tagURL,
+      branchURL,
+    ],
+  );
+  for (const field of [
+    "artifactAttemptAuthenticated",
+    "executionComparisonAuthenticated",
+    "enforcementPublished",
+  ])
+    assert.equal(result[field], false);
+  assert.equal(Object.hasOwn(result, "executionAuthenticated"), false);
+});
+for (const [name, mutate, code] of runMutations) {
+  test(`bare tag path rejects ${name} on current run, attempt and final read`, async () => {
+    for (const [endpoint, occurrence] of [
+      [runURL, 1],
+      [firstAttemptURL, 1],
+      [runURL, 2],
+    ]) {
+      const f = bareTagFixture({
+        respond: ({ url, count }) => {
+          if (url !== endpoint || count !== occurrence) return;
+          const value = bareTagRun();
+          mutate(value);
+          return json(value);
+        },
+      });
+      await tagFails(f.client, code);
+    }
+  });
+}
+test("bare tag path requires the tag head_branch on every run read", async () => {
+  for (const head_branch of [undefined, "other", workflowRef]) {
+    for (const [endpoint, occurrence] of [
+      [runURL, 1],
+      [firstAttemptURL, 1],
+      [runURL, 2],
+    ]) {
+      const f = bareTagFixture({
+        respond: ({ url, count }) =>
+          url === endpoint && count === occurrence
+            ? json({ ...bareTagRun(), head_branch })
+            : undefined,
+      });
+      await tagFails(f.client, "unsupported_execution");
+    }
+  }
+});
+for (const [name, mutate] of refMutations) {
+  test(`bare tag path rejects ${name} before and after download`, async () => {
+    for (const occurrence of [1, 2]) {
+      const f = bareTagFixture({
+        respond: ({ url, count }) => {
+          if (url !== tagURL || count !== occurrence) return;
+          const value = tagRef();
+          mutate(value);
+          return json(value);
+        },
+      });
+      await tagFails(f.client, "workflow_ref_binding_mismatch");
+    }
+  });
+}
+test("bare tag path requires same-name branch absence before and after download", async () => {
+  for (const occurrence of [1, 2]) {
+    const f = bareTagFixture({
+      respond: ({ url, count }) =>
+        url === branchURL && count === occurrence
+          ? json({ ...tagRef(), ref: `refs/heads/${tagName}` })
+          : undefined,
+    });
+    await tagFails(f.client, "ambiguous_workflow_ref");
+  }
+});
+test("bare tag path cannot switch to an accepted suffix between reads", async () => {
+  for (const endpoint of [firstAttemptURL, runURL]) {
+    const f = bareTagFixture({
+      respond: ({ url, count }) =>
+        url === endpoint && (endpoint !== runURL || count === 2)
+          ? json(tagRun())
+          : undefined,
+    });
+    await tagFails(f.client, "metadata_changed");
+  }
 });
