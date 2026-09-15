@@ -1,0 +1,60 @@
+# INACTIVE TEMPLATE. Install only after independent review and an exact staging
+# execution packet. This does not publish acceptance or configure an App.
+# Future path: .github/workflows/merge-policy-selftest.yml in the staging repo.
+name: Merge policy historical review execution probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-policy-review-execution-v1
+  cancel-in-progress: false
+
+jobs:
+  review-execution-probe:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'topcoder1/techrecon-merge-policy-staging' &&
+      github.repository_id == '1364800834' &&
+      github.run_attempt == '1' &&
+      github.ref == 'refs/tags/merge-policy-review-execution-v1' &&
+      github.ref_protected == true &&
+      github.sha == github.workflow_sha &&
+      github.workflow_ref == 'topcoder1/techrecon-merge-policy-staging/.github/workflows/merge-policy-selftest.yml@refs/tags/merge-policy-review-execution-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout approved complete producer source and fixture history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Set up exact Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.23.2"
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Review the fixed historical comparison once
+        env:
+          MERGE_POLICY_REVIEW_API_KEY: ${{ secrets.MERGE_POLICY_REVIEW_API_KEY }}
+        run: node .github/scripts/merge-policy-review-execution-probe.mjs
+
+      - name: Upload the complete non-acceptance report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: merge-policy-review-execution-probe.json
+          path: ${{ runner.temp }}/merge-policy-review-execution-probe/merge-policy-review-execution-probe.json
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 1
+          include-hidden-files: false
