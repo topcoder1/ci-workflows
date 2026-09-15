@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { STAGING_PROBE_TARGET } from "../.github/scripts/merge-policy-transport-probe.mjs";
 import {
@@ -418,6 +418,59 @@ test("source drift during a provider call never emits a final report", async (t)
     phase: "source",
     providerOutcome: "review_completed",
   });
+});
+test("inconsistent completed receipt retains receipt-phase failure without acceptance", async (t) => {
+  const f = fixture(t);
+  const scripts = join(f.repositoryPath, ".github", "scripts");
+  mkdirSync(scripts, { recursive: true });
+  // Fault-inject only in this disposable source tree after the real producer
+  // completes measurement and review. The production probe gets no new seam.
+  for (const name of [
+    "merge-policy-review-execution-probe.mjs",
+    "merge-policy-review-producer.mjs",
+    "merge-policy-review-comparison.mjs",
+    "merge-policy-anthropic-review.mjs",
+    "merge-policy-transport-probe.mjs",
+  ]) {
+    let source = readFileSync(
+      new URL(`../.github/scripts/${name}`, import.meta.url),
+      "utf8",
+    );
+    if (name === "merge-policy-review-producer.mjs") {
+      const original = "receiptSha256: sha256(bytes),";
+      assert.equal(source.split(original).length, 2);
+      source = source.replace(original, 'receiptSha256: "0".repeat(64),');
+    }
+    writeFileSync(join(scripts, name), source);
+  }
+  f.git("add", "-A");
+  f.git("commit", "-qm", "fixture-only inconsistent producer receipt");
+  f.sourceSha = f.git("rev-parse", "HEAD");
+  f.runtime.sha = f.sourceSha;
+  f.runtime.workflowSha = f.sourceSha;
+  f.reply = () =>
+    response({
+      ...clean(),
+      summary: "synthetic-review-key private error must not escape",
+    });
+  const probe = await import(
+    pathToFileURL(join(scripts, "merge-policy-review-execution-probe.mjs")).href
+  );
+  await failure(probe.runReviewExecutionProbe(input(f)), "result_mismatch");
+  const first = failureReport(f, {
+    code: "result_mismatch",
+    phase: "receipt",
+    providerOutcome: "review_completed",
+  });
+  assert.equal(existsSync(reportPath(f)), false);
+  assert.equal(f.credentials(), 1);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.git("rev-parse", "HEAD"), f.sourceSha);
+  assert.equal(f.git("status", "--porcelain"), "");
+  await failure(probe.runReviewExecutionProbe(input(f)), "output_exists");
+  assert.deepEqual(readFileSync(failurePath(f)), first);
+  assert.equal(f.credentials(), 1);
+  assert.equal(f.requests.length, 1);
 });
 test("caller mutation cannot relabel a review", async (t) => {
   const f = fixture(t);
