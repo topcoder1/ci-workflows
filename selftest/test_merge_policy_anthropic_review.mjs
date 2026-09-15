@@ -5,6 +5,7 @@ import {
   ANTHROPIC_REVIEW_LIMITS,
   ANTHROPIC_REVIEW_MODEL,
   createAnthropicReviewer,
+  anthropicReviewFailure,
 } from "../.github/scripts/merge-policy-anthropic-review.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -120,6 +121,95 @@ async function rejects(operation, expected) {
     return true;
   });
 }
+
+test("closed diagnostics never reflect adversarial thrown objects or forged codes", async () => {
+  let reads = 0;
+  const trap = () => {
+    reads++;
+    throw new Error(secret);
+  };
+  const hostile = [
+    null,
+    undefined,
+    secret,
+    Symbol(secret),
+    new Error(secret),
+    {
+      name: "AnthropicReviewError",
+      code: "deadline_exceeded",
+      message: secret,
+      stack: secret,
+    },
+    Object.defineProperty({}, "code", { get: trap }),
+    new Proxy({}, { get: trap, getPrototypeOf: trap, ownKeys: trap }),
+    Proxy.revocable({}, {}).proxy,
+  ];
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  hostile.push(revoked.proxy);
+  for (const thrown of hostile) {
+    assert.equal(anthropicReviewFailure(thrown), undefined);
+    for (const stage of ["token", "fetch", "body"]) {
+      const reviewer = client(
+        async () => {
+          if (stage === "fetch") throw thrown;
+          return new Response(
+            new ReadableStream({
+              pull() {
+                throw thrown;
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        },
+        async () => {
+          if (stage === "token") throw thrown;
+          return secret;
+        },
+      );
+      await assert.rejects(reviewer.review(fixture()), (error) => {
+        assert.deepEqual(anthropicReviewFailure(error), {
+          code:
+            stage === "token" ? "credential_unavailable" : "transport_failed",
+          providerOutcome:
+            stage === "token"
+              ? "not_requested"
+              : stage === "fetch"
+                ? "unknown"
+                : "response_received",
+          ...(stage === "body" ? { httpStatus: 200 } : {}),
+        });
+        assert.ok(
+          !JSON.stringify(anthropicReviewFailure(error)).includes(secret),
+        );
+        assert.ok(!error.stack.includes(secret));
+        assert.equal(error.cause, undefined);
+        return true;
+      });
+    }
+  }
+  assert.equal(reads, 0);
+});
+
+test("HTTP diagnostic retains only a valid numeric status", async () => {
+  for (const status of [401, 429, 500, 599, 99, 600, "401", NaN, Infinity]) {
+    const reviewer = client(async () => ({
+      status,
+      redirected: false,
+      body: null,
+    }));
+    await assert.rejects(reviewer.review(fixture()), (error) => {
+      assert.deepEqual(anthropicReviewFailure(error), {
+        code: "http_failure",
+        providerOutcome: "response_received",
+        ...([401, 429, 500, 599].includes(status)
+          ? { httpStatus: status }
+          : {}),
+      });
+      return true;
+    });
+  }
+});
 
 test("setup has no I/O; one fixed data-only request preserves measured bytes", async () => {
   let calls = 0;

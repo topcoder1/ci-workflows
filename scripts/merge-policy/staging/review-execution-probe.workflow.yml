@@ -44,6 +44,7 @@ jobs:
           package-manager-cache: false
 
       - name: Review the fixed historical comparison once
+        id: review
         env:
           MERGE_POLICY_REVIEW_API_KEY: ${{ secrets.MERGE_POLICY_REVIEW_API_KEY }}
         run: node .github/scripts/merge-policy-review-execution-probe.mjs
@@ -53,6 +54,20 @@ jobs:
         with:
           name: merge-policy-review-execution-probe.json
           path: ${{ runner.temp }}/merge-policy-review-execution-probe/merge-policy-review-execution-probe.json
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 1
+          include-hidden-files: false
+
+      - name: Upload bounded failure evidence
+        if: ${{ failure() && steps.review.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: merge-policy-review-execution-failure.json
+          path: |
+            ${{ runner.temp }}/merge-policy-review-execution-probe/started.json
+            ${{ runner.temp }}/merge-policy-review-execution-probe/merge-policy-review-execution-failure.json
           if-no-files-found: error
           overwrite: false
           compression-level: 0

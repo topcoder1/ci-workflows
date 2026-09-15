@@ -59,11 +59,18 @@ const OUTPUT_SCHEMA = {
     },
   },
 };
+// Identity-based metadata never reads a thrown value's getters, prototype,
+// message or stack. Only errors created here can contribute diagnostics.
+const failures = new WeakMap();
+export function anthropicReviewFailure(error) {
+  return failures.get(error);
+}
 class ReviewError extends Error {
   constructor(code) {
     super(`Anthropic review: ${code}`);
     this.name = "AnthropicReviewError";
     this.code = code;
+    failures.set(this, Object.freeze({ code }));
   }
 }
 function requireThat(condition, code = "invalid_input") {
@@ -575,7 +582,14 @@ async function readResponse(response, scope) {
     const chunks = [];
     let total = 0;
     while (true) {
-      const { done, value } = await scope.wait(() => reader.read());
+      let part;
+      try {
+        part = await scope.wait(() => reader.read());
+      } catch {
+        scope.check();
+        throw new ReviewError("transport_failed");
+      }
+      const { done, value } = part;
       if (done) break;
       const chunk = chunkCopy(
         value,
@@ -633,6 +647,8 @@ export function createAnthropicReviewer(options) {
     async review(input, options = {}) {
       let scope;
       let token;
+      let providerOutcome = "not_requested";
+      let httpStatus;
       try {
         shape(options, [], ["signal", "deadlineMs"]);
         const { signal } = options;
@@ -684,8 +700,9 @@ export function createAnthropicReviewer(options) {
         );
         let response;
         try {
-          response = await scope.wait(() =>
-            fetchImpl(ENDPOINT, {
+          response = await scope.wait(() => {
+            providerOutcome = "unknown";
+            return fetchImpl(ENDPOINT, {
               method: "POST",
               redirect: "error",
               signal: scope.signal,
@@ -704,13 +721,17 @@ export function createAnthropicReviewer(options) {
                 throw error;
               }
               return received;
-            }),
-          );
+            });
+          });
         } catch {
           scope.check();
           throw new ReviewError("transport_failed");
         }
         token = undefined;
+        providerOutcome = "response_received";
+        const status = response.status;
+        if (Number.isInteger(status) && status >= 100 && status <= 599)
+          httpStatus = status;
         const bytes = await readResponse(response, scope);
         scope.check();
         let message;
@@ -719,7 +740,7 @@ export function createAnthropicReviewer(options) {
             new TextDecoder("utf-8", { fatal: true }).decode(bytes),
           );
         } catch (error) {
-          if (error instanceof ReviewError) throw error;
+          if (failures.has(error)) throw error;
           throw new ReviewError("invalid_json");
         }
         const result = reviewResult(message, comparison);
@@ -734,8 +755,18 @@ export function createAnthropicReviewer(options) {
           enforcementPublished: false,
         });
       } catch (error) {
-        if (error instanceof ReviewError) throw error;
-        throw new ReviewError("invalid_response");
+        const safe = new ReviewError(
+          failures.get(error)?.code ?? "invalid_response",
+        );
+        failures.set(
+          safe,
+          Object.freeze({
+            code: safe.code,
+            providerOutcome,
+            ...(httpStatus === undefined ? {} : { httpStatus }),
+          }),
+        );
+        throw safe;
       } finally {
         token = undefined;
         scope?.close();
