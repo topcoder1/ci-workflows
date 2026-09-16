@@ -14,12 +14,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { STAGING_PROBE_TARGET } from "../.github/scripts/merge-policy-transport-probe.mjs";
 import {
   REVIEW_PROBE_DIRECTORY,
   REVIEW_PROBE_FILE,
+  REVIEW_PROBE_FAILURE_FILE,
+  REVIEW_PROBE_FAILURE_MAX_BYTES,
   REVIEW_PROBE_MAX_BYTES,
   REVIEW_PROBE_POLICY_DIGEST,
   REVIEW_PROBE_REF,
@@ -209,6 +211,34 @@ const input = (f) => ({
 const invoke = (f) => runReviewExecutionProbe(input(f));
 const reportPath = (f) =>
   join(f.outputParentPath, REVIEW_PROBE_DIRECTORY, REVIEW_PROBE_FILE);
+const failurePath = (f) =>
+  join(f.outputParentPath, REVIEW_PROBE_DIRECTORY, REVIEW_PROBE_FAILURE_FILE);
+function failureReport(f, expected) {
+  const bytes = readFileSync(failurePath(f));
+  const report = JSON.parse(bytes);
+  assert.deepEqual(report, {
+    schemaVersion: 1,
+    kind: "historical-review-execution-failure-v1",
+    runtime: f.runtime,
+    target: f.target,
+    failure: expected,
+    acceptance: false,
+    reviewCompleted: false,
+    currentPullRequestObserved: false,
+    githubIdentityAuthenticated: false,
+    executionAuthenticated: false,
+    enforcementPublished: false,
+  });
+  assert.ok(bytes.length <= REVIEW_PROBE_FAILURE_MAX_BYTES);
+  assert.equal(bytes.includes(Buffer.from("synthetic-review-key")), false);
+  assert.equal(
+    bytes.includes(Buffer.from("private error must not escape")),
+    false,
+  );
+  assert.equal(statSync(failurePath(f)).mode & 0o777, 0o600);
+  assert.equal(Object.hasOwn(report, "receipt"), false);
+  return bytes;
+}
 const failure = (operation, code) =>
   assert.rejects(operation, {
     name: "ReviewExecutionProbeError",
@@ -251,6 +281,7 @@ for (const outcome of ["clean", "findings"])
     ])
       assert.equal(report[k], false);
     assert.equal(Object.hasOwn(report, "complete"), false);
+    assert.equal(existsSync(failurePath(f)), false);
     assert.equal(bytes.includes(Buffer.from("synthetic-review-key")), false);
     assert.equal(statSync(result.path).mode & 0o777, 0o600);
     assert.equal(
@@ -263,7 +294,12 @@ for (const outcome of ["clean", "findings"])
 test("wrong measured digest never acquires provider credentials", async (t) => {
   const f = fixture(t);
   f.target.comparisonSha256 = "0".repeat(64);
-  await failure(invoke(f), "review_failed");
+  await failure(invoke(f), "expected_comparison_mismatch");
+  failureReport(f, {
+    code: "expected_comparison_mismatch",
+    phase: "comparison",
+    providerOutcome: "not_requested",
+  });
   assert.equal(f.credentials(), 0);
   assert.equal(f.requests.length, 0);
   assert.equal(existsSync(reportPath(f)), false);
@@ -377,6 +413,64 @@ test("source drift during a provider call never emits a final report", async (t)
   await failure(invoke(f), "source_mismatch");
   assert.equal(f.requests.length, 1);
   assert.equal(existsSync(reportPath(f)), false);
+  failureReport(f, {
+    code: "source_mismatch",
+    phase: "source",
+    providerOutcome: "review_completed",
+  });
+});
+test("inconsistent completed receipt retains receipt-phase failure without acceptance", async (t) => {
+  const f = fixture(t);
+  const scripts = join(f.repositoryPath, ".github", "scripts");
+  mkdirSync(scripts, { recursive: true });
+  // Fault-inject only in this disposable source tree after the real producer
+  // completes measurement and review. The production probe gets no new seam.
+  for (const name of [
+    "merge-policy-review-execution-probe.mjs",
+    "merge-policy-review-producer.mjs",
+    "merge-policy-review-comparison.mjs",
+    "merge-policy-anthropic-review.mjs",
+    "merge-policy-transport-probe.mjs",
+  ]) {
+    let source = readFileSync(
+      new URL(`../.github/scripts/${name}`, import.meta.url),
+      "utf8",
+    );
+    if (name === "merge-policy-review-producer.mjs") {
+      const original = "receiptSha256: sha256(bytes),";
+      assert.equal(source.split(original).length, 2);
+      source = source.replace(original, 'receiptSha256: "0".repeat(64),');
+    }
+    writeFileSync(join(scripts, name), source);
+  }
+  f.git("add", "-A");
+  f.git("commit", "-qm", "fixture-only inconsistent producer receipt");
+  f.sourceSha = f.git("rev-parse", "HEAD");
+  f.runtime.sha = f.sourceSha;
+  f.runtime.workflowSha = f.sourceSha;
+  f.reply = () =>
+    response({
+      ...clean(),
+      summary: "synthetic-review-key private error must not escape",
+    });
+  const probe = await import(
+    pathToFileURL(join(scripts, "merge-policy-review-execution-probe.mjs")).href
+  );
+  await failure(probe.runReviewExecutionProbe(input(f)), "result_mismatch");
+  const first = failureReport(f, {
+    code: "result_mismatch",
+    phase: "receipt",
+    providerOutcome: "review_completed",
+  });
+  assert.equal(existsSync(reportPath(f)), false);
+  assert.equal(f.credentials(), 1);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.git("rev-parse", "HEAD"), f.sourceSha);
+  assert.equal(f.git("status", "--porcelain"), "");
+  await failure(probe.runReviewExecutionProbe(input(f)), "output_exists");
+  assert.deepEqual(readFileSync(failurePath(f)), first);
+  assert.equal(f.credentials(), 1);
+  assert.equal(f.requests.length, 1);
 });
 test("caller mutation cannot relabel a review", async (t) => {
   const f = fixture(t);
@@ -401,6 +495,7 @@ test("reservation prevents duplicate paid work after success", async (t) => {
   assert.equal(f.requests.length, 1);
   assert.equal(f.credentials(), 1);
   assert.deepEqual(readFileSync(reportPath(f)), first);
+  assert.equal(existsSync(failurePath(f)), false);
 });
 test("existing output symlink cannot redirect writes or trigger a provider call", async (t) => {
   const f = fixture(t);
@@ -424,13 +519,165 @@ for (const kind of ["exception", "partial", "truncated", "refusal"])
         return response(clean(), { stop_reason: "max_tokens" });
       return response(clean(), { stop_details: { type: "refusal" } });
     };
-    await failure(invoke(f), "review_failed");
+    const code =
+      kind === "exception" ? "transport_failed" : "incomplete_review";
+    await failure(invoke(f), code);
+    const first = failureReport(f, {
+      code,
+      phase: "provider",
+      providerOutcome: kind === "exception" ? "unknown" : "response_received",
+      ...(kind === "exception" ? {} : { httpStatus: 200 }),
+    });
     assert.equal(f.requests.length, 1);
     assert.equal(existsSync(reportPath(f)), false);
     await failure(invoke(f), "output_exists");
     assert.equal(f.requests.length, 1);
     assert.equal(f.credentials(), 1);
+    assert.deepEqual(readFileSync(failurePath(f)), first);
   });
+
+test("HTTP, JSON and schema failures retain separate evidence without response text", async (t) => {
+  for (const [reply, code, httpStatus] of [
+    [
+      () =>
+        new Response("synthetic-review-key private error must not escape", {
+          status: 401,
+        }),
+      "http_failure",
+      401,
+    ],
+    [
+      () =>
+        new Response("private error must not escape", {
+          headers: { "content-type": "application/json" },
+        }),
+      "invalid_json",
+      200,
+    ],
+    [
+      () => response({ ...clean(), findingCount: 1 }),
+      "incomplete_findings",
+      200,
+    ],
+    [
+      () =>
+        response({ ...clean(), unexpected: "private error must not escape" }),
+      "invalid_review",
+      200,
+    ],
+  ]) {
+    const f = fixture(t);
+    f.reply = reply;
+    await failure(invoke(f), code);
+    failureReport(f, {
+      code,
+      phase: "provider",
+      providerOutcome: "response_received",
+      httpStatus,
+    });
+    assert.equal(f.requests.length, 1);
+    assert.equal(existsSync(reportPath(f)), false);
+  }
+});
+
+test("credential failures and hostile thrown values retain no arbitrary details", async (t) => {
+  let reads = 0;
+  const trap = () => {
+    reads++;
+    throw new Error("private error must not escape");
+  };
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  for (const thrown of [
+    undefined,
+    "private error must not escape",
+    { code: "deadline_exceeded", message: "private error must not escape" },
+    new Proxy({}, { get: trap, getPrototypeOf: trap, ownKeys: trap }),
+    revoked.proxy,
+  ]) {
+    for (const stage of ["credential", "transport"]) {
+      const f = fixture(t);
+      if (stage === "credential")
+        f.reviewer.tokenProvider = async () => {
+          throw thrown;
+        };
+      else
+        f.reply = () => {
+          throw thrown;
+        };
+      const code =
+        stage === "credential" ? "credential_unavailable" : "transport_failed";
+      await failure(invoke(f), code);
+      failureReport(f, {
+        code,
+        phase: "provider",
+        providerOutcome: stage === "credential" ? "not_requested" : "unknown",
+      });
+      assert.equal(f.requests.length, stage === "credential" ? 0 : 1);
+    }
+  }
+  assert.equal(reads, 0);
+});
+
+test("shared deadline retains uncertainty after one uncooperative provider request", async (t) => {
+  const f = fixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  f.reply = () => {
+    t.mock.timers.tick(120000);
+    return new Promise(() => {});
+  };
+  await failure(invoke(f), "deadline_exceeded");
+  failureReport(f, {
+    code: "deadline_exceeded",
+    phase: "provider",
+    providerOutcome: "unknown",
+  });
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].init.signal.aborted, true);
+  assert.equal(existsSync(reportPath(f)), false);
+});
+
+test("failed Git measurement is retained before provider work", async (t) => {
+  const f = fixture(t);
+  f.target.headSha = "f".repeat(40);
+  await failure(invoke(f), "comparison_failed");
+  failureReport(f, {
+    code: "comparison_failed",
+    phase: "comparison",
+    providerOutcome: "not_requested",
+  });
+  assert.equal(f.credentials(), 0);
+  assert.equal(f.requests.length, 0);
+});
+
+test("exclusive final output failure retains completed review observation", async (t) => {
+  const f = fixture(t);
+  f.reply = () => {
+    writeFileSync(reportPath(f), "existing file");
+    return response();
+  };
+  await failure(invoke(f), "output_failed");
+  failureReport(f, {
+    code: "output_failed",
+    phase: "output",
+    providerOutcome: "review_completed",
+  });
+  assert.equal(readFileSync(reportPath(f), "utf8"), "existing file");
+  assert.equal(f.requests.length, 1);
+});
+
+test("failure evidence cannot overwrite a preexisting file or make the operation succeed", async (t) => {
+  const f = fixture(t);
+  f.reply = () => {
+    writeFileSync(failurePath(f), "existing file");
+    throw new Error("private error must not escape");
+  };
+  await failure(invoke(f), "failure_report_unavailable");
+  assert.equal(readFileSync(failurePath(f), "utf8"), "existing file");
+  assert.equal(f.requests.length, 1);
+  await failure(invoke(f), "output_exists");
+  assert.equal(f.requests.length, 1);
+});
 test("CLI rejects arguments and unsupported context with bounded output", () => {
   const path = fileURLToPath(
     new URL(

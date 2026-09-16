@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   createReviewProducer,
   REVIEW_PRODUCER_LIMITS,
+  reviewProducerFailure,
 } from "../.github/scripts/merge-policy-review-producer.mjs";
 import { prepareReviewIntake } from "../.github/scripts/merge-policy-intake.mjs";
 import { emptyLedger } from "../.github/scripts/merge-policy-state.mjs";
@@ -137,11 +138,12 @@ function client(options = {}) {
   });
   return { producer, requests, credentials: () => credentials };
 }
-async function refuses(operation, code) {
+async function refuses(operation, code, detail) {
   await assert.rejects(operation, (error) => {
     assert.equal(error.name, "ReviewProducerError");
     assert.equal(error.message, `Review producer: ${error.code}`);
     if (code) assert.equal(error.code, code);
+    if (detail) assert.deepEqual(reviewProducerFailure(error), detail);
     return true;
   });
 }
@@ -401,50 +403,62 @@ test("malformed approved comparison digests refuse before reading Git", async (t
 
 test("provider incompleteness cannot produce a clean receipt", async (t) => {
   const f = fixture(t);
-  for (const patch of [
-    { stop_reason: "max_tokens" },
-    { stop_details: { type: "refusal" } },
-    {
-      content: [
-        { type: "text", text: JSON.stringify(clean()) },
-        { type: "text", text: "extra" },
-      ],
-    },
-    {
-      content: [
-        {
-          type: "text",
-          text: '{"outcome":"findings","findingCount":1,"summary":"x","findings":[],"findings":[]}',
-        },
-      ],
-    },
-    { model: "different-model" },
-    {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            ...clean(),
-            producer: f.input.dispatch.producer,
-          }),
-        },
-      ],
-    },
-    {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            ...clean(),
-            complete: false,
-            summary: "Unable to finish the review.",
-          }),
-        },
-      ],
-    },
+  for (const [code, patch] of [
+    ["incomplete_review", { stop_reason: "max_tokens" }],
+    ["incomplete_review", { stop_details: { type: "refusal" } }],
+    [
+      "invalid_response",
+      {
+        content: [
+          { type: "text", text: JSON.stringify(clean()) },
+          { type: "text", text: "extra" },
+        ],
+      },
+    ],
+    [
+      "invalid_json",
+      {
+        content: [
+          {
+            type: "text",
+            text: '{"outcome":"findings","findingCount":1,"summary":"x","findings":[],"findings":[]}',
+          },
+        ],
+      },
+    ],
+    ["response_identity_mismatch", { model: "different-model" }],
+    [
+      "invalid_review",
+      {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              ...clean(),
+              producer: f.input.dispatch.producer,
+            }),
+          },
+        ],
+      },
+    ],
+    [
+      "incomplete_review",
+      {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              ...clean(),
+              complete: false,
+              summary: "Unable to finish the review.",
+            }),
+          },
+        ],
+      },
+    ],
   ]) {
     const c = client({ fetch: async () => response(clean(), patch) });
-    await refuses(c.producer.produce(f.input), "provider_failed");
+    await refuses(c.producer.produce(f.input), code);
     assert.equal(c.requests.length, 1);
   }
 });
@@ -487,7 +501,11 @@ test("receipt overhead exceeding its wire bound refuses without dropping finding
   result.findings.at(-1).reason = "r".repeat(3000 - excess);
   assert.equal(Buffer.byteLength(JSON.stringify(result)), 65530);
   const c = client({ result: () => result });
-  await refuses(c.producer.produce(f.input), "receipt_limit");
+  await refuses(c.producer.produce(f.input), "receipt_limit", {
+    code: "receipt_limit",
+    phase: "receipt",
+    providerOutcome: "review_completed",
+  });
   assert.equal(c.requests.length, 1);
   assert.equal(result.findings.length, 20);
 });
@@ -513,4 +531,64 @@ test("a pre-aborted producer has no subprocess or credential work", async (t) =>
   );
   assert.equal(c.credentials(), 0);
   assert.ok(Object.isFrozen(REVIEW_PRODUCER_LIMITS));
+});
+
+test("producer preserves sanitized provider facts and ignores forged diagnostics", async (t) => {
+  const f = fixture(t);
+  const secret = "sk-ant-should-not-escape";
+  let reads = 0;
+  const thrown = new Proxy(
+    {},
+    {
+      get() {
+        reads++;
+        throw new Error(secret);
+      },
+      getPrototypeOf() {
+        reads++;
+        throw new Error(secret);
+      },
+    },
+  );
+  assert.equal(reviewProducerFailure(thrown), undefined);
+  for (const [options, detail] of [
+    [
+      {
+        token: () => {
+          throw thrown;
+        },
+      },
+      { code: "credential_unavailable", providerOutcome: "not_requested" },
+    ],
+    [
+      {
+        fetch: () => {
+          throw thrown;
+        },
+      },
+      { code: "transport_failed", providerOutcome: "unknown" },
+    ],
+    [
+      { fetch: () => new Response(secret, { status: 429 }) },
+      {
+        code: "http_failure",
+        providerOutcome: "response_received",
+        httpStatus: 429,
+      },
+    ],
+  ]) {
+    const c = client(options);
+    await assert.rejects(c.producer.produce(f.input), (error) => {
+      assert.deepEqual(reviewProducerFailure(error), {
+        ...detail,
+        phase: "provider",
+      });
+      assert.ok(!error.stack.includes(secret));
+      assert.equal(error.cause, undefined);
+      assert.ok(Object.isFrozen(reviewProducerFailure(error)));
+      return true;
+    });
+    assert.ok(c.requests.length <= 1);
+  }
+  assert.equal(reads, 0);
 });

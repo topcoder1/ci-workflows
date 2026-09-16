@@ -10,6 +10,7 @@ import {
 import {
   createAnthropicReviewer,
   ANTHROPIC_REVIEW_LIMITS,
+  anthropicReviewFailure,
 } from "./merge-policy-anthropic-review.mjs";
 
 export const REVIEW_PRODUCER_LIMITS = Object.freeze({
@@ -37,11 +38,16 @@ const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const ID = /^[a-z][a-z0-9_-]{0,63}$/;
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
+const failures = new WeakMap();
+export function reviewProducerFailure(error) {
+  return failures.get(error);
+}
 class ProducerError extends Error {
-  constructor(code) {
+  constructor(code, detail = {}) {
     super(`Review producer: ${code}`);
     this.name = "ReviewProducerError";
     this.code = code;
+    failures.set(this, Object.freeze({ code, ...detail }));
   }
 }
 function requireThat(condition, code = "invalid_input") {
@@ -160,6 +166,7 @@ export function createReviewProducer(configuration) {
     async produce(input, options = {}) {
       let scope;
       let phase = "comparison";
+      let providerOutcome = "not_requested";
       try {
         const {
           repositoryPath,
@@ -227,6 +234,7 @@ export function createReviewProducer(configuration) {
           signal: scope.signal,
           deadlineMs: scope.remaining(ANTHROPIC_REVIEW_LIMITS.deadlineMs),
         });
+        providerOutcome = "review_completed";
         scope.check();
         requireThat(result.review.complete === true, "review_incomplete");
         requireThat(
@@ -272,9 +280,25 @@ export function createReviewProducer(configuration) {
           enforcementPublished: false,
         });
       } catch (error) {
-        scope?.check();
-        if (error instanceof ProducerError) throw error;
-        throw new ProducerError(`${phase}_failed`);
+        const reviewerFailure = anthropicReviewFailure(error);
+        try {
+          scope?.check();
+        } catch (deadlineError) {
+          error = deadlineError;
+        }
+        throw new ProducerError(
+          failures.get(error)?.code ??
+            reviewerFailure?.code ??
+            `${phase}_failed`,
+          {
+            phase,
+            providerOutcome:
+              reviewerFailure?.providerOutcome ?? providerOutcome,
+            ...(reviewerFailure?.httpStatus === undefined
+              ? {}
+              : { httpStatus: reviewerFailure.httpStatus }),
+          },
+        );
       } finally {
         scope?.close();
       }

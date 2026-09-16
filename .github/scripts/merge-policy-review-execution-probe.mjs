@@ -5,12 +5,18 @@ import { createHash } from "node:crypto";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { promisify, types } from "node:util";
-import { createReviewProducer } from "./merge-policy-review-producer.mjs";
+import {
+  createReviewProducer,
+  reviewProducerFailure,
+} from "./merge-policy-review-producer.mjs";
 import { STAGING_PROBE_TARGET } from "./merge-policy-transport-probe.mjs";
 
 export const REVIEW_PROBE_REF = "refs/tags/merge-policy-review-execution-v1";
 export const REVIEW_PROBE_DIRECTORY = "merge-policy-review-execution-probe";
 export const REVIEW_PROBE_FILE = "merge-policy-review-execution-probe.json";
+export const REVIEW_PROBE_FAILURE_FILE =
+  "merge-policy-review-execution-failure.json";
+export const REVIEW_PROBE_FAILURE_MAX_BYTES = 8192;
 export const REVIEW_PROBE_MAX_BYTES = 98304;
 export const REVIEW_PROBE_WORKFLOW = Object.freeze({
   id: 355220095,
@@ -39,11 +45,13 @@ const RUNTIME_FIELDS = [
 ];
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
+const failures = new WeakMap();
 class ProbeError extends Error {
   constructor(code) {
     super(`Review execution probe: ${code}`);
     this.name = "ReviewExecutionProbeError";
     this.code = code;
+    failures.set(this, Object.freeze({ code }));
   }
 }
 function requireThat(condition, code) {
@@ -158,6 +166,9 @@ async function checkSource(root, sha) {
  * Environment checks do not authenticate a workflow or arbitrary local .git.
  */
 export async function runReviewExecutionProbe(input) {
+  let reservation;
+  let phase = "setup";
+  let providerOutcome = "not_requested";
   try {
     const {
       repositoryPath,
@@ -186,6 +197,7 @@ export async function runReviewExecutionProbe(input) {
     const outputParent = await realpath(outputParentPath);
     await checkSource(root, runtime.workflowSha);
     const directory = join(outputParent, REVIEW_PROBE_DIRECTORY);
+    phase = "output";
     try {
       await mkdir(directory, { mode: 0o700 });
     } catch (error) {
@@ -205,35 +217,35 @@ export async function runReviewExecutionProbe(input) {
       }),
       { flag: "wx", mode: 0o600 },
     );
-    let result;
-    try {
-      result = await producer.produce({
-        repositoryPath: root,
-        expectedComparisonSha256: target.comparisonSha256,
-        dispatch: {
-          producer: {
-            repository: runtime.repository,
-            repositoryId: target.repositoryId,
-            workflowId: REVIEW_PROBE_WORKFLOW.id,
-            workflowPath: REVIEW_PROBE_WORKFLOW.path,
-            workflowRevision: runtime.workflowSha,
-            runId: Number(runtime.runId),
-            runAttempt: 1,
-          },
-          target: {
-            repository: target.repository,
-            pullRequest: target.pullRequest,
-            headSha: target.headSha,
-            baseSha: target.baseSha,
-            policyDigest: REVIEW_PROBE_POLICY_DIGEST,
-          },
-          lane: "staging-review-probe",
+    reservation = { directory, runtime, target };
+    phase = "comparison";
+    const result = await producer.produce({
+      repositoryPath: root,
+      expectedComparisonSha256: target.comparisonSha256,
+      dispatch: {
+        producer: {
+          repository: runtime.repository,
+          repositoryId: target.repositoryId,
+          workflowId: REVIEW_PROBE_WORKFLOW.id,
+          workflowPath: REVIEW_PROBE_WORKFLOW.path,
+          workflowRevision: runtime.workflowSha,
+          runId: Number(runtime.runId),
+          runAttempt: 1,
         },
-      });
-    } catch {
-      throw new ProbeError("review_failed");
-    }
+        target: {
+          repository: target.repository,
+          pullRequest: target.pullRequest,
+          headSha: target.headSha,
+          baseSha: target.baseSha,
+          policyDigest: REVIEW_PROBE_POLICY_DIGEST,
+        },
+        lane: "staging-review-probe",
+      },
+    });
+    providerOutcome = "review_completed";
+    phase = "source";
     await checkSource(root, runtime.workflowSha);
+    phase = "receipt";
     const receiptBytes = result.receiptBytes;
     requireThat(
       result.comparisonSha256 === target.comparisonSha256 &&
@@ -241,6 +253,7 @@ export async function runReviewExecutionProbe(input) {
         receiptBytes.equals(Buffer.from(JSON.stringify(result.receipt))),
       "result_mismatch",
     );
+    phase = "output";
     const bytes = Buffer.from(
       JSON.stringify({
         schemaVersion: 1,
@@ -269,8 +282,46 @@ export async function runReviewExecutionProbe(input) {
       enforcementPublished: false,
     });
   } catch (error) {
-    if (error instanceof ProbeError) throw error;
-    throw new ProbeError("probe_failed");
+    const detail =
+      reviewProducerFailure(error) ??
+      Object.freeze({
+        code:
+          failures.get(error)?.code ??
+          (phase === "output" ? "output_failed" : "probe_failed"),
+        phase,
+        providerOutcome,
+      });
+    if (reservation) {
+      const bytes = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "historical-review-execution-failure-v1",
+          runtime: reservation.runtime,
+          target: reservation.target,
+          failure: detail,
+          acceptance: false,
+          reviewCompleted: false,
+          currentPullRequestObserved: false,
+          githubIdentityAuthenticated: false,
+          executionAuthenticated: false,
+          enforcementPublished: false,
+        }),
+      );
+      requireThat(
+        bytes.length <= REVIEW_PROBE_FAILURE_MAX_BYTES,
+        "failure_report_limit",
+      );
+      try {
+        await writeFile(
+          join(reservation.directory, REVIEW_PROBE_FAILURE_FILE),
+          bytes,
+          { flag: "wx", mode: 0o600 },
+        );
+      } catch {
+        throw new ProbeError("failure_report_unavailable");
+      }
+    }
+    throw new ProbeError(detail.code);
   }
 }
 
@@ -305,7 +356,7 @@ if (import.meta.main) {
       ),
     (error) => {
       process.stderr.write(
-        `${error instanceof ProbeError ? error.message : "Review execution probe: probe_failed"}\n`,
+        `Review execution probe: ${failures.get(error)?.code ?? "probe_failed"}\n`,
       );
       process.exitCode = 1;
     },
