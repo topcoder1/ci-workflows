@@ -441,7 +441,7 @@ test("rejects lost/duplicate findings, malformed schemas and unobserved paths", 
     { ...clean, outcome: "findings" },
     { ...clean, extra: "hidden finding" },
     { ...clean, summary: "" },
-    { ...clean, summary: "x".repeat(3001) },
+    { ...clean, summary: "x".repeat(6001) },
     {
       complete: true,
       outcome: "findings",
@@ -468,7 +468,7 @@ test("rejects lost/duplicate findings, malformed schemas and unobserved paths", 
       outcome: "findings",
       findingCount: 1,
       summary: "Issues",
-      findings: [{ ...finding, reason: "x".repeat(3001) }],
+      findings: [{ ...finding, reason: "x".repeat(6001) }],
     },
     {
       complete: true,
@@ -836,4 +836,79 @@ test("rejects accessor configuration without invoking it or exposing errors", as
     { code: "invalid_input" },
   );
   assert.equal(called, 0);
+});
+
+test("accepts the long-but-bounded titles and reasons the live model produces (2026-09-16 staging failure)", async () => {
+  // Staging run 35033080135 and 2 of 6 local replays of the identical comparison failed
+  // post-validation on titles of 306 and 310 characters; the JSON schema cannot carry
+  // maxLength, so the validator must tolerate what the prompt can only request.
+  const observed = {
+    complete: true,
+    outcome: "findings",
+    findingCount: 2,
+    summary: "s".repeat(894),
+    findings: [
+      {
+        ...finding,
+        key: "publish-signature-break",
+        title: "t".repeat(310),
+        reason: "r".repeat(1211),
+      },
+      {
+        ...finding,
+        key: "recovery-scenario-mismatch",
+        title: "u".repeat(306),
+        reason: "q".repeat(1169),
+      },
+    ],
+  };
+  const result = await client(async () => response(envelope(observed))).review(
+    fixture(),
+  );
+  assert.deepEqual(result.review, observed);
+  assert.equal(result.review.findings.length, 2);
+  for (const [report, code] of [
+    [
+      {
+        ...observed,
+        findings: [
+          { ...observed.findings[0], title: "t".repeat(1025) },
+          observed.findings[1],
+        ],
+      },
+      "invalid_finding",
+    ],
+    [
+      {
+        ...observed,
+        findings: [
+          { ...observed.findings[0], reason: "r".repeat(6001) },
+          observed.findings[1],
+        ],
+      },
+      "invalid_finding",
+    ],
+    [{ ...observed, summary: "s".repeat(6001) }, "invalid_review"],
+  ]) {
+    await rejects(
+      client(async () => response(envelope(report))).review(fixture()),
+      code,
+    );
+  }
+  const bounded = {
+    ...observed,
+    summary: "s".repeat(6000),
+    findings: [
+      {
+        ...observed.findings[0],
+        title: "t".repeat(1024),
+        reason: "r".repeat(6000),
+      },
+      observed.findings[1],
+    ],
+  };
+  const accepted = await client(async () => response(envelope(bounded))).review(
+    fixture(),
+  );
+  assert.equal(accepted.review.findings[0].title.length, 1024);
 });
