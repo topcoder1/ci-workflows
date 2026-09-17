@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: merge-policy-review-execution-v1
+  group: merge-policy-review-execution-v2
   cancel-in-progress: false
 
 jobs:
@@ -20,10 +20,10 @@ jobs:
       github.repository == 'topcoder1/techrecon-merge-policy-staging' &&
       github.repository_id == '1364800834' &&
       github.run_attempt == '1' &&
-      github.ref == 'refs/tags/merge-policy-review-execution-v1' &&
+      github.ref == 'refs/tags/merge-policy-review-execution-v2' &&
       github.ref_protected == true &&
       github.sha == github.workflow_sha &&
-      github.workflow_ref == 'topcoder1/techrecon-merge-policy-staging/.github/workflows/merge-policy-selftest.yml@refs/tags/merge-policy-review-execution-v1'
+      github.workflow_ref == 'topcoder1/techrecon-merge-policy-staging/.github/workflows/merge-policy-selftest.yml@refs/tags/merge-policy-review-execution-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
