@@ -52,6 +52,8 @@ export const REVIEW_TEXT_LIMITS = Object.freeze({
 });
 // Ledger event reasons carry a prefix on top of review text: intake writes
 // `<finding key>: <reason>` and `Receipt commitment sha256:<digest>; <summary>`.
+// Must stay <= the per-string copy bound in merge-policy-intake.mjs (8192), or
+// intake could no longer read back a ledger this engine accepted.
 const EVENT_REASON_LIMIT = 8192;
 
 function string(value, label, max = 4096) {

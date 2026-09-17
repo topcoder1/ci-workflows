@@ -953,8 +953,9 @@ test("intake, the ledger engine and the standalone reviewer pin the same review 
   // module cannot notice that module narrowing (2026-09-16: intake kept
   // 256/3000 after the reviewer moved to 1024/6000 and rejected live reviews).
   const expected = { title: 1024, reason: 6000, summary: 6000 };
-  assert.deepEqual({ ...REVIEW_TEXT_LIMITS }, expected);
-  assert.deepEqual(
+  assert.ok(Object.isFrozen(REVIEW_TEXT_LIMITS));
+  assert.deepStrictEqual({ ...REVIEW_TEXT_LIMITS }, expected);
+  assert.deepStrictEqual(
     {
       title: ANTHROPIC_REVIEW_LIMITS.titleChars,
       reason: ANTHROPIC_REVIEW_LIMITS.reasonChars,
