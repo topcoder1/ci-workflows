@@ -15,7 +15,7 @@ The future entrypoint is `.github/scripts/merge-policy-review-execution-probe.mj
 | Head                       | `3bae7ba0a625e0199c4203bcca9f4f1bfe009a09`                                      |
 | Measured comparison SHA256 | `cd663d3aa45e822cadb97651940d004b06ede75f8468c25b9d893dfabe67dca7`              |
 | Workflow path / ID         | `.github/workflows/merge-policy-selftest.yml` / `355220095`                     |
-| New dispatch ref           | `refs/tags/merge-policy-review-execution-v1`                                    |
+| New dispatch ref           | `refs/tags/merge-policy-review-execution-v2`                                    |
 | Supported attempt          | `1`                                                                             |
 | Review lane                | `staging-review-probe`                                                          |
 | Provider                   | Existing `claude-sonnet-4-6` data-only producer, one request, no tools or retry |
@@ -52,7 +52,7 @@ Approve the whole execution and downloaded runtime/action dependency chain; the 
 
 Before dispatch, the exact execution packet must include the reviewed shared-source commit, resulting staging commit/tree, complete material manifest, fixed target and policy digests, new immutable tag and no-same-name-branch protections, verified native workflow identity, actor and one-run scope, bounded provider cost and secret route, storage/readback limits and failure evidence procedure. `MERGE_POLICY_REVIEW_API_KEY` availability is not assumed. The existing staging App installation is complete and must not be requested again; its current permissions do not include Actions read. This package grants no new permission or secret access.
 
-The original v1 ref has already been used by staging run `35033080135` attempt 1, which failed with a collapsed `review_failed` code and no report artifact. Its roughly 71-second review step does not establish that the configured 120-second deadline caused the failure. This source repair does not move that immutable tag, enlarge limits or authorize another request. A later run needs a newly reviewed execution packet and new protected ref.
+The original v1 ref has already been used by staging run `35033080135` attempt 1, which failed with a collapsed `review_failed` code and no report artifact. Its roughly 71-second review step does not establish that the configured 120-second deadline caused the failure. This source repair does not move that immutable tag, enlarge limits or authorize another request. A later run needs a newly reviewed execution packet and new protected ref. That new protected ref is `refs/tags/merge-policy-review-execution-v2`, pinned identically in the entrypoint, the workflow template's job condition and concurrency group, and this table; the v1 tag, its protections and its consumed one-run budget are untouched. The v2 packet follows the same rule: one dispatch, attempt 1, a durable record before the effect, and no redispatch.
 
 The expected successful result is a completed structured review of this historical synthetic comparison with exact bytes and provenance observations. The result may contain findings. It is not a clean-merge acceptance test. Current-target binding, independent execution authentication, durable intake/publication and protected merge enforcement remain subsequent work.
 

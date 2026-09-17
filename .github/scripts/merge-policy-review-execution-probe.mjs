@@ -11,7 +11,7 @@ import {
 } from "./merge-policy-review-producer.mjs";
 import { STAGING_PROBE_TARGET } from "./merge-policy-transport-probe.mjs";
 
-export const REVIEW_PROBE_REF = "refs/tags/merge-policy-review-execution-v1";
+export const REVIEW_PROBE_REF = "refs/tags/merge-policy-review-execution-v2";
 export const REVIEW_PROBE_DIRECTORY = "merge-policy-review-execution-probe";
 export const REVIEW_PROBE_FILE = "merge-policy-review-execution-probe.json";
 export const REVIEW_PROBE_FAILURE_FILE =
