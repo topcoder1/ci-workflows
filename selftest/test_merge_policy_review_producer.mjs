@@ -11,6 +11,7 @@ import {
   reviewProducerFailure,
 } from "../.github/scripts/merge-policy-review-producer.mjs";
 import { prepareReviewIntake } from "../.github/scripts/merge-policy-intake.mjs";
+import { evaluate } from "../.github/scripts/merge-policy-core.mjs";
 import { emptyLedger } from "../.github/scripts/merge-policy-state.mjs";
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -188,10 +189,8 @@ test("real Git measurement feeds one data-only request and canonical receipt", a
   );
 });
 
-test("generated wire receipt preserves every finding through existing intake", async (t) => {
-  const f = fixture(t);
-  const c = client({ result: findings });
-  const out = await c.producer.produce(f.input);
+// Synthetic trusted-reader wiring shared by the intake round trips below.
+async function throughIntake(f, out) {
   const context = {
     ...f.input.dispatch.target,
     authorId: 100,
@@ -259,6 +258,14 @@ test("generated wire receipt preserves every finding through existing intake", a
       artifact: async () => out.receiptBytes,
     },
   });
+  return { context, policy, result };
+}
+
+test("generated wire receipt preserves every finding through existing intake", async (t) => {
+  const f = fixture(t);
+  const c = client({ result: findings });
+  const out = await c.producer.produce(f.input);
+  const { result } = await throughIntake(f, out);
   assert.equal(
     result.events.filter((event) => event.type === "finding").length,
     2,
@@ -266,6 +273,45 @@ test("generated wire receipt preserves every finding through existing intake", a
   assert.equal(result.events.at(-1).type, "review");
   assert.equal(result.events.at(-1).findingIds.length, 2);
   assert.equal(result.enforcementPublished, false);
+});
+
+test("a receipt at the reviewer's text bounds passes existing intake and the ledger engine unchanged", async (t) => {
+  // 2026-09-16 staging failure, second stage: intake kept the 256/3000 caps
+  // the reviewer had just outgrown, and the ledger engine capped event titles
+  // at 256 and reasons at 4096 behind it.
+  const f = fixture(t);
+  const maximal = () => ({
+    complete: true,
+    outcome: "findings",
+    findingCount: 1,
+    summary: "s".repeat(6000),
+    findings: [
+      {
+        key: "long-finding",
+        title: "t".repeat(1024),
+        priority: 1,
+        path: "review.js",
+        reason: "r".repeat(6000),
+      },
+    ],
+  });
+  const c = client({ result: maximal });
+  const out = await c.producer.produce(f.input);
+  assert.equal(out.receipt.findings[0].title.length, 1024);
+  const { context, policy, result } = await throughIntake(f, out);
+  const finding = result.events.find((event) => event.type === "finding");
+  assert.equal(finding.title, "t".repeat(1024));
+  assert.equal(finding.reason, `long-finding: ${"r".repeat(6000)}`);
+  assert.ok(result.events.at(-1).reason.endsWith(`; ${"s".repeat(6000)}`));
+  assert.equal(
+    evaluate({
+      policy,
+      context,
+      ledger: result.ledger,
+      now: "2026-09-16T00:00:00Z",
+    }).decision,
+    "hold",
+  );
 });
 
 test("dispatch snapshot survives mutation while provider call is pending", async (t) => {

@@ -42,6 +42,20 @@ function keys(value, required, optional, label) {
   }
 }
 
+// Review text bounds. The data-only reviewer (merge-policy-anthropic-review.mjs)
+// keeps its own copy because it imports nothing; intake and this engine share
+// these. A finding the reviewer accepts must survive every later stage intact.
+export const REVIEW_TEXT_LIMITS = Object.freeze({
+  title: 1024,
+  reason: 6000,
+  summary: 6000,
+});
+// Ledger event reasons carry a prefix on top of review text: intake writes
+// `<finding key>: <reason>` and `Receipt commitment sha256:<digest>; <summary>`.
+// Must stay <= the per-string copy bound in merge-policy-intake.mjs (8192), or
+// intake could no longer read back a ledger this engine accepted.
+const EVENT_REASON_LIMIT = 8192;
+
 function string(value, label, max = 4096) {
   if (
     typeof value !== "string" ||
@@ -268,7 +282,7 @@ function checkEvent(event, policy, context, history, current) {
   pattern(event.baseSha, SHA, "event.baseSha");
   pattern(event.policyDigest, DIGEST, "event.policyDigest");
   evidence(event.evidenceUrl);
-  string(event.reason, "event.reason");
+  string(event.reason, "event.reason", EVENT_REASON_LIMIT);
   if (current && !sameBinding(event, context))
     fail("new event must match current head/base/policy binding");
 
@@ -282,7 +296,7 @@ function checkEvent(event, policy, context, history, current) {
     pattern(event.findingId, ID, "event.findingId");
     if (history.findings.has(event.findingId))
       fail(`finding ${event.findingId} cannot be redefined`);
-    string(event.title, "event.title", 256);
+    string(event.title, "event.title", REVIEW_TEXT_LIMITS.title);
     integer(event.priority, 0, "event.priority");
     if (event.priority > 3) fail("event.priority must be between 0 and 3");
     path(event.path);
