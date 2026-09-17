@@ -530,7 +530,7 @@ test("strict event schema rejects unknown or missing fields and invalid scalar v
     { path: "../outside" },
     { path: "/absolute" },
     { path: "a//b" },
-    { reason: "x".repeat(4097) },
+    { reason: "x".repeat(8193) },
   ])
     assert.throws(() =>
       validateEvent(finding("F", overrides), policy(), context(), []),
@@ -575,4 +575,51 @@ test("evaluation and event validation leave caller-owned inputs unchanged", () =
     input.ledger.events,
   );
   assert.equal(JSON.stringify(input), before);
+});
+
+test("finding text at the review bounds survives ledger validation; one past fails", () => {
+  const title = "t".repeat(1024);
+  const reason = `long-finding: ${"r".repeat(6000)}`;
+  const accepted = finding("F", { title, reason });
+  assert.equal(validateEvent(accepted, policy(), context(), []), accepted);
+  assert.equal(run([accepted, ...clean()]).decision, "hold");
+  const commitment = `Receipt commitment sha256:${"c".repeat(64)}; ${"s".repeat(6000)}`;
+  assert.equal(
+    validateEvent(
+      review("claude", { reason: commitment }),
+      policy(),
+      context(),
+      [],
+    ).reason,
+    commitment,
+  );
+  assert.equal(
+    validateEvent(
+      finding("F", { reason: "r".repeat(8192) }),
+      policy(),
+      context(),
+      [],
+    ).reason.length,
+    8192,
+  );
+  assert.throws(
+    () =>
+      validateEvent(
+        finding("F", { title: "t".repeat(1025) }),
+        policy(),
+        context(),
+        [],
+      ),
+    /event\.title must be a nonempty string of at most 1024 characters/,
+  );
+  assert.throws(
+    () =>
+      validateEvent(
+        finding("F", { reason: "r".repeat(8193) }),
+        policy(),
+        context(),
+        [],
+      ),
+    /event\.reason must be a nonempty string of at most 8192 characters/,
+  );
 });

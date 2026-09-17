@@ -6,7 +6,11 @@ import {
   prepareReviewIntake,
   validateProducerConfiguration,
 } from "../.github/scripts/merge-policy-intake.mjs";
-import { evaluate } from "../.github/scripts/merge-policy-core.mjs";
+import {
+  REVIEW_TEXT_LIMITS,
+  evaluate,
+} from "../.github/scripts/merge-policy-core.mjs";
+import { ANTHROPIC_REVIEW_LIMITS } from "../.github/scripts/merge-policy-anthropic-review.mjs";
 import { emptyLedger } from "../.github/scripts/merge-policy-state.mjs";
 
 const clone = (value) => structuredClone(value);
@@ -904,4 +908,58 @@ test("a stalled reader times out and receives cancellation without returning a c
   };
   await fails(input, "adapter_timeout");
   assert.equal(signal.aborted, true);
+});
+
+test("review text at the producer bounds passes intake unchanged and evaluates under the ledger engine", async () => {
+  const { input, state, seal } = fixture();
+  const title = "t".repeat(REVIEW_TEXT_LIMITS.title);
+  const reason = "r".repeat(REVIEW_TEXT_LIMITS.reason);
+  const summary = "s".repeat(REVIEW_TEXT_LIMITS.summary);
+  state.receipt.summary = summary;
+  state.receipt.findings[0].title = title;
+  state.receipt.findings[0].reason = reason;
+  seal();
+  const result = await prepareReviewIntake(input);
+  assert.equal(result.events[0].title, title);
+  assert.equal(
+    result.events[0].reason,
+    `${state.receipt.findings[0].key}: ${reason}`,
+  );
+  assert.ok(result.events[1].reason.endsWith(`; ${summary}`));
+  assert.equal(decision(input, result.ledger).decision, "hold");
+});
+
+test("review text one character past the producer bounds is refused at intake", async () => {
+  for (const change of [
+    (receipt) => {
+      receipt.findings[0].title = "t".repeat(1025);
+    },
+    (receipt) => {
+      receipt.findings[0].reason = "r".repeat(6001);
+    },
+    (receipt) => {
+      receipt.summary = "s".repeat(6001);
+    },
+  ]) {
+    const { input, state, seal } = fixture();
+    change(state.receipt);
+    seal();
+    await fails(input, "invalid_input");
+  }
+});
+
+test("intake, the ledger engine and the standalone reviewer pin the same review text bounds", () => {
+  // Literal expectations on purpose: a test that reads its bounds from one
+  // module cannot notice that module narrowing (2026-09-16: intake kept
+  // 256/3000 after the reviewer moved to 1024/6000 and rejected live reviews).
+  const expected = { title: 1024, reason: 6000, summary: 6000 };
+  assert.deepEqual({ ...REVIEW_TEXT_LIMITS }, expected);
+  assert.deepEqual(
+    {
+      title: ANTHROPIC_REVIEW_LIMITS.titleChars,
+      reason: ANTHROPIC_REVIEW_LIMITS.reasonChars,
+      summary: ANTHROPIC_REVIEW_LIMITS.summaryChars,
+    },
+    expected,
+  );
 });

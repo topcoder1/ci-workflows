@@ -15,6 +15,12 @@ export const ANTHROPIC_REVIEW_LIMITS = Object.freeze({
   findings: 64,
   maxTokens: 8192,
   deadlineMs: 120000,
+  // Characters per review text field. REVIEW_TEXT_LIMITS in
+  // merge-policy-core.mjs mirrors these for intake and the ledger engine;
+  // this module deliberately imports nothing.
+  titleChars: 1024,
+  reasonChars: 6000,
+  summaryChars: 6000,
 });
 const ENDPOINT = "https://api.anthropic.com/v1/messages";
 const SHA = /^[a-f0-9]{40}$/;
@@ -433,7 +439,7 @@ function reviewResult(message, comparison) {
     "invalid_review",
   );
   requireThat(review.complete === true, "incomplete_review");
-  text(review.summary, 6000, "invalid_review");
+  text(review.summary, ANTHROPIC_REVIEW_LIMITS.summaryChars, "invalid_review");
   array(review.findings, ANTHROPIC_REVIEW_LIMITS.findings, "invalid_review");
   requireThat(
     Number.isSafeInteger(review.findingCount) &&
@@ -458,8 +464,12 @@ function reviewResult(message, comparison) {
       "invalid_finding",
     );
     keys.add(finding.key);
-    text(finding.title, 1024, "invalid_finding");
-    text(finding.reason, 6000, "invalid_finding");
+    text(finding.title, ANTHROPIC_REVIEW_LIMITS.titleChars, "invalid_finding");
+    text(
+      finding.reason,
+      ANTHROPIC_REVIEW_LIMITS.reasonChars,
+      "invalid_finding",
+    );
     path(finding.path, "invalid_finding");
     requireThat(
       Number.isInteger(finding.priority) &&

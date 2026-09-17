@@ -2,7 +2,11 @@
 // trust inputs; this module does not authenticate GitHub or publish decisions.
 import { createHash } from "node:crypto";
 import { TextDecoder, types } from "node:util";
-import { validateContext, validatePolicy } from "./merge-policy-core.mjs";
+import {
+  REVIEW_TEXT_LIMITS,
+  validateContext,
+  validatePolicy,
+} from "./merge-policy-core.mjs";
 import { appendEvent } from "./merge-policy-state.mjs";
 
 export const INTAKE_LIMITS = Object.freeze({
@@ -431,7 +435,7 @@ export async function prepareReviewIntake(input) {
     shape(receipt.target, TARGET_FIELDS);
     equal(receipt.target, target);
     requireThat(receipt.lane === producer.lane, "lane_mismatch");
-    text(receipt.summary, 3000);
+    text(receipt.summary, REVIEW_TEXT_LIMITS.summary);
     requireThat(
       Array.isArray(receipt.findings) &&
         receipt.findings.length <= INTAKE_LIMITS.findings,
@@ -453,8 +457,8 @@ export async function prepareReviewIntake(input) {
       matches(finding.key, ID);
       requireThat(!findingKeys.has(finding.key), "duplicate_finding");
       findingKeys.add(finding.key);
-      text(finding.title, 256);
-      text(finding.reason, 3000);
+      text(finding.title, REVIEW_TEXT_LIMITS.title);
+      text(finding.reason, REVIEW_TEXT_LIMITS.reason);
       // Core validates priority and repository-relative path in the batch.
     }
     const refreshed = copyData(
