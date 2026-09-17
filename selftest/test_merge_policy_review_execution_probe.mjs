@@ -703,3 +703,34 @@ test("CLI rejects arguments and unsupported context with bounded output", () => 
     assert.equal(child.stderr.includes("synthetic-must-not-escape"), false);
   }
 });
+
+test("the inactive workflow template pins the same execution ref, workflow and target as the entrypoint", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { REVIEW_PROBE_REF, REVIEW_PROBE_WORKFLOW } =
+    await import("../.github/scripts/merge-policy-review-execution-probe.mjs");
+  const { STAGING_PROBE_TARGET } =
+    await import("../.github/scripts/merge-policy-transport-probe.mjs");
+  const template = readFileSync(
+    new URL(
+      "../scripts/merge-policy/staging/review-execution-probe.workflow.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  // Literal on purpose: the constant and the template are separate artifacts,
+  // and a test that only compared them to each other would pass a bump that
+  // landed in neither. 2026-09-16: the v1 budget was consumed, v2 is current.
+  const expected = "refs/tags/merge-policy-review-execution-v2";
+  assert.equal(REVIEW_PROBE_REF, expected);
+  const tag = expected.slice("refs/tags/".length);
+  for (const line of [
+    `  group: ${tag}`,
+    `github.ref == '${expected}'`,
+    `github.repository == '${STAGING_PROBE_TARGET.repository}'`,
+    `github.repository_id == '${STAGING_PROBE_TARGET.repositoryId}'`,
+    `github.workflow_ref == '${STAGING_PROBE_TARGET.repository}/${REVIEW_PROBE_WORKFLOW.path}@${expected}'`,
+  ])
+    assert.ok(template.includes(line), `template is missing: ${line}`);
+  // Negative control: the consumed v1 ref must not survive anywhere in the template.
+  assert.doesNotMatch(template, /merge-policy-review-execution-v1/);
+});
