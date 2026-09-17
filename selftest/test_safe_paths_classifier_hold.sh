@@ -79,6 +79,29 @@ else
   failed=1
 fi
 
+# The ERROR path. The tier-3 step converts every failure mode it ANTICIPATES
+# into hold=1, but `setup_node` failing, or an unanticipated error inside the
+# step, leaves no output at all — and under the revoke step's implicit
+# success() both would skip it, so an arm an earlier revision placed survives
+# and merges when required checks go green. Needs `always()` plus BOTH step
+# outcomes, scoped to the would-arm branch so it cannot disarm a sibling.
+revoke_if=$(awk '
+  /^      - name: Revoke/ { f=1 }
+  f && /^        env:/    { f=0 }
+  f { print }
+' "$WF")
+missing=""
+grep -q 'always()' <<<"$revoke_if" || missing="$missing always()"
+grep -qE "steps\.setup_node\.outcome == 'failure'" <<<"$revoke_if" || missing="$missing setup_node-failure"
+grep -qE "steps\.classifier_hold\.outcome == 'failure'" <<<"$revoke_if" || missing="$missing classifier_hold-failure"
+grep -qE "steps\.classify\.outputs\.all_safe == '1'" <<<"$revoke_if" || missing="$missing all_safe-scope"
+if [ -z "$missing" ]; then
+  echo "✓ revoke step covers a gate ERROR too (always() + both step outcomes, scoped to the would-arm branch)"
+else
+  echo "✗ revoke step's error path is missing:$missing — a failed setup_node or classifier step strands an existing arm"
+  failed=1
+fi
+
 # The tier-3 verdict must NOT be releasable by the bypass label, mirroring the
 # sibling gate, where a blocked/sensitive classifier verdict skips the bypass
 # step entirely. The fleet lists are our guess about a repo; risk-paths.yml is

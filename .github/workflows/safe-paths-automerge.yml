@@ -602,12 +602,34 @@ jobs:
       # both the classified blocked/sensitive case and its fail-closed
       # branches, which is why that step holds rather than exiting nonzero
       # (a failed step would SKIP this revoke and leave the arm standing).
-      - name: Revoke auto-merge on an unsafe-override path
-        if: >-
-          steps.classify.outputs.reason == 'unsafe-override' ||
-          steps.classify.outputs.reason == 'risk-tier-hold' ||
-          steps.classify.outputs.reason == 'file-list-truncated' ||
-          steps.classifier_hold.outputs.hold == '1'
+      #
+      # The last clause is the ERROR path, and it needs `always()`: the
+      # tier-3 step converts every failure mode it ANTICIPATES into hold=1,
+      # but `setup_node` failing (a node download blip) or an unanticipated
+      # error inside the step itself leaves no output at all. Both skip this
+      # step under its implicit success(), so an arm an earlier revision
+      # placed survives and merges once required checks go green — exactly
+      # the bypass the tier exists to stop (codex round 1 P1).
+      #
+      # Scoped to `all_safe == '1'`, which is what keeps it from fighting a
+      # sibling: in that branch this workflow is the one that arms, so there
+      # is no other workflow's decision to override. A hard failure of the
+      # `classify` step itself is deliberately NOT covered — all_safe is
+      # then unknown, the diff may carry source files, and revoking would
+      # disarm a sibling's legitimate arm on a PR this workflow never had a
+      # view on. Every new disjunct demands an explicit `== 'failure'`, so a
+      # cancelled run (concurrency cancel-in-progress is on) never trips it,
+      # and the head-ownership guard below still covers a moved head.
+      - name: Revoke auto-merge on a must-not-merge verdict or gate error
+        if: |
+          always() &&
+          (steps.classify.outputs.reason == 'unsafe-override' ||
+           steps.classify.outputs.reason == 'risk-tier-hold' ||
+           steps.classify.outputs.reason == 'file-list-truncated' ||
+           steps.classifier_hold.outputs.hold == '1' ||
+           (steps.classify.outputs.all_safe == '1' &&
+            (steps.setup_node.outcome == 'failure' ||
+             steps.classifier_hold.outcome == 'failure')))
         env:
           # Match the enable step's token: an arm placed by the PAT is
           # revoked by the same identity.
@@ -615,7 +637,10 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CLASSIFY_REASON: ${{ steps.classify.outputs.reason || steps.classifier_hold.outputs.reason }}
+          # 'gate-error' is the third case: the error path below runs with
+          # neither step having emitted a reason, and "unknown" in the log
+          # would read as a bug rather than the specific condition it is.
+          CLASSIFY_REASON: ${{ steps.classify.outputs.reason || steps.classifier_hold.outputs.reason || 'gate-error' }}
         run: |
           set -euo pipefail
           # Ownership guard, mirroring claude-author-automerge.yml: if the
