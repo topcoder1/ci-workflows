@@ -372,6 +372,199 @@ jobs:
             echo "All $(echo "$changed" | wc -l | tr -d ' ') changed files are in safe paths."
           fi
 
+      # TIER 3 — THE CALLER'S OWN POLICY.
+      #
+      # Tiers 1 and 2 above are FLEET-WIDE lists: every repo gets the same
+      # unsafe overrides and the same risk-tier regex. Neither has ever read
+      # the caller's `.github/risk-paths.yml`, so a path a repo declared
+      # `sensitive:`/`blocked:` in its OWN policy was armed here regardless —
+      # and claude-author-automerge.yml declining to arm it does not stop
+      # that, because a decline is an ABSTENTION, not a veto: this workflow
+      # is the only one that arms a docs/tests diff, so the permissive gate
+      # wins silently (inbox_superpilot#215, 2026-08-10).
+      #
+      # The fleet has been patching this one pattern at a time — docs/legal,
+      # docs/decisions, docs/marketing, docs/pricing, docs/product-page all
+      # entered the central lists because some repo's own `sensitive:` entry
+      # could not reach this workflow. That does not scale and it over-blocks
+      # 141 repos to gate one. Read the caller's policy instead.
+      #
+      # Scoped to the would-arm branch, for the same reason tier 2 is: a
+      # verdict emitted on a PR this workflow never arms would make the
+      # revoke step disarm a SIBLING workflow's legitimate auto-merge.
+      # That scoping is also what keeps the cost off the common path —
+      # nothing here runs unless the diff is already 100% docs/tests and
+      # clean under both fleet-wide tiers.
+      #
+      # NOT releasable by the bypass label, deliberately, and this is the
+      # one place tier 3 differs from tier 2. It mirrors the sibling gate,
+      # where a `blocked`/`sensitive` classifier verdict skips the bypass
+      # step entirely: the fleet lists are our guess about a repo, but
+      # risk-paths.yml is that repo's own stated policy, and a label click
+      # is not an amendment to it. The escape hatch is editing the policy
+      # file — visible, reviewed, and the same one the sibling offers.
+      - name: Setup Node (caller risk-paths classification)
+        id: setup_node
+        if: steps.classify.outputs.all_safe == '1'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Check the caller's risk-paths.yml verdict
+        id: classifier_hold
+        if: steps.classify.outputs.all_safe == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
+
+          # Fail-closed WITHOUT exiting nonzero. Every other branch of this
+          # workflow exits 0 with a reason, and that is load-bearing here: a
+          # nonzero exit fails the job, which SKIPS the revoke step below and
+          # leaves an arm a previous run placed standing — the opposite of
+          # fail closed for the PR that most needs it. Emitting hold=1 both
+          # withholds the arm and triggers the revoke. The ::error:: keeps it
+          # visible in the run's annotations.
+          hold() {
+            echo "hold=1" >> "$GITHUB_OUTPUT"
+            echo "reason=$1" >> "$GITHUB_OUTPUT"
+            shift
+            echo "::error::$*"
+            exit 0
+          }
+
+          rules_ref="$BASE_REF"
+
+          # Rules file for a given ref. A 404 is definitive (file absent at
+          # that ref); anything else retries, then holds — never arm under an
+          # unreadable policy. Sets rp_state=present|absent and rp_b64.
+          # Read from the BASE ref, never the head: a PR must not be able to
+          # edit its own risk file to escape the gate.
+          rp_state=""
+          rp_b64=""
+          read_rules() {
+            local ref="$1" i rp_err
+            rp_state=""
+            for i in 1 2 3; do
+              rp_err=$(mktemp)
+              if rp_b64=$(gh api -X GET \
+                    "repos/${REPO}/contents/.github/risk-paths.yml" \
+                    -f ref="$ref" --jq '.content' 2>"$rp_err"); then
+                rp_state="present"; rm -f "$rp_err"; return 0
+              fi
+              if grep -q 'HTTP 404' "$rp_err"; then
+                rp_state="absent"; rm -f "$rp_err"; return 0
+              fi
+              cat "$rp_err" >&2; rm -f "$rp_err"
+              [ "$i" -lt 3 ] && sleep $((i * 5))
+            done
+            hold "rules-unreadable" \
+              "could not read .github/risk-paths.yml@${ref} after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
+          }
+
+          read_rules "$rules_ref"
+          # Absent on the base ref ⇒ fall back to the DEFAULT branch's policy,
+          # matching the sibling gate: a PR targeting a release/legacy branch
+          # created before risk-paths.yml existed must not dodge the repo's
+          # policy. Only when the default branch lacks it too is the repo
+          # genuinely policy-free — which is the majority of the fleet, and
+          # costs exactly one 404 to establish.
+          if [ "$rp_state" = "absent" ] && [ -n "$DEFAULT_BRANCH" ] && [ "$rules_ref" != "$DEFAULT_BRANCH" ]; then
+            echo "No .github/risk-paths.yml on ${rules_ref} — falling back to the default branch's policy (${DEFAULT_BRANCH})."
+            rules_ref="$DEFAULT_BRANCH"
+            read_rules "$rules_ref"
+          fi
+
+          if [ "$rp_state" != "present" ]; then
+            echo "hold=0" >> "$GITHUB_OUTPUT"
+            echo "No .github/risk-paths.yml on ${BASE_REF} or the default branch — no caller policy to honor; tiers 1 and 2 already passed."
+            exit 0
+          fi
+
+          changed=$(retry gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[].filename') || \
+            hold "file-list-unreadable" \
+              "could not list PR changed files after 3 attempts — refusing to arm auto-merge (fail closed)."
+          if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
+            hold "file-list-truncated" \
+              "PR changes 3000+ files — file listing is truncated, cannot classify against the caller's policy. Merge manually."
+          fi
+
+          # Rename SOURCES, appended AFTER the count so they can never push a
+          # large-but-listable PR over the cap. A rename reports only its
+          # destination in `.filename`, so without this a `sensitive:` file
+          # moved into docs/** is judged solely on its new, safe-by-glob path
+          # — and this workflow is the one that would arm it. Same one-way
+          # argument as tiers 1 and 2: classify.mjs returns the
+          # highest-priority class across the set, so adding paths can only
+          # move the verdict toward gating.
+          renamed_from=$(retry gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || \
+            hold "file-list-unreadable" \
+              "could not list PR rename sources after 3 attempts — refusing to arm auto-merge (fail closed)."
+          if [ -n "$renamed_from" ]; then
+            changed=$(printf '%s\n%s' "$changed" "$renamed_from")
+          fi
+
+          # The SAME classifier pr-classify.yml and claude-author-automerge.yml
+          # run, fetched from the same place, run in a scratch dir so the PR
+          # checkout's own (head) risk-paths.yml is never consulted. One
+          # matcher across all three lanes, zero glob-semantics drift.
+          work=$(mktemp -d)
+          mkdir -p "$work/repo/.github"
+          printf '%s' "$rp_b64" | base64 -d > "$work/repo/.github/risk-paths.yml"
+          fetch_mjs() {
+            gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$1" \
+              --jq '.content'
+          }
+          for s in classify.mjs classifier-deps.mjs; do
+            retry fetch_mjs "$s" | base64 -d > "$work/$s" || true
+            if [ ! -s "$work/$s" ]; then
+              hold "classifier-unreadable" \
+                "fetched an empty $s from topcoder1/ci-workflows — refusing to arm auto-merge (fail closed)."
+            fi
+          done
+
+          # classify.mjs exits nonzero on its own fail-closed guards (bracket,
+          # negation, scalar-where-a-list-belongs, YAML parse). `set -e` would
+          # kill the step and skip the revoke, so capture the status and hold.
+          # stderr goes to its own file, NOT into `class`: classify.mjs writes
+          # a non-fatal warning there on the node_modules fallback path, and
+          # folding that into stdout would turn a perfectly good verdict into
+          # an enum violation.
+          class=""
+          cls_err=$(mktemp)
+          if ! class=$(cd "$work/repo" && printf '%s\n' "$changed" | node "$work/classify.mjs" 2>"$cls_err"); then
+            hold "classifier-error" \
+              "classify.mjs failed against .github/risk-paths.yml@${rules_ref} — refusing to arm auto-merge (fail closed). Output: $(tr '\n' ' ' < "$cls_err")"
+          fi
+          rm -f "$cls_err"
+          class=$(printf '%s' "$class" | tr -d '[:space:]')
+          echo "risk-paths.yml@${rules_ref} verdict: $class"
+
+          # Closed enum: anything outside the classifier's documented classes
+          # (a garbled line, an empty string, a future class this workflow
+          # doesn't know) must hold, not fall through as benign.
+          case "$class" in
+            blocked|sensitive)
+              echo "hold=1" >> "$GITHUB_OUTPUT"
+              echo "reason=classifier-hold" >> "$GITHUB_OUTPUT"
+              echo "::warning::Diff is docs/tests-only but the caller's own .github/risk-paths.yml@${rules_ref} classifies it '${class}' — holding for a human. The bypass label does not release a caller-policy verdict; amend risk-paths.yml if the path should not be gated."
+              ;;
+            standard|safe_test|safe_deps|safe_config|trivial)
+              echo "hold=0" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              hold "classifier-enum" \
+                "classify.mjs printed unexpected class '$class' — refusing to arm auto-merge (fail closed)."
+              ;;
+          esac
+
       # Computing all_safe=0 is not enough once auto-merge is already ON.
       # GitHub PRESERVES an auto-merge request across pushes, so the
       # sequence "PR touches only docs/foo.md (armed here) → push adds
@@ -401,11 +594,42 @@ jobs:
       # which mean "defer to another workflow". Releasing the hold via the
       # bypass label sets no reason at all, so an operator who applies the
       # label never trips this step. (Lesson 2026-08-10, inbox_superpilot#215.)
-      - name: Revoke auto-merge on an unsafe-override path
-        if: >-
-          steps.classify.outputs.reason == 'unsafe-override' ||
-          steps.classify.outputs.reason == 'risk-tier-hold' ||
-          steps.classify.outputs.reason == 'file-list-truncated'
+      # `classifier_hold` joins the revoke set for exactly the reason the two
+      # above it did: GitHub PRESERVES an auto-merge request across pushes,
+      # so "PR touches only docs/notes.md (armed here) → push adds a path the
+      # caller's risk-paths.yml gates" would otherwise keep the arm. Every
+      # hold=1 it emits is a positive "this must not auto-merge" verdict —
+      # both the classified blocked/sensitive case and its fail-closed
+      # branches, which is why that step holds rather than exiting nonzero
+      # (a failed step would SKIP this revoke and leave the arm standing).
+      #
+      # The last clause is the ERROR path, and it needs `always()`: the
+      # tier-3 step converts every failure mode it ANTICIPATES into hold=1,
+      # but `setup_node` failing (a node download blip) or an unanticipated
+      # error inside the step itself leaves no output at all. Both skip this
+      # step under its implicit success(), so an arm an earlier revision
+      # placed survives and merges once required checks go green — exactly
+      # the bypass the tier exists to stop (codex round 1 P1).
+      #
+      # Scoped to `all_safe == '1'`, which is what keeps it from fighting a
+      # sibling: in that branch this workflow is the one that arms, so there
+      # is no other workflow's decision to override. A hard failure of the
+      # `classify` step itself is deliberately NOT covered — all_safe is
+      # then unknown, the diff may carry source files, and revoking would
+      # disarm a sibling's legitimate arm on a PR this workflow never had a
+      # view on. Every new disjunct demands an explicit `== 'failure'`, so a
+      # cancelled run (concurrency cancel-in-progress is on) never trips it,
+      # and the head-ownership guard below still covers a moved head.
+      - name: Revoke auto-merge on a must-not-merge verdict or gate error
+        if: |
+          always() &&
+          (steps.classify.outputs.reason == 'unsafe-override' ||
+           steps.classify.outputs.reason == 'risk-tier-hold' ||
+           steps.classify.outputs.reason == 'file-list-truncated' ||
+           steps.classifier_hold.outputs.hold == '1' ||
+           (steps.classify.outputs.all_safe == '1' &&
+            (steps.setup_node.outcome == 'failure' ||
+             steps.classifier_hold.outcome == 'failure')))
         env:
           # Match the enable step's token: an arm placed by the PAT is
           # revoked by the same identity.
@@ -413,7 +637,10 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CLASSIFY_REASON: ${{ steps.classify.outputs.reason }}
+          # 'gate-error' is the third case: the error path below runs with
+          # neither step having emitted a reason, and "unknown" in the log
+          # would read as a bug rather than the specific condition it is.
+          CLASSIFY_REASON: ${{ steps.classify.outputs.reason || steps.classifier_hold.outputs.reason || 'gate-error' }}
         run: |
           set -euo pipefail
           # Ownership guard, mirroring claude-author-automerge.yml: if the
@@ -454,8 +681,16 @@ jobs:
           fi
           echo "Auto-merge verified OFF."
 
+      # `hold == '0'`, not `hold != '1'`. Arm only on POSITIVE evidence that
+      # the classifier ran and cleared the diff: a skipped or hard-failed
+      # step leaves the output an empty string, which `!= '1'` reads as
+      # permission to arm. Every path through that step writes hold
+      # explicitly, so requiring '0' costs nothing and is the only form that
+      # stays fail-closed if the step ever stops running.
       - name: Enable auto-merge
-        if: steps.classify.outputs.all_safe == '1'
+        if: >-
+          steps.classify.outputs.all_safe == '1' &&
+          steps.classifier_hold.outputs.hold == '0'
         env:
           # Prefer the caller-supplied PAT so the merge commit triggers
           # downstream `push:` workflows (deploy, CI). Fall back to the

@@ -49,6 +49,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_prettier_symlink_filter.sh",
     "selftest/test_ruff_format_gate.sh",
     "selftest/test_ruff_ruleset_warning.sh",
+    "selftest/test_safe_paths_classifier_hold.sh",
     "selftest/test_safe_paths_risk_tier_hold.sh",
     "selftest/test_safe_paths_unsafe_overrides.sh",
 ]

@@ -475,6 +475,38 @@ jobs:
                 exit 1
               fi
 
+              # Renames report ONLY their destination in `.filename`; the
+              # source is in `.previous_filename`. Without it, MOVING a file
+              # OUT of a gated path — a `sensitive:` entry renamed to
+              # `docs/archive/x.md` — classifies `standard` and arms
+              # auto-merge, even though removing a policy from its canonical
+              # location is exactly the edit that needs a human. Worse for a
+              # docs destination: safe-paths-automerge.yml would then arm it
+              # too. The global-regex lane below has scanned both ends since
+              # codex round 9; this lane, which enforces the repo's OWN
+              # risk-paths.yml, did not — so the 44 repos carrying a rules
+              # file (sweep 2026-09-17) had the narrower protection exactly
+              # where their repo-specific gates live.
+              #
+              # Safe by construction: classify.mjs returns the
+              # HIGHEST-priority class across the file set and blocked /
+              # sensitive top that order, so adding paths can only move the
+              # verdict TOWARD gating, never away from it — the same
+              # one-way argument the regex lane makes.
+              #
+              # Appended AFTER the 3000-file count, like the regex lane, so
+              # rename sources can never push a large-but-listable PR over
+              # the cap. Fails CLOSED on an unreadable listing: a rename
+              # source we cannot read is a gate we cannot evaluate.
+              renamed_from=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+                --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || {
+                echo "::error::could not list PR rename sources after 3 attempts — refusing to arm auto-merge (fail closed)."
+                exit 1
+              }
+              if [ -n "$renamed_from" ]; then
+                changed=$(printf '%s\n%s' "$changed" "$renamed_from")
+              fi
+
               # Same classifier pr-classify.yml runs, fetched from the same
               # place, run in a scratch dir so the PR checkout's own (head)
               # risk-paths.yml is never consulted. classify.mjs failures
@@ -1205,8 +1237,15 @@ jobs:
           # manual merge. Appended AFTER the 3000-file count so rename
           # sources cannot push a large-but-listable PR over the cap.
           # (Codex review round 9.)
+          #
+          # Fails CLOSED, like the listing above it: this read used to carry
+          # `2>/dev/null || echo ""`, which turned any API blip into "this PR
+          # renames nothing" and handed back the exact escape the scan exists
+          # to close — silently, with no annotation. `set -e` now fails the
+          # step, and the always() error-revoke below disarms any arm a
+          # previous run left standing.
           renamed_from=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[] | select(.previous_filename) | .previous_filename' 2>/dev/null || echo "")
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename')
           if [ -n "$renamed_from" ]; then
             changed=$(printf '%s\n%s' "$changed" "$renamed_from")
           fi

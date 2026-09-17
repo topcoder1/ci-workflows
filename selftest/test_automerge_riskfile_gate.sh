@@ -51,6 +51,18 @@
 #  12. FAIL CLOSED on classifier-output enum violation (codex round-2
 #      P2): classify.mjs printing anything outside the documented class
 #      set ⇒ nonzero, never silently benign.
+#  13. RENAME ESCAPE (dotclaude#336, 2026-09-17): a rename reports only
+#      its DESTINATION in `.filename`. Moving a file out of a gated
+#      path — `sensitive:` → `docs/archive/**` — classified `standard`
+#      and armed, and a docs destination was then armed by
+#      safe-paths-automerge.yml as well. Rename SOURCES must be
+#      classified too, for both gating classes, with a benign rename as
+#      the negative control so the case cannot pass by over-blocking.
+#  14. Rename sources are appended AFTER the 3000-file count, like the
+#      global-regex lane: they must never push a large-but-listable PR
+#      over the cap, and must still be classified when they don't.
+#  15. FAIL CLOSED on an unreadable rename listing — a rename source
+#      that cannot be read is a gate that cannot be evaluated.
 #
 # Structural pins on the surrounding job (codex rounds 2 & 4): the arm
 # is bound to the event head SHA via `--match-head-commit`; an always()
@@ -150,6 +162,38 @@ if ! grep -q 'risk-paths.yml' "$T/gate.sh" || ! grep -q 'GITHUB_OUTPUT' "$T/gate
 fi
 echo "✓ extracted classifier-verdict step ($(wc -l < "$T/gate.sh" | tr -d ' ') lines)"
 
+# Rename sources must be scanned by BOTH lanes. Asserted per-lane, not with
+# one file-wide grep: the two lanes gate different things (this one the
+# repo's own risk-paths.yml, the other the central regex) and a file-wide
+# match would pass with either half deleted — which is precisely the state
+# this change found the fleet in. Comments are stripped first, for the same
+# reason the classify.mjs guard above strips them: both lanes discuss the
+# rename escape at length in prose.
+gate_code=$(grep -vE '^[[:space:]]*#' "$T/gate.sh" || true)
+if grep -q 'previous_filename' <<<"$gate_code"; then
+  echo "✓ classifier lane classifies rename SOURCES (a gated file moved out cannot escape)"
+else
+  echo "✗ classifier lane does not read .previous_filename — a rename out of a gated path escapes the repo's own risk-paths.yml"
+  failed=1
+fi
+wf_code_all=$(grep -vE '^[[:space:]]*#' "$WF" || true)
+rename_reads=$(grep -c 'previous_filename' <<<"$wf_code_all" || true)
+if [ "${rename_reads:-0}" -ge 2 ]; then
+  echo "✓ both automerge lanes read .previous_filename ($rename_reads code references)"
+else
+  echo "✗ only ${rename_reads:-0} lane(s) in $WF read .previous_filename — want both (classifier + global regex)"
+  failed=1
+fi
+# Neither rename read may swallow its own failure. `2>/dev/null || echo ""`
+# turns an API blip into "this PR renames nothing", which is the escape the
+# scan exists to close — fail-open, silent, and invisible in the run log.
+if grep -A2 'previous_filename' <<<"$wf_code_all" | grep -qE '2>/dev/null|\|\| echo'; then
+  echo "✗ a rename listing in $WF swallows its own failure — an API blip reads as 'no renames' (fail open)"
+  failed=1
+else
+  echo "✓ neither rename listing swallows a read failure"
+fi
+
 if grep -q 'labels?per_page=100' "$T/gate.sh" && grep -B1 -A1 'labels?per_page=100' "$T/gate.sh" | grep -q -- '--paginate'; then
   echo "✓ label read paginates (a hand-applied label past page 1 cannot read as absent)"
 else
@@ -168,6 +212,9 @@ fi
 #       STUB_RISK_DEFAULT_FILE — DEFAULT-branch fixture; '' = 404
 #       STUB_RISK_RC           — nonzero: base-ref read fails NON-404
 #       STUB_FILES             — newline-separated changed-file list (path)
+#       STUB_RENAMES           — newline-separated rename SOURCES
+#                                (.previous_filename); '' = no renames
+#       STUB_RENAMES_RC        — nonzero: the rename listing fails (blip)
 #       STUB_CLASSIFY_FILE     — classifier served to the gate (defaults to
 #                                the real classify.mjs via REAL_CLASSIFY)
 #       REAL_DEPS              — the real vendored dep bundle
@@ -216,7 +263,21 @@ case "$args" in
     esac
     ;;
   *pulls/*/files*)
-    cat "$STUB_FILES"
+    # The gate makes TWO calls against this endpoint — the changed-file
+    # listing (.filename) and the rename sources (.previous_filename).
+    # Discriminate on the --jq expression: a stub answering both with the
+    # same fixture would make every rename case pass vacuously, since the
+    # destination it already returns is what we are trying to prove is
+    # insufficient.
+    case "$args" in
+      *previous_filename*)
+        [ "${STUB_RENAMES_RC:-0}" != "0" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
+        printf '%s' "${STUB_RENAMES:-}"
+        ;;
+      *)
+        cat "$STUB_FILES"
+        ;;
+    esac
     ;;
   *)
     echo "gh-stub: unexpected call: $args" >&2
@@ -244,12 +305,12 @@ REAL_DEPS="$PWD/$DEPS"
 # Runner + assertions.
 # ---------------------------------------------------------------------------
 STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
-STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""
+STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""; STUB_RENAMES=""; STUB_RENAMES_RC=0
 STUB_FILES="$T/files.txt"; CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
 
 reset_case() {
   STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
-  STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""
+  STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""; STUB_RENAMES=""; STUB_RENAMES_RC=0
   CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
   : > "$STUB_FILES"
 }
@@ -267,6 +328,7 @@ run_gate() {
     STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_DEFAULT_FILE="$STUB_RISK_DEFAULT_FILE" \
     STUB_RISK_RC="$STUB_RISK_RC" STUB_CLASSIFY_FILE="$STUB_CLASSIFY_FILE" \
     STUB_FILES="$STUB_FILES" REAL_CLASSIFY="$REAL_CLASSIFY" \
+    STUB_RENAMES="$STUB_RENAMES" STUB_RENAMES_RC="$STUB_RENAMES_RC" \
     REAL_DEPS="$REAL_DEPS" \
     bash gate.sh 2>&1)
   GATE_RC=$?
@@ -433,6 +495,81 @@ STUB_RISK_FILE="$T/risk-fixture.yml"
 printf '%s\n' "docs/notes.md" > "$STUB_FILES"
 run_gate
 expect_fail_closed "classifier output outside the class enum fails closed" "unexpected class"
+
+# ---------------------------------------------------------------------------
+# 13-15. RENAME ESCAPE (dotclaude#336, 2026-09-17).
+#
+# A rename reports ONLY its destination in `.filename`. Moving a gated file
+# to a path that matches nothing classified `standard` — auto-merge armed —
+# and a docs/** destination was then armed by safe-paths-automerge.yml too.
+# The global-regex lane has scanned `.previous_filename` since codex round 9;
+# this lane, which enforces the repo's OWN risk-paths.yml, did not.
+#
+# Every case below keeps the DESTINATION deliberately benign, so the verdict
+# can only come from the rename source.
+# ---------------------------------------------------------------------------
+
+# 13a. The headline case: a `sensitive:` file moved into docs/**.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_RENAMES="src/agent/runtime/loop.py"
+printf '%s\n' "docs/archive/loop.py" > "$STUB_FILES"
+run_gate
+expect_verdict "rename OUT of a sensitive path still classifies sensitive" 1 "risk:sensitive" "risk-paths"
+
+# 13b. Same shape one tier up — a `blocked:` file moved out.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_RENAMES="src/wxa_secrets/onepassword.py"
+printf '%s\n' "docs/archive/onepassword.py" > "$STUB_FILES"
+run_gate
+expect_verdict "rename OUT of a blocked path still classifies blocked" 1 "risk:blocked" "risk-paths"
+
+# 13c. NEGATIVE CONTROL. Without this the two cases above pass just as well
+#      under a gate that blocks every PR carrying any rename at all — which
+#      would arm nothing, fleet-wide. Neither end is gated ⇒ not blocked.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_RENAMES="docs/old-notes.md"
+printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+run_gate
+expect_verdict "benign rename (neither end gated) ⇒ not blocked" 0 "" ""
+
+# 13d. Second negative control: the classifier must read the rename SOURCE,
+#      not merely notice the field exists. A source under safe_test moved to
+#      another safe_test path stays ungated even though the fixture gates
+#      siblings of both paths.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_RENAMES="tests/regression/test_old.py"
+printf '%s\n' "tests/regression/test_new.py" > "$STUB_FILES"
+run_gate
+expect_verdict "safe_test → safe_test rename ⇒ not blocked" 0 "" ""
+
+# 14. ORDERING: rename sources are appended AFTER the 3000-file count, so
+#     they can never push a large-but-listable PR over the cap — and are
+#     still classified once past it. 2999 changed + 2 rename sources = 3001
+#     paths; counting them together would fail closed on a PR that is
+#     listable, which reads as "safe" but is really a fleet-wide false
+#     alarm on every big rename-heavy PR.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+i=0
+while [ "$i" -lt 2999 ]; do echo "docs/f$i.md"; i=$((i + 1)); done > "$STUB_FILES"
+STUB_RENAMES=$(printf '%s\n%s' "docs/old-a.md" "src/agent/runtime/loop.py")
+run_gate
+expect_verdict "2999 files + rename sources: counted before the append, classified after" 1 "risk:sensitive" "risk-paths"
+
+# 15. FAIL CLOSED on an unreadable rename listing. The pre-fix global-regex
+#     lane swallowed this with `2>/dev/null || echo ""`, so an API blip read
+#     as "this PR renames nothing" — handing back the exact escape the scan
+#     closes, silently and with no annotation.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_RENAMES_RC=1
+printf '%s\n' "docs/archive/loop.py" > "$STUB_FILES"
+run_gate
+expect_fail_closed "unreadable rename listing fails closed" "could not list PR rename sources"
 
 echo ""
 if [ "$failed" -gt 0 ]; then

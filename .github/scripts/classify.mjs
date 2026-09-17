@@ -128,7 +128,23 @@ try {
 // {"message":"Not Found"} as an object with no class keys and reported it
 // clean. If you re-run a sweep like this, gate on the EXIT CODE and keep a
 // known-missing repo as a negative control — "140 of 140" was the tell.
-// (topcoder1/dotclaude is a real non-carrier; use it as the control.)
+//
+// Pick that control by RE-MEASURING it, never by trusting a name written
+// here: a control is only a control while it stays a non-carrier, and this
+// comment first named topcoder1/dotclaude — an active fleet repo, which is
+// exactly the kind that acquires a rules file, and did (dotclaude#336,
+// 2026-09-17). Prefer a repo outside the automerge fleet entirely;
+// whois-api-llc/whoisxmlapi-samples is the current pick, a published samples
+// repo with no .github/workflows at all, so no installer can give it one.
+// Verify before relying on it — 404 + exit 1 is the non-carrier signal,
+// and note that the error body lands on STDOUT, which is what made the
+// original sweep miscount:
+//
+//   gh api repos/whois-api-llc/whoisxmlapi-samples/contents/.github/risk-paths.yml \
+//     >/dev/null 2>&1; echo "rc=$?"    # rc=1 ⇒ genuine non-carrier
+//
+// Sweep of 2026-09-17, exit-code-gated over both orgs: 141 non-archived
+// repos, 44 carriers, 97 non-carriers, 0 ambiguous reads.
 for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	const v = rules[cls];
 	if (v !== null && v !== undefined && !Array.isArray(v)) {
