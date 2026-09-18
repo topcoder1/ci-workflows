@@ -404,6 +404,70 @@ async function bytes(response, maximum, scope) {
  * downloadOrigins is an exact administrator-selected origin list, never a URL
  * list extracted from a receipt or PR. No target/intake metadata is returned.
  */
+/** The one transport for every authenticated metadata request and archive
+ * download: manual redirects, no credentials or referrer, a shared deadline
+ * scope, and cancellation of any late response body. */
+function transport(fetchImpl, scope, token) {
+  async function request(url, authenticated) {
+    let response;
+    try {
+      response = await scope.wait(async () => {
+        const received = await fetchImpl(url, {
+          method: "GET",
+          redirect: "manual",
+          credentials: "omit",
+          referrerPolicy: "no-referrer",
+          cache: "no-store",
+          signal: scope.signal,
+          headers: authenticated
+            ? {
+                accept: "application/vnd.github+json",
+                authorization: `Bearer ${token}`,
+                "x-github-api-version": VERSION,
+              }
+            : { accept: "application/octet-stream" },
+        });
+        response = received;
+        // A trusted transport may still settle after cancellation. Do not
+        // leave such a late response's body/socket unconsumed and open.
+        if (scope.signal.aborted) cancelBody(received);
+        return received;
+      });
+    } catch {
+      cancelBody(response);
+      scope.check();
+      throw new ArtifactError("request_failed");
+    }
+    if (
+      !response ||
+      response.redirected ||
+      (response.url && response.url !== url)
+    ) {
+      cancelBody(response);
+      throw new ArtifactError("unexpected_redirect");
+    }
+    return response;
+  }
+  async function metadata(url) {
+    const response = await request(url, true);
+    if (response.status !== 200) {
+      cancelBody(response);
+      throw new ArtifactError("metadata_http_error");
+    }
+    const raw = await bytes(
+      response,
+      GITHUB_ARTIFACT_LIMITS.metadataBytes,
+      scope,
+    );
+    try {
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+    } catch {
+      throw new ArtifactError("invalid_metadata");
+    }
+  }
+  return { request, metadata };
+}
+
 export function createGitHubArtifactClient({
   producer,
   tokenProvider,
@@ -423,221 +487,218 @@ export function createGitHubArtifactClient({
     if (error instanceof ArtifactError) throw error;
     throw new ArtifactError("invalid_input");
   }
-  return Object.freeze({
-    async read(
-      input,
-      { signal, deadlineMs = GITHUB_ARTIFACT_LIMITS.deadlineMs } = {},
-    ) {
-      let scope;
-      let token;
+  /** Every method: validate the selector and options, take one credential for
+   * the scope's lifetime, snapshot the tag ref, then read the run, its selected
+   * attempt and the artifact fresh. The body sees those facts and nothing that
+   * outlives the scope; the credential is dropped before the method returns. */
+  async function session(input, options, body) {
+    let scope;
+    let token;
+    try {
+      const { signal, deadlineMs = GITHUB_ARTIFACT_LIMITS.deadlineMs } =
+        options === undefined ? {} : options;
+      const selector = Object.freeze(
+        record(input, ["runId", "runAttempt", "artifactId"]),
+      );
+      requireThat(Object.values(selector).every(positive), "invalid_input");
+      requireThat(
+        !trustedProducer.workflowRef || selector.runAttempt === 1,
+        "unsupported_run_attempt",
+      );
+      requireThat(
+        Number.isSafeInteger(deadlineMs) &&
+          deadlineMs > 0 &&
+          deadlineMs <= GITHUB_ARTIFACT_LIMITS.maximumDeadlineMs,
+        "invalid_input",
+      );
+      requireThat(
+        signal === undefined || signal instanceof AbortSignal,
+        "invalid_input",
+      );
+      scope = deadlineScope(signal, deadlineMs);
       try {
-        const selector = Object.freeze(
-          record(input, ["runId", "runAttempt", "artifactId"]),
+        token = await scope.wait(() =>
+          tokenProvider(
+            Object.freeze({
+              repository: trustedProducer.repository,
+              repositoryId: trustedProducer.repositoryId,
+              signal: scope.signal,
+            }),
+          ),
         );
-        requireThat(Object.values(selector).every(positive), "invalid_input");
-        requireThat(
-          !trustedProducer.workflowRef || selector.runAttempt === 1,
-          "unsupported_run_attempt",
+      } catch (error) {
+        scope.check();
+        throw new ArtifactError("credential_unavailable");
+      }
+      requireThat(
+        typeof token === "string" &&
+          token.length > 0 &&
+          token.length <= 8192 &&
+          /^[A-Za-z0-9_.-]+$/.test(token),
+        "credential_unavailable",
+      );
+      const base = `${API}/repos/${trustedProducer.repository}/actions`;
+      const runURL = `${base}/runs/${selector.runId}`;
+      const attemptURL = `${runURL}/attempts/${selector.runAttempt}`;
+      const artifactURL = `${base}/artifacts/${selector.artifactId}`;
+      const { request, metadata } = transport(fetchImpl, scope, token);
+      async function currentTagRef() {
+        const tagName = trustedProducer.workflowRef.slice("refs/tags/".length);
+        const refBase = `${API}/repos/${trustedProducer.repository}/git/ref`;
+        const snapshot = tagRefFacts(
+          await metadata(`${refBase}/tags/${tagName}`),
+          trustedProducer,
         );
-        requireThat(
-          Number.isSafeInteger(deadlineMs) &&
-            deadlineMs > 0 &&
-            deadlineMs <= GITHUB_ARTIFACT_LIMITS.maximumDeadlineMs,
-          "invalid_input",
-        );
-        requireThat(
-          signal === undefined || signal instanceof AbortSignal,
-          "invalid_input",
-        );
-        scope = deadlineScope(signal, deadlineMs);
+        const branch = await request(`${refBase}/heads/${tagName}`, true);
         try {
-          token = await scope.wait(() =>
-            tokenProvider(
-              Object.freeze({
-                repository: trustedProducer.repository,
-                repositoryId: trustedProducer.repositoryId,
-                signal: scope.signal,
-              }),
-            ),
-          );
-        } catch (error) {
-          scope.check();
-          throw new ArtifactError("credential_unavailable");
+          requireThat(branch.status !== 200, "ambiguous_workflow_ref");
+          requireThat(branch.status === 404, "metadata_http_error");
+        } finally {
+          cancelBody(branch);
         }
-        requireThat(
-          typeof token === "string" &&
-            token.length > 0 &&
-            token.length <= 8192 &&
-            /^[A-Za-z0-9_.-]+$/.test(token),
-          "credential_unavailable",
-        );
-        const base = `${API}/repos/${trustedProducer.repository}/actions`;
-        const runURL = `${base}/runs/${selector.runId}`;
-        const attemptURL = `${runURL}/attempts/${selector.runAttempt}`;
-        const artifactURL = `${base}/artifacts/${selector.artifactId}`;
-        async function request(url, authenticated) {
-          let response;
-          try {
-            response = await scope.wait(async () => {
-              const received = await fetchImpl(url, {
-                method: "GET",
-                redirect: "manual",
-                credentials: "omit",
-                referrerPolicy: "no-referrer",
-                cache: "no-store",
-                signal: scope.signal,
-                headers: authenticated
-                  ? {
-                      accept: "application/vnd.github+json",
-                      authorization: `Bearer ${token}`,
-                      "x-github-api-version": VERSION,
-                    }
-                  : { accept: "application/octet-stream" },
-              });
-              response = received;
-              // A trusted transport may still settle after cancellation. Do not
-              // leave such a late response's body/socket unconsumed and open.
-              if (scope.signal.aborted) cancelBody(received);
-              return received;
-            });
-          } catch {
-            cancelBody(response);
-            scope.check();
-            throw new ArtifactError("request_failed");
+        return snapshot;
+      }
+      const currentTagRefSnapshot = trustedProducer.workflowRef
+        ? await currentTagRef()
+        : undefined;
+      const run = runFacts(await metadata(runURL), trustedProducer, selector);
+      same(
+        runFacts(await metadata(attemptURL), trustedProducer, selector),
+        run,
+      );
+      const artifact = artifactFacts(
+        await metadata(artifactURL),
+        trustedProducer,
+        selector,
+        run,
+      );
+      return await body({
+        selector,
+        scope,
+        request,
+        metadata,
+        currentTagRef,
+        currentTagRefSnapshot,
+        run,
+        artifact,
+        runURL,
+        artifactURL,
+      });
+    } catch (error) {
+      if (error instanceof ArtifactError) throw error;
+      throw new ArtifactError("read_failed");
+    } finally {
+      token = undefined;
+      scope?.close();
+    }
+  }
+  return Object.freeze({
+    async read(input, options) {
+      return session(
+        input,
+        options,
+        async ({
+          selector,
+          scope,
+          request,
+          metadata,
+          currentTagRef,
+          currentTagRefSnapshot,
+          run,
+          artifact,
+          runURL,
+          artifactURL,
+        }) => {
+          let archiveResponse = await request(`${artifactURL}/zip`, true);
+          if (archiveResponse.status === 302) {
+            let location;
+            try {
+              location = storageURL(archiveResponse.headers.get("location"));
+              requireThat(
+                origins.has(location.origin),
+                "untrusted_download_origin",
+              );
+            } finally {
+              cancelBody(archiveResponse);
+            }
+            archiveResponse = await request(location.href, false);
           }
-          if (
-            !response ||
-            response.redirected ||
-            (response.url && response.url !== url)
-          ) {
-            cancelBody(response);
-            throw new ArtifactError("unexpected_redirect");
+          if (archiveResponse.status !== 200) {
+            cancelBody(archiveResponse);
+            throw new ArtifactError("archive_http_error");
           }
-          return response;
-        }
-        async function metadata(url) {
-          const response = await request(url, true);
-          if (response.status !== 200) {
-            cancelBody(response);
-            throw new ArtifactError("metadata_http_error");
-          }
-          const raw = await bytes(
-            response,
-            GITHUB_ARTIFACT_LIMITS.metadataBytes,
+          const archive = await bytes(
+            archiveResponse,
+            GITHUB_ARTIFACT_LIMITS.archiveBytes,
             scope,
           );
-          try {
-            return JSON.parse(
-              new TextDecoder("utf-8", { fatal: true }).decode(raw),
-            );
-          } catch {
-            throw new ArtifactError("invalid_metadata");
-          }
-        }
-        async function currentTagRef() {
-          const tagName = trustedProducer.workflowRef.slice(
-            "refs/tags/".length,
+          requireThat(
+            archive.length === artifact.archiveByteLength,
+            "archive_length_mismatch",
           );
-          const refBase = `${API}/repos/${trustedProducer.repository}/git/ref`;
-          const snapshot = tagRefFacts(
-            await metadata(`${refBase}/tags/${tagName}`),
-            trustedProducer,
+          requireThat(
+            createHash("sha256").update(archive).digest("hex") ===
+              artifact.archiveSha256,
+            "archive_digest_mismatch",
           );
-          const branch = await request(`${refBase}/heads/${tagName}`, true);
-          try {
-            requireThat(branch.status !== 200, "ambiguous_workflow_ref");
-            requireThat(branch.status === 404, "metadata_http_error");
-          } finally {
-            cancelBody(branch);
-          }
-          return snapshot;
-        }
-        const currentTagRefSnapshot = trustedProducer.workflowRef
-          ? await currentTagRef()
-          : undefined;
-        const run = runFacts(await metadata(runURL), trustedProducer, selector);
-        same(
-          runFacts(await metadata(attemptURL), trustedProducer, selector),
-          run,
-        );
-        const artifact = artifactFacts(
-          await metadata(artifactURL),
-          trustedProducer,
-          selector,
-          run,
-        );
-        let archiveResponse = await request(`${artifactURL}/zip`, true);
-        if (archiveResponse.status === 302) {
-          let location;
-          try {
-            location = storageURL(archiveResponse.headers.get("location"));
-            requireThat(
-              origins.has(location.origin),
-              "untrusted_download_origin",
-            );
-          } finally {
-            cancelBody(archiveResponse);
-          }
-          archiveResponse = await request(location.href, false);
-        }
-        if (archiveResponse.status !== 200) {
-          cancelBody(archiveResponse);
-          throw new ArtifactError("archive_http_error");
-        }
-        const archive = await bytes(
-          archiveResponse,
-          GITHUB_ARTIFACT_LIMITS.archiveBytes,
-          scope,
-        );
-        requireThat(
-          archive.length === artifact.archiveByteLength,
-          "archive_length_mismatch",
-        );
-        requireThat(
-          createHash("sha256").update(archive).digest("hex") ===
-            artifact.archiveSha256,
-          "archive_digest_mismatch",
-        );
-        // upload-artifact can also publish raw files. This transport supports
-        // ZIP only; the separate extractor must validate the entire structure.
-        requireThat(
-          archive.length >= 4 && archive.readUInt32LE(0) === 0x04034b50,
-          "unsupported_archive_format",
-        );
-        same(runFacts(await metadata(runURL), trustedProducer, selector), run);
-        same(
-          artifactFacts(
-            await metadata(artifactURL),
-            trustedProducer,
-            selector,
+          // upload-artifact can also publish raw files. This transport supports
+          // ZIP only; the separate extractor must validate the entire structure.
+          requireThat(
+            archive.length >= 4 && archive.readUInt32LE(0) === 0x04034b50,
+            "unsupported_archive_format",
+          );
+          same(
+            runFacts(await metadata(runURL), trustedProducer, selector),
             run,
-          ),
-          artifact,
-        );
-        if (currentTagRefSnapshot) {
-          same(await currentTagRef(), currentTagRefSnapshot);
-        }
-        scope.check();
-        return Object.freeze({
-          schemaVersion: 1,
-          producer: trustedProducer,
-          run,
-          artifact,
-          ...(currentTagRefSnapshot ? { currentTagRefSnapshot } : {}),
-          get archiveBytes() {
-            return Buffer.from(archive);
-          },
-          artifactAttemptAuthenticated: false,
-          executionComparisonAuthenticated: false,
-          enforcementPublished: false,
-        });
-      } catch (error) {
-        if (error instanceof ArtifactError) throw error;
-        throw new ArtifactError("read_failed");
-      } finally {
-        token = undefined;
-        scope?.close();
-      }
+          );
+          same(
+            artifactFacts(
+              await metadata(artifactURL),
+              trustedProducer,
+              selector,
+              run,
+            ),
+            artifact,
+          );
+          if (currentTagRefSnapshot) {
+            same(await currentTagRef(), currentTagRefSnapshot);
+          }
+          scope.check();
+          return Object.freeze({
+            schemaVersion: 1,
+            producer: trustedProducer,
+            run,
+            artifact,
+            ...(currentTagRefSnapshot ? { currentTagRefSnapshot } : {}),
+            get archiveBytes() {
+              return Buffer.from(archive);
+            },
+            artifactAttemptAuthenticated: false,
+            executionComparisonAuthenticated: false,
+            enforcementPublished: false,
+          });
+        },
+      );
+    },
+    /** The run, attempt, artifact and tag-ref facts read fresh, under the same
+     * checks as read(), without the archive: for a later re-verification that
+     * a run's latest attempt and an artifact's identity are still what an
+     * earlier read() established. Nothing here comes from a cache. */
+    async recheck(input, options) {
+      return session(
+        input,
+        options,
+        async ({ scope, currentTagRefSnapshot, run, artifact }) => {
+          scope.check();
+          return Object.freeze({
+            schemaVersion: 1,
+            producer: trustedProducer,
+            run,
+            artifact,
+            ...(currentTagRefSnapshot ? { currentTagRefSnapshot } : {}),
+          });
+        },
+      );
     },
   });
 }

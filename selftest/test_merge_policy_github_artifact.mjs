@@ -1437,3 +1437,134 @@ test("bare tag path cannot switch to an accepted suffix between reads", async ()
     await tagFails(f.client, "metadata_changed");
   }
 });
+
+async function recheckFails(client, code, selection = selector(), options) {
+  await assert.rejects(client.recheck(selection, options), (error) => {
+    assert.equal(error.name, "GitHubArtifactError");
+    assert.equal(error.code, code);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+}
+test("recheck reads run, attempt and artifact fresh under read()'s checks and never the archive", async () => {
+  const f = fixture();
+  const read = await f.client.read(selector());
+  const before = f.calls.length;
+  const result = await f.client.recheck(selector());
+  assert.deepEqual(
+    f.calls.slice(before).map(({ url }) => url),
+    [runURL, attemptURL, artifactURL],
+  );
+  assert.equal(f.credentialCalls(), 2);
+  assert.ok(Object.isFrozen(result));
+  assert.deepEqual(Object.keys(result), [
+    "schemaVersion",
+    "producer",
+    "run",
+    "artifact",
+  ]);
+  assert.deepEqual(result.run, read.run);
+  assert.deepEqual(result.artifact, read.artifact);
+  assert.equal(result.producer, read.producer);
+  assert.equal(Object.hasOwn(result, "archiveBytes"), false);
+  assert.equal(Object.hasOwn(result, "artifactAttemptAuthenticated"), false);
+  for (const { init } of f.calls.slice(before)) {
+    assert.equal(init.method, "GET");
+    assert.equal(init.redirect, "manual");
+    assert.equal(init.headers.authorization, "Bearer synthetic-token");
+  }
+});
+test("recheck with the tag opt-in re-binds the current ref and refuses a rerun selector", async () => {
+  const f = tagFixture();
+  const result = await f.client.recheck(tagSelector());
+  assert.deepEqual(
+    f.calls.map(({ url }) => url),
+    [tagURL, branchURL, runURL, firstAttemptURL, artifactURL],
+  );
+  assert.deepEqual(result.currentTagRefSnapshot, {
+    ref: workflowRef,
+    sha: revision,
+  });
+  assert.equal(result.run.attempt, 1);
+  await recheckFails(f.client, "unsupported_run_attempt", selector());
+  assert.equal(f.credentialCalls(), 1);
+});
+test("recheck fails closed on a changed run, a changed artifact or a moved tag", async () => {
+  for (const [, mutate, code] of runMutations) {
+    const f = fixture({
+      respond: ({ url }) => {
+        if (url === runURL) {
+          const value = run();
+          mutate(value);
+          return json(value);
+        }
+      },
+    });
+    await recheckFails(f.client, code);
+    assert.equal(f.calls.length, 1);
+  }
+  const attempt = fixture({
+    respond: ({ url }) =>
+      url === attemptURL
+        ? json({ ...run(), updated_at: iso(now - 5000) })
+        : undefined,
+  });
+  await recheckFails(attempt.client, "metadata_changed");
+  const moved = tagFixture({
+    respond: ({ url }) =>
+      url === tagURL
+        ? json({
+            ...tagRef(),
+            object: { ...tagRef().object, sha: "b".repeat(40) },
+          })
+        : undefined,
+  });
+  await recheckFails(
+    moved.client,
+    "workflow_ref_binding_mismatch",
+    tagSelector(),
+  );
+  assert.equal(moved.calls.length, 1);
+});
+test("recheck validates selector, deadline and signal before any credential access", async () => {
+  const f = fixture();
+  await recheckFails(f.client, "invalid_input", {
+    ...selector(),
+    runId: "101",
+  });
+  await recheckFails(f.client, "invalid_input", {
+    ...selector(),
+    repository: "example/reviewer",
+  });
+  await recheckFails(f.client, "invalid_input", selector(), { deadlineMs: 0 });
+  const controller = new AbortController();
+  controller.abort(new Error("private reason"));
+  await recheckFails(f.client, "aborted", selector(), {
+    signal: controller.signal,
+  });
+  assert.equal(f.credentialCalls(), 0);
+  assert.equal(f.calls.length, 0);
+});
+test("recheck deadline spans its requests and a late response body is cancelled", async () => {
+  let cancelled = false;
+  const f = fixture({
+    respond: ({ url }) => {
+      if (url !== artifactURL) return;
+      return new Promise((resolve) =>
+        setTimeout(() => {
+          const body = new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          });
+          resolve(new Response(body, { status: 200 }));
+        }, 80),
+      );
+    },
+  });
+  await recheckFails(f.client, "deadline_exceeded", selector(), {
+    deadlineMs: 40,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(cancelled, true);
+});
