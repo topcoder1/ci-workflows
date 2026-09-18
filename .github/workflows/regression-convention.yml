@@ -57,6 +57,11 @@ on:
         required: false
         type: string
         default: "tests/regression"
+      max_test_backed_bullet_chars:
+        description: "Once a lessons bullet cites a paired test, the test is what prevents recurrence and the prose is a second copy — so cap the bullet and keep the narrative in the archive. Applies ONLY to bullets this PR adds or edits that carry a `Test:`/`Tests:` citation; untouched bullets and uncited ones are never gated, so a repo can adopt this without first fixing its backlog. 0 (default) disables the gate entirely — callers opt in."
+        required: false
+        type: number
+        default: 0
 
 permissions:
   contents: read
@@ -218,3 +223,91 @@ jobs:
             echo "::error::Pure deletions/prunings of lessons bullets are fine — but this PR adds or modifies bullet content."
           }
           exit 1
+
+      # ---------------------------------------------------------------------
+      # Second gate: cap bullets that already have a paired test.
+      #
+      # Why this exists. The lessons file grows monotonically and every fixed
+      # budget eventually forces a loss. Measured on topcoder1/dotclaude: a
+      # manual compression cut it 71,436B -> 40,951B in 2026-07 (its `##
+      # Lessons` section 20,217B -> 6,200B), and within two months that section
+      # had regrown 29% to 8,013B — ~900B/month — while `## Process notes`
+      # stayed flat (14,577 -> 14,108B). So the growth is one section, and a
+      # hand-run compression cycle demonstrably does not hold. Discipline
+      # decayed; only a gate survives.
+      #
+      # Why THESE bullets. The two sections have opposite enforcement models.
+      # A `## Lessons` bullet is required to cite a paired regression test (the
+      # gate above), and that test is what actually prevents recurrence — CI
+      # fails whether or not the prose is in anyone's context. Process notes
+      # are exempt from the test requirement by design, so for them prose IS
+      # the only enforcement and must stay. Capping test-backed bullets
+      # therefore removes a second copy, not a control.
+      #
+      # Scope, deliberately narrow:
+      #   * only bullets this PR ADDS or EDITS (verbatim-unchanged lines are
+      #     skipped), so adopting the gate does not require fixing a backlog
+      #     first and no PR is failed by text it did not touch;
+      #   * only bullets carrying a `Test:`/`Tests:` citation;
+      #   * disabled unless the caller passes a non-zero cap.
+      #
+      # Known limitation, stated rather than papered over: a cited test may
+      # live in ANOTHER repo (`techrecon internal/store/..._test.go`), which
+      # this job cannot see. Verifying that would mean cross-repo API calls
+      # inside a lint gate — a network failure mode and a token scope for no
+      # real gain — so the citation is taken at face value. The pairing gate
+      # above is what makes a citation mean something.
+      - name: Cap test-backed lessons bullets
+        if: ${{ inputs.max_test_backed_bullet_chars && inputs.max_test_backed_bullet_chars > 0 }}
+        env:
+          LESSONS_FILES_RAW: ${{ inputs.lessons_files || '' }}
+          LESSONS_HEADER: ${{ inputs.lessons_section_header || '## Lessons' }}
+          MAX_CHARS: ${{ inputs.max_test_backed_bullet_chars }}
+          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$LESSONS_FILES_RAW" ]]; then
+            echo "lessons_files is empty — nothing to cap. Skipping."
+            exit 0
+          fi
+          extract_section() {
+            awk -v h="$2" '
+              $0 == h { p = 1; next }
+              /^## / { if (p) exit }
+              p { print }
+            ' <<<"$1"
+          }
+          VIOLATIONS=0
+          IFS=, read -ra FILES <<<"$LESSONS_FILES_RAW"
+          for raw_path in "${FILES[@]}"; do
+            path=$(echo "$raw_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [[ -z "$path" ]] && continue
+            BASE_SECTION=$(extract_section "$(git show "$BASE_SHA:$path" 2>/dev/null || echo "")" "$LESSONS_HEADER")
+            HEAD_SECTION=$(extract_section "$(git show "$HEAD_SHA:$path" 2>/dev/null || echo "")" "$LESSONS_HEADER")
+            while IFS= read -r line; do
+              [[ "$line" == '- **'* ]] || continue
+              # Unchanged by this PR? Not ours to police. `if` keeps the
+              # non-match in condition context — `grep … && continue` would
+              # return 1 as the statement's status and `set -e` would abort.
+              if printf '%s\n' "$BASE_SECTION" | grep -Fxq -- "$line"; then
+                continue
+              fi
+              [[ "$line" == *"Test: "* || "$line" == *"Tests: "* ]] || continue
+              n=${#line}
+              if (( n > MAX_CHARS )); then
+                VIOLATIONS=$((VIOLATIONS + 1))
+                echo "::error file=${path}::lessons bullet is ${n} chars > ${MAX_CHARS} and already cites a paired test: ${line:0:90}…"
+              fi
+            done <<<"$HEAD_SECTION"
+          done
+          if (( VIOLATIONS > 0 )); then
+            {
+              echo "::error::${VIOLATIONS} test-backed lessons bullet(s) over the ${MAX_CHARS}-char cap."
+              echo "::error::The paired test is the control; the bullet is recall. Keep RULE + detection + date tag"
+              echo "::error::in the lessons file and move the narrative verbatim to the archive (docs/lessons.md),"
+              echo "::error::where the date tag is the grep key. Bullets you did not touch are not gated."
+            }
+            exit 1
+          fi
+          echo "PASS: no test-backed bullet added or edited by this PR exceeds ${MAX_CHARS} chars"

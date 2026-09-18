@@ -83,6 +83,14 @@ arbitrary helper scripts; that's a different kind of repo.
 - `test_prettier_symlink_filter.sh` — extracts the symlink filter from
   `lint.yml` / `prettier-autofix.yml`, runs it against a fixture tree,
   and asserts the two copies haven't drifted.
+- `test_regression_convention_bullet_cap.sh` — once a `## Lessons` bullet
+  cites a paired regression test, that test is the control and the prose is a
+  second copy, so `regression-convention.yml` caps the bullet and pushes the
+  narrative to the archive. Pins the ways the gate could wrongly fail a PR:
+  bullets the PR did not touch, and bullets with no test citation, must both
+  pass — adopting the cap must not tax a repo's existing backlog. Also pins
+  that it stays opt-in (`default: 0`), since a default-on cap would fail PRs
+  fleet-wide the day it lands.
 - `test_prettier_scope_failsafe.sh` — a failed changed-file listing must
   SKIP the prettier run (mode=none), never fall open to the full-tree
   glob; and prettier-autofix must revert writes under

@@ -30,28 +30,29 @@ _SHELL_SELFTESTS = [
     "selftest/test_automerge_risk_patterns.sh",
     "selftest/test_automerge_riskfile_gate.sh",
     "selftest/test_bot_skip_commit_authorship.sh",
+    "selftest/test_classifier_deps_vendored.sh",
     "selftest/test_classify_bracket_guard.sh",
     "selftest/test_classify_env_globs.sh",
     "selftest/test_classify_exclude.sh",
     "selftest/test_classify_list_shape.sh",
     "selftest/test_classify_nocase.sh",
-    "selftest/test_classifier_deps_vendored.sh",
-    # These two shipped unlisted (#152 and #160) and ran in CI never —
-    # the completeness guard below found both on its first execution.
-    "selftest/test_claude_review_max_turns_type.sh",
-    "selftest/test_claude_review_lost_findings_guard.sh",
     "selftest/test_claude_review_cost_guardrails.sh",
+    "selftest/test_claude_review_lost_findings_guard.sh",
+    "selftest/test_claude_review_max_turns_type.sh",
     "selftest/test_codex_verdict_gate.sh",
     "selftest/test_comment_nonfatal_reporting.sh",
     "selftest/test_findings_reply_narrowing.sh",
     "selftest/test_pr_files_listing.sh",
     "selftest/test_prettier_scope_failsafe.sh",
     "selftest/test_prettier_symlink_filter.sh",
+    "selftest/test_regression_convention_bullet_cap.sh",
     "selftest/test_ruff_format_gate.sh",
     "selftest/test_ruff_ruleset_warning.sh",
     "selftest/test_safe_paths_classifier_hold.sh",
     "selftest/test_safe_paths_risk_tier_hold.sh",
     "selftest/test_safe_paths_unsafe_overrides.sh",
+    # These two shipped unlisted (#152 and #160) and ran in CI never —
+    # the completeness guard below found both on its first execution.
 ]
 
 
