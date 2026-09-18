@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -458,6 +464,10 @@ test("a clean cycle: durable record before the dispatch, one run, intake recorde
   assert.equal(entry.kind, SHADOW_CYCLE_KIND);
   assert.equal(entry.refusal, null);
   assert.equal(entry.failure, null);
+  // No step slept, so the cycle finished at the instant it started.
+  assert.equal(entry.startedAt, "2026-09-20T12:00:00Z");
+  assert.equal(entry.finishedAt, iso(f.clock.t));
+  assert.equal(entry.finishedAt, entry.startedAt);
   // The record existed, complete but for the run, before GitHub was asked.
   assert.equal(recordAtDispatch.kind, SHADOW_DISPATCH_RECORD_KIND);
   assert.equal(recordAtDispatch.run, null);
@@ -648,6 +658,9 @@ test("a failed or rerun producer stops the cycle before any artifact read", asyn
   const entry = await slow.cycle();
   assert.equal(entry.failure.code, "RUN_TIMEOUT");
   assert.ok(entry.durationsMs.wait >= 20 * 60_000);
+  // The wait advanced the clock; the completion timestamp is taken after it.
+  assert.equal(entry.finishedAt, iso(slow.clock.t));
+  assert.ok(entry.finishedAt > entry.startedAt);
 });
 
 test("two runs answering one dispatch is refused rather than guessed", async (t) => {
@@ -986,4 +999,27 @@ test("the CLI exits 2 on usage errors with the message and no stack", () => {
     assert.doesNotMatch(result.stderr, /\n\s+at /);
     assert.equal(result.stdout, "");
   }
+});
+
+test("a log that cannot be written at all leaves the cycle's entry intact with the second failure's code", async (t) => {
+  const f = fixture(t);
+  // The log's parent path is a file, so neither the full line nor the reduced
+  // one can be appended; the intake has already been recorded by then.
+  const blocker = join(f.directory, "blocker");
+  writeFileSync(blocker, "");
+  const entry = await runShadowCycle(f.deps, {
+    ...f.cycleOptions,
+    logPath: join(blocker, "shadow.jsonl"),
+  });
+  assert.equal(entry.intake.outcome, "recorded");
+  assert.equal(entry.verdict.decision, "pass");
+  // Node's recursive mkdir over a file reports EEXIST or ENOTDIR by platform.
+  assert.ok(
+    ["EEXIST", "ENOTDIR"].includes(entry.logFailure),
+    String(entry.logFailure),
+  );
+  assert.equal(entry.logReduced, undefined);
+  assert.equal(entry.failure, null);
+  assert.equal(existsSync(join(blocker, "shadow.jsonl")), false);
+  assert.equal(f.api.value(ledgerPath).events.at(-1).type, "review");
 });
