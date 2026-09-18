@@ -16,6 +16,8 @@ Mutable review-comment bodies are intentionally not an authenticated intake. Hum
 
 The separate [trusted receipt intake](TRUSTED-INTAKE.md) validates structured review artifacts against protected producer configuration and independently obtained run metadata before producing a complete event batch. The pure intake module has no persistence or publishing path. The controller's separate `recordReviewIntake` API runs intake under its operation lock and conditionally persists the complete candidate in one ledger write. Its injected adapters must authenticate the real producer and retrieve the bounded artifact; synthetic adapter tests do not establish that trust. The existing Claude and Codex review lanes are not connected to this intake.
 
+The shadow driver (`merge-policy-shadow.mjs`, runbook [SHADOW-MODE.md](SHADOW-MODE.md)) is the one caller of `recordReviewIntake` outside tests. Its readers come from `merge-policy-intake-adapter.mjs`: the artifact is read once through the authenticated GitHub artifact client, `metadata.target` is taken from the driver's own durable dispatch record and never from the receipt, and the intake's second metadata read is a fresh re-check of the run, its attempt and the artifact through the same client. The driver takes a selector and a dispatch record, never receipt bytes; it evaluates without publication and has no publish option, so the App stays idle throughout shadow mode.
+
 ## Control files
 
 For application `owner/repo` and PR 17:
