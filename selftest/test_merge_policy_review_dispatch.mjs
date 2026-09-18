@@ -27,6 +27,7 @@ import {
   REVIEW_DISPATCH_REPORT_MAX_BYTES,
   REVIEW_DISPATCH_WORKFLOW_PATH,
   dispatchInputsFromEnvironment,
+  reviewDispatchFailure,
   runReviewDispatch,
 } from "../.github/scripts/merge-policy-review-dispatch.mjs";
 import { prepareReviewIntake } from "../.github/scripts/merge-policy-intake.mjs";
@@ -481,6 +482,36 @@ test("source mismatch refuses before credentials or reservation", async (t) => {
   await failure(invoke(f), "source_mismatch");
   assert.equal(f.credentials(), 0);
   assert.equal(existsSync(outputDirectory(f)), false);
+});
+
+test("a source that drifts after the review completes fails closed with the review's outcome on record", async (t) => {
+  const f = fixture(t);
+  // The provider has answered; before the entrypoint re-checks its source,
+  // HEAD moves. The paid review is not turned into a receipt, the failure
+  // document says the review completed, and the thrown error's recorded
+  // state is the same closed code.
+  f.reply = () => {
+    writeFileSync(join(f.repositoryPath, "source-only.txt"), "drift\n");
+    f.git("add", "-A");
+    f.git("commit", "-qm", "drift after review");
+    return response();
+  };
+  await assert.rejects(invoke(f), (error) => {
+    assert.equal(error.name, "ReviewDispatchError");
+    assert.equal(error.code, "source_mismatch");
+    const recorded = reviewDispatchFailure(error);
+    assert.deepEqual(recorded, { code: "source_mismatch" });
+    assert.ok(Object.isFrozen(recorded));
+    return true;
+  });
+  assert.equal(reviewDispatchFailure(new Error("unrelated")), undefined);
+  failureReport(f, {
+    code: "source_mismatch",
+    phase: "source",
+    providerOutcome: "review_completed",
+  });
+  assert.equal(f.credentials(), 1);
+  assert.equal(f.requests.length, 1);
 });
 
 test("the reservation prevents duplicate paid work after success", async (t) => {
