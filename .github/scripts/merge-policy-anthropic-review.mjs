@@ -484,6 +484,11 @@ function reviewResult(message, comparison) {
     model: message.model,
     messageId: message.id,
     outputSha256: sha256(Buffer.from(block.text, "utf8")),
+    // Validated above; the two integers a cost is computed from, nothing else.
+    usage: freeze({
+      inputTokens: message.usage.input_tokens,
+      outputTokens: message.usage.output_tokens,
+    }),
   };
 }
 

@@ -274,6 +274,7 @@ export function createReviewProducer(configuration) {
             inputSha256: result.inputSha256,
             outputSha256: result.outputSha256,
             requestSha256: result.requestSha256,
+            usage: result.usage,
           }),
           githubIdentityAuthenticated: false,
           executionAuthenticated: false,
