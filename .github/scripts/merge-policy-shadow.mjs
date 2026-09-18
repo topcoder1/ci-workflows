@@ -500,7 +500,9 @@ function failureOf(error) {
 }
 
 /** One complete cycle. deps: {api, controller, ghToken, fetchImpl, now, sleep}.
- * Returns the log entry it appended (or would have appended). */
+ * Returns the complete cycle entry, which main() prints. The appended log
+ * line is that entry, or, when the log cannot take it, a reduced copy with
+ * the finding lists as counts; the entry then carries `logReduced`. */
 export async function runShadowCycle(deps, options) {
   const { api, controller, ghToken, fetchImpl, now, sleep } = deps;
   const {

@@ -123,10 +123,7 @@ prints its result. `summarize --log <file>` prints the Section 4 metrics.
 | `failure`                   | `{name, code, message, retainLock}` when a step other than intake failed                                                                                                                                                                                                                    |
 | `enforcementPublished`      | Always `false`                                                                                                                                                                                                                                                                              |
 
-If a line would exceed 64 KiB or the append fails, the driver appends the
-line once more with the finding lists replaced by counts (`logReduced`); if
-that fails too, the entry carries `logFailure`, is still printed to stdout,
-and the cycle exits 1.
+If a line would exceed 64 KiB or the append fails, the driver appends the line once more with the finding lists replaced by counts and marks the entry `logReduced`; if that fails too, the entry carries `logFailure` and the cycle exits 1. The entry the driver returns and prints to stdout is always the complete one; only the persisted line is reduced.
 
 Finding ids are per receipt (`<receipt id>finding:<index>`, the receipt id
 being a digest of the run selector, not of the receipt bytes): a re-review of

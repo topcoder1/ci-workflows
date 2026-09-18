@@ -956,6 +956,10 @@ test("a failed intake logs the hold's phase, and a log the driver cannot append 
   }
   assert.equal(last.intake.outcome, "recorded");
   assert.equal(last.logReduced, "log_line_too_long");
+  // The returned (printed) entry stays complete; only the line is reduced.
+  assert.ok(Array.isArray(last.verdict.openFindings));
+  assert.equal(last.verdict.openFindings.length, 320);
+  assert.equal(last.intake.review.findings.length, 64);
   assert.equal(last.logFailure, undefined);
   const lines = g.log();
   assert.equal(lines.length, 5);
