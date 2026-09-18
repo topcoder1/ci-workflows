@@ -76,7 +76,23 @@ arbitrary helper scripts; that's a different kind of repo.
   grew that PR's reviewed diff from 6 files to 8. Pins: default base is free
   (no API calls), another open PR's head refuses unconditionally, other
   non-default bases need the opt-in label, and every unreadable input
-  refuses.
+  refuses. Its "every pre-arm rejection disarms" scan now ends at the arm
+  command rather than at a comment quoting it — the old anchor read 47 lines
+  of comments and no rejection path — with a line-count floor and a planted
+  bare-exit negative control.
+- `test_automerge_pat_attribution_gate.sh` — neither arming reusable may arm
+  without the caller's `automerge_pat`. GitHub deletes a merged head branch
+  (`delete_branch_on_merge`) only for a USER-attributed merge; after a
+  GITHUB_TOKEN arm the merge is github-actions[bot]'s, the branch survives,
+  and a later push to it never reaches main (wxa-graph#553, wxa_vpn#1736).
+  Measured 2026-09-18: 0/97 bot-attributed fleet merges auto-deleted vs
+  1746/1746 user-attributed; a scratch-repo repeat matched (4/4 vs 5/5). Runs
+  both extracted arm steps: no PAT refuses without disarming (and publishes
+  `automerge:refused-no-pat` in claude-author), the PAT arms, Dependabot's own
+  PRs keep the old path by exact login match, and the base revalidation still
+  disarms first. Negative controls neutralize each gate and require the
+  harness to see the bot arm; structural pins hold one arm call site per
+  workflow and keep `automerge_pat` `required: false`.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

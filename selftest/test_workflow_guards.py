@@ -26,6 +26,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_automerge_decision_label.sh",
     "selftest/test_automerge_findings_gate.sh",
     "selftest/test_automerge_hold_gate.sh",
+    "selftest/test_automerge_pat_attribution_gate.sh",
     "selftest/test_automerge_quiet_anchor.sh",
     "selftest/test_automerge_risk_patterns.sh",
     "selftest/test_automerge_riskfile_gate.sh",

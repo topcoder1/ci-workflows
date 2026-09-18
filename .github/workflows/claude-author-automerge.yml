@@ -184,8 +184,9 @@ name: Claude-author Auto-merge (reusable)
 # one `automerge:*` label onto the PR naming the standing decision
 # (`automerge:blocked-classifier`, `automerge:blocked-risk-tier`,
 # `automerge:withheld-findings`, `automerge:withheld-quiet-cap`,
-# `automerge:refused-base`), and clears them when the PR arms or the
-# operator's own hold label takes over. Operator contract: CLEAN + all-green +
+# `automerge:refused-base`, `automerge:refused-no-pat`), and clears them
+# when the PR arms or the operator's own hold label takes over. Operator
+# contract: CLEAN + all-green +
 # autoMergeRequest=null + an `automerge:*` label = deliberate abstention —
 # read the label description for the lever; the same signature with NO
 # `automerge:*` label is the wedge shape — re-fire with a human label
@@ -237,17 +238,22 @@ on:
     secrets:
       automerge_pat:
         description: >-
-          Optional fine-grained PAT (or GitHub App token) used to enable
-          auto-merge. When set, the resulting merge commit is attributed
-          to the PAT user and triggers downstream push-on-main workflows
-          (e.g. deploy). When unset, the workflow falls back to the
-          built-in GITHUB_TOKEN — auto-merge still works, but the merge
-          is attributed to app/github-actions and GitHub silently
-          suppresses downstream workflow runs (the GITHUB_TOKEN
-          loop-prevention rule). Verified on topcoder1/wxa_webcat#201
-          (2026-05-04). Required scopes for a fine-grained PAT - repo
-          contents r/w, pull-requests r/w. Wire via `secrets: inherit`
-          in the caller, or pass explicitly. See the README for setup.
+          Fine-grained USER PAT used to enable auto-merge, so the merge
+          is attributed to the PAT user. Without it this workflow does
+          not arm (it publishes `automerge:refused-no-pat`; Dependabot
+          PRs excepted): a GITHUB_TOKEN arm merges as github-actions[bot],
+          and GitHub then skips the repo's automatic head-branch deletion
+          (the merged branch survives and a later push to it never
+          reaches main — wxa-graph#553) and suppresses every push-on-main
+          workflow. A GitHub App token does not help: GITHUB_TOKEN is
+          itself one, and the merge is still bot-attributed. Required
+          scopes - repo contents r/w, pull-requests r/w. Pass it
+          EXPLICITLY (`automerge_pat: <the repo's AUTOMERGE_PAT secret>`);
+          `secrets: inherit` passes nothing to a reusable owned by a
+          different account, which is how ten whois-api-llc callers ran
+          on the fallback unnoticed. Deliberately not `required: true`:
+          a required secret fails the whole run at startup, which would
+          also stop this workflow's hold-label and error revokes.
         required: false
 
 jobs:
@@ -1720,6 +1726,10 @@ jobs:
           BYPASS_LABEL: ${{ steps.bypass_label.outputs.bypass }}
           BYPASS_CODEX: ${{ steps.bypass_codex.outputs.bypass }}
           USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
+          # The PR's author login, not the event actor or a branch name: it
+          # is the one field no PR contents can set, so only Dependabot's
+          # own PRs can take the Dependabot exception in the attribution gate.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           GATE_BASE_REF: ${{ steps.base_gate.outputs.base_ref }}
           GATE_BODY_SHA: ${{ steps.body_gate.outputs.body_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -1834,6 +1844,47 @@ jobs:
               fi
             fi
           fi
+          # Attribution gate (2026-09-18): never arm as github-actions[bot].
+          # GitHub runs the repo's "Automatically delete head branches" only
+          # for a USER-attributed merge. After a GITHUB_TOKEN arm, GitHub
+          # performs the merge as github-actions[bot]: the head branch
+          # survives, and a later push to it succeeds but never reaches
+          # main (wxa-graph#553: a review report pushed 12 minutes after the
+          # merge sat off main for two days; wxa_vpn#1736). The same merge
+          # also suppresses every push-on-main workflow. Measured 2026-09-18
+          # across the 44 caller repos: 0 of 97 bot-attributed merges since
+          # 2026-05-03 had their branch auto-deleted, against 1746 of 1746
+          # user-attributed ones; a controlled scratch-repo repeat matched
+          # (GITHUB_TOKEN 4 of 4 survived, user or PAT 5 of 5 deleted).
+          #
+          # So without the caller's PAT this workflow declines to arm. The
+          # PR waits for a human click, which is user-attributed and so
+          # deletes the branch, and carries `automerge:refused-no-pat`. The
+          # usual cause is a caller using `secrets: inherit` across
+          # accounts, which passes nothing (see the automerge_pat docstring).
+          #
+          # Deliberately NO disarm, unlike every rejection above. Those
+          # re-validate PR state that an earlier arm was placed under; this
+          # gate is about the credential, and an arm already on the PR was
+          # placed by a human or by a sibling run that had the PAT — both
+          # user-attributed, both correct to keep. The one exception is a
+          # GITHUB_TOKEN arm placed before this gate shipped, and re-arming
+          # would not repair it anyway: enabling auto-merge on an armed PR
+          # keeps the original enabler (measured). Clearing those is a
+          # one-time migration step, not a per-run disarm.
+          #
+          # Dependabot's own PRs are exempt: Dependabot-triggered runs never
+          # receive Actions secrets, and Dependabot deletes its branch after
+          # the merge whoever performs it (0 of 281 Dependabot branches
+          # survived in the same sweep).
+          refuse_unattributed_arm() {
+            echo "::error::No automerge_pat reached this workflow. Arming here would make GitHub merge this PR as github-actions[bot], which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret explicitly as automerge_pat — secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
+            echo "stood_down=no-pat" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "$USING_PAT" != "1" ] && [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            refuse_unattributed_arm
+          fi
           if [ "$BYPASS_LABEL" = "1" ]; then
             echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via approval label"
           elif [ "$BYPASS_CODEX" = "1" ]; then
@@ -1842,9 +1893,9 @@ jobs:
             echo "Enabling auto-merge ($METHOD) — detection: $REASON"
           fi
           if [ "$USING_PAT" = "1" ]; then
-            echo "Auth: caller-supplied automerge_pat — downstream workflows WILL trigger on merge."
+            echo "Auth: caller-supplied automerge_pat — the merge is attributed to the PAT user, so GitHub deletes the head branch and push-on-main workflows run."
           else
-            echo "::warning::Auth: GITHUB_TOKEN fallback — downstream push workflows (e.g. deploy) will be SILENCED on merge. Wire secrets.automerge_pat in the caller to fix."
+            echo "::notice::Auth: GITHUB_TOKEN for a Dependabot PR — Dependabot-triggered runs never receive Actions secrets, and Dependabot deletes its own branch after the merge."
           fi
           # Bind the arm to the exact revision this run's gates evaluated
           # (codex round-2 P1). --match-head-commit maps to GraphQL
@@ -2089,6 +2140,11 @@ jobs:
             # this run gated it, and may well be clean. Telling the operator to
             # rewrite a reference that isn't there would be a false instruction.
             decision="automerge:body-changed"
+          elif [ "${ARM_STOOD_DOWN:-}" = "no-pat" ]; then
+            # The arm step's attribution gate: every other gate passed, but
+            # without the caller's PAT the merge would be github-actions[bot]'s
+            # and GitHub would keep the branch. The fix is in the caller.
+            decision="automerge:refused-no-pat"
           elif [ "${BODY_REFUSE:-}" = "1" ]; then
             decision="automerge:refused-body"
           elif [ "${RISKY:-}" = "1" ] && [ "${BYPASS_LBL:-}" != "1" ] && [ "${BYPASS_CDX:-}" != "1" ]; then
@@ -2158,6 +2214,7 @@ jobs:
             automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
             automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: PR body closes an issue with a qualifier (closes #N …) — rewrite as 'part of #N' or click-merge" ;;
             automerge:body-changed)       color="bfd4f2"; desc="Automerge arbiter: the PR body changed after this run gated it — push a commit or re-apply a label to re-gate, or click-merge" ;;
+            automerge:refused-no-pat)     color="e99695"; desc="Automerge arbiter: no automerge_pat reached this run — wire the PAT in the caller, or click-merge" ;;
           esac
           # create-else-EDIT (not a create-retry): create's failure is the
           # EXPECTED already-exists conflict, and the edit refreshes a

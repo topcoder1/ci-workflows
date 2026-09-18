@@ -49,17 +49,17 @@ on:
     secrets:
       automerge_pat:
         description: >-
-          Optional fine-grained PAT (or GitHub App token) used to enable
-          auto-merge. When set, the resulting merge commit is attributed
-          to the PAT user and triggers downstream push-on-main workflows
-          (e.g. deploy). When unset, the workflow falls back to the
-          built-in GITHUB_TOKEN — auto-merge still works, but the merge
-          is attributed to app/github-actions and GitHub silently
-          suppresses downstream workflow runs (the GITHUB_TOKEN
-          loop-prevention rule). Mirrors the pattern in
-          claude-author-automerge.yml. Required scopes for a fine-grained
-          PAT: repo contents r/w, pull-requests r/w. Wire via
-          `secrets: inherit` in the caller, or pass explicitly.
+          Fine-grained USER PAT used to enable auto-merge, so the merge
+          is attributed to the PAT user. Without it this workflow does
+          not arm (Dependabot PRs excepted): a GITHUB_TOKEN arm merges as
+          github-actions[bot], and GitHub then skips the repo's automatic
+          head-branch deletion (the merged branch survives and a later
+          push to it never reaches main — wxa-graph#553) and suppresses
+          every push-on-main workflow. A GitHub App token does not help:
+          GITHUB_TOKEN is itself one. Same contract as
+          claude-author-automerge.yml. Required scopes - repo contents r/w,
+          pull-requests r/w. Pass it EXPLICITLY; `secrets: inherit` passes
+          nothing to a reusable owned by a different account.
         required: false
 
 # Serialize per PR. Without this, a run that classified an OLDER, docs-only
@@ -703,6 +703,9 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           METHOD: ${{ inputs.merge_method }}
           USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
+          # The PR's author login — the one field no PR contents can set, so
+          # only Dependabot's own PRs can take the exception below.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           # Arm only the head this run actually classified. `gh pr merge
@@ -717,10 +720,29 @@ jobs:
             echo "::notice::head is '${now:-<unreadable>}' but this run classified '${HEAD_SHA}' — not arming; the current head's own run owns that decision."
             exit 0
           fi
+          # Attribution gate (2026-09-18) — the same gate, for the same
+          # measured reason, as the arm step in claude-author-automerge.yml:
+          # after a GITHUB_TOKEN arm GitHub merges as github-actions[bot],
+          # skips the automatic head-branch deletion, and a later push to
+          # the surviving branch never reaches main. Declines to arm (exit
+          # 0, never a revoke: any arm already on the PR is a human's or a
+          # PAT-wired sibling's, both user-attributed). Not a failing
+          # step: this check must never block a click-merge, and a red run
+          # here would carry no more information than the annotation.
+          # Dependabot's own PRs keep the old behavior — their runs never
+          # receive Actions secrets, and Dependabot deletes its branch after
+          # the merge (wxa-mcp-server's docs/package.json bumps take this
+          # path).
+          if [ "$USING_PAT" != "1" ] && [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            msg="No automerge_pat reached this workflow. Arming here would make GitHub merge this PR as github-actions[bot], which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret explicitly as automerge_pat — secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
+            echo "::error::$msg"
+            echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          fi
           echo "Safe-paths-only diff — enabling auto-merge ($METHOD)."
           if [ "$USING_PAT" = "1" ]; then
-            echo "Auth: caller-supplied automerge_pat — downstream workflows WILL trigger on merge."
+            echo "Auth: caller-supplied automerge_pat — the merge is attributed to the PAT user, so GitHub deletes the head branch and push-on-main workflows run."
           else
-            echo "::warning::Auth: GITHUB_TOKEN fallback — downstream push workflows (e.g. deploy) will be SILENCED on merge. Wire secrets.automerge_pat in the caller to fix."
+            echo "::notice::Auth: GITHUB_TOKEN for a Dependabot PR — Dependabot-triggered runs never receive Actions secrets, and Dependabot deletes its own branch after the merge."
           fi
           gh pr merge --auto --"$METHOD" "$PR_URL"

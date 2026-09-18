@@ -75,6 +75,11 @@
 #  18.  the create conflict falls through to `gh label edit`, so a
 #       repo that minted the label under older wording gets its
 #       description refreshed (codex round-3 P3).
+#  19.  arm stood down on the attribution gate (stood_down=no-pat — no
+#       automerge_pat reached the run, so the merge would have been
+#       github-actions[bot]'s and GitHub would have kept the branch) ⇒
+#       `automerge:refused-no-pat` with the caller-fix lever in its
+#       description (2026-09-18; selftest/test_automerge_pat_attribution_gate.sh).
 #
 # Structural pins:
 #   * the arm step carries `id: arm` and publishes `armed=1` AFTER the
@@ -487,6 +492,20 @@ expect "17b: step exits 0" "rc=0" "$T/out.log"
 expect "18: create conflict falls through to gh label edit (stale description refresh)" \
   "label edit automerge:withheld-findings" "$T/gh.log"
 export STUB_CREATE_FAIL=0
+
+# ---------------------------------------------------------------------------
+# 19. arm stood down on the attribution gate (stood_down=no-pat) ⇒
+#     refused-no-pat, minted with its own lever text, stale label swapped.
+# ---------------------------------------------------------------------------
+export QF_REASON="" ARM_STOOD_DOWN="no-pat" STUB_LABELS="automerge:withheld-quiet-cap"
+run_case no_pat
+expect "19a: attribution-gate stand-down publishes automerge:refused-no-pat" \
+  "labels[]=automerge:refused-no-pat" "$T/gh.log"
+expect "19b: the label is created with the caller-fix lever in its description" \
+  "label create automerge:refused-no-pat --color e99695 --description Automerge arbiter: no automerge_pat reached this run — wire the PAT in the caller, or click-merge" "$T/gh.log"
+expect "19c: the stale arbiter label is swapped out" \
+  "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Awithheld-quiet-cap" "$T/gh.log"
+export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------
 if [ "$failed" -ne 0 ]; then
