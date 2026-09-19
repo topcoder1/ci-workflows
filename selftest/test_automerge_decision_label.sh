@@ -91,14 +91,15 @@
 #   * the decision-label run block is `${{ }}`-free (extraction-safe
 #     and injection-safe), its label read paginates, and the step sits
 #     BEFORE the always() error-revoke step (which must stay last).
-#   * every decision label's description, EVALUATED as the step evaluates
-#     it, fits GitHub's 100-character label-description cap, counted in
-#     characters, not bytes — over it, create and edit both fail silently
-#     and the add mints a bare label. Every desc= in the step must sit in
-#     the case block, one per arm. Controls run through the same code: 101
-#     chars is rejected, 100 chars / 106 bytes is accepted, a description
-#     continued past an escaped quote measures over, and escaped quotes
-#     spelling 102 chars but evaluating to 100 fit.
+#   * every label the step can publish (each case arm, each assigned
+#     decision) carries a description that fits GitHub's 100-character
+#     label-description cap, measured as `gh label create` receives it
+#     and counted in characters, not bytes — over it, create and edit both
+#     fail silently and the add mints a bare label. Controls run through
+#     the same code: 101 chars is rejected, 100 chars / 106 bytes is
+#     accepted, and a continuation past an escaped quote, escaped quotes
+#     spelling 102 chars that evaluate to 100, and a desc+= after esac
+#     measure over, fits and over.
 #   * refused-body, body-changed and refused-base name the re-fire (push)
 #     in their lever — the fix each asks for fires no run on its own.
 #
@@ -227,48 +228,57 @@ LABEL_DESC_MAX=100
 char_len() { printf '%s' "$1" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' '; }
 desc_fits() { [ "$(char_len "$1")" -le "$LABEL_DESC_MAX" ]; }
 
-# The description the step hands `gh label create` for one arm: the case
-# block EVALUATED as the step evaluates it, so quotes, escapes and line
-# continuations are resolved rather than read off the source spelling (codex
-# round 2: a spelling match missed a continuation line and over-counted
-# escaped quotes). Prints a trailing "." so the caller's $(…) cannot eat
-# trailing newlines, and nothing at all when the block does not evaluate.
-desc_of() { # arm, case block
-  # shellcheck disable=SC2034  # read by the eval'd case block
-  local decision="$1" desc=""
-  eval "$2" || return 0
-  printf '%s.' "$desc"
+# The description the step hands `gh label create` for one decision: the
+# step's tail (its decision case block through the create call) run in a
+# subshell with $decision preset and a gh stub that records --description.
+# Measured where it is USED, so quoting, escapes, line continuations and any
+# later edit (desc+=, an override after esac) all count — codex rounds 2-3
+# showed that reading the source spelling, and counting desc= assignments,
+# each let a shape through. Prints the value plus a trailing "." (so the
+# caller's $(…) cannot eat trailing newlines), or nothing when the tail
+# never reaches the create call.
+desc_of() { # decision, step tail
+  (
+    # shellcheck disable=SC2034  # read by the eval'd step tail
+    decision="$1"
+    unset desc color # an arm that sets neither must not inherit ours
+    # shellcheck disable=SC2317,SC2329  # invoked from the eval'd step tail
+    gh() {
+      [ "${1:-} ${2:-}" = "label create" ] || return 0
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --description|-d) printf '%s.' "${2-}" >&3; return 0 ;;
+          --description=*) printf '%s.' "${1#--description=}" >&3; return 0 ;;
+        esac
+        shift
+      done
+    }
+    eval "$2" >/dev/null 2>&1
+  ) 3>&1 || true
 }
 
-# Prints "<label> <chars> fits|over" for each automerge:* arm of a decision
-# case block. An empty or unevaluable description counts as over. Returns 2
-# unless every desc= in the step ($2) sits in this block, one per arm — two
-# arms on one line, or an override after esac, would otherwise ship
-# unmeasured.
-measure_descs() { # case block, whole step
-  local block="$1" arms arm d n_arms
-  arms=$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*\(automerge:[a-z0-9-]*\)).*/\1/p')
-  n_arms=$(printf '%s\n' "$arms" | grep -c . || true)
-  [ "$n_arms" -gt 0 ] || return 2
-  [ "$(printf '%s\n' "$block" | grep -v '^[[:space:]]*#' | grep -o 'desc=' | wc -l | tr -d ' ')" = "$n_arms" ] || return 2
-  [ "$(printf '%s\n' "$2" | grep -v '^[[:space:]]*#' | grep -o 'desc=' | wc -l | tr -d ' ')" = "$n_arms" ] || return 2
-  while IFS= read -r arm; do
-    d=$(desc_of "$arm" "$block")
+# Prints "<decision> <chars> fits|over" for each decision in $2 (one per
+# line); an empty or unreachable description counts as over.
+measure_descs() { # step tail, decisions
+  local dec d
+  while IFS= read -r dec; do
+    d=$(desc_of "$dec" "$1")
     d=${d%.}
     if [ -n "$d" ] && desc_fits "$d"; then
-      echo "$arm $(char_len "$d") fits"
+      echo "$dec $(char_len "$d") fits"
     else
-      echo "$arm $(char_len "$d") over"
+      echo "$dec $(char_len "$d") over"
     fi
-  done <<< "$arms"
+  done <<< "$2"
 }
 
 # Controls through the SAME code: an over-long string must be rejected (the
 # pin can fail at all); one exactly at the cap whose em dashes push it past
 # 100 BYTES must be accepted (the pin counts characters); and measurement
-# must read evaluated values, not spelling — a description continued past
-# an escaped quote must measure over, and escaped quotes that spell 102
-# characters but evaluate to 100 must fit.
+# must see what `gh label create` receives — a description continued past
+# an escaped quote measures over, escaped quotes that spell 102 characters
+# but evaluate to 100 fit, and a 99-character description pushed to 101 by
+# a `desc+=` after esac measures over.
 if desc_fits "$(printf '%0101d' 0)"; then
   echo "✗ negative control: a 101-character description passed the length check — this pin cannot fail"
   failed=1
@@ -283,38 +293,49 @@ else
 fi
 # read -d '' rather than $(cat <<…): bash 3.2 ends a $(…) at the first
 # unbalanced ")" inside a heredoc body — here, the case arms.
-IFS= read -r -d '' ctl_block <<CTL || true
+IFS= read -r -d '' ctl_tail <<CTL || true
 case "\$decision" in
-  automerge:ctl-long) color="000000"; desc="rewrite as \"part of #N\"
+  automerge:ctl-long)   color="000000"; desc="rewrite as \"part of #N\"
 $(printf '%0101d' 0)" ;;
-  automerge:ctl-edge) color="000000"; desc="\"\"$(printf '%098d' 0)" ;;
+  automerge:ctl-edge)   color="000000"; desc="\"\"$(printf '%098d' 0)" ;;
+  automerge:ctl-append) color="000000"; desc="$(printf '%099d' 0)" ;;
 esac
+if [ "\$decision" = "automerge:ctl-append" ]; then desc+="xx"; fi
+gh label create "\$decision" --color "\$color" --description "\$desc" 2>/dev/null || true
 CTL
-ctl=$(measure_descs "$ctl_block" "$ctl_block" | paste -sd, -) || true
-if [ "$ctl" = "automerge:ctl-long 125 over,automerge:ctl-edge 100 fits" ]; then
-  echo "✓ extraction control: descriptions are measured as evaluated, not as spelled"
+ctl=$(measure_descs "$ctl_tail" "$(printf '%s\n' automerge:ctl-long automerge:ctl-edge automerge:ctl-append)" | paste -sd, -) || true
+ctl_want="automerge:ctl-long 125 over,automerge:ctl-edge 100 fits,automerge:ctl-append 101 over"
+if [ "$ctl" = "$ctl_want" ]; then
+  echo "✓ measurement control: descriptions are measured as gh label create receives them"
 else
-  echo "✗ extraction control: expected 'automerge:ctl-long 125 over,automerge:ctl-edge 100 fits', measured '$ctl' — the pin is not measuring the evaluated description"
+  echo "✗ measurement control: expected '$ctl_want', measured '$ctl' — the pin is not measuring what gh receives"
   failed=1
 fi
 
-case_block=$(awk '/case "\$decision" in/{f=1} f{print} f && /^[[:space:]]*esac$/{exit}' "$T/decision.sh")
-rc=0
-lengths=$(measure_descs "$case_block" "$(cat "$T/decision.sh")") || rc=$?
-if [ "$rc" -ne 0 ]; then
-  echo "✗ the decision step's desc= assignments do not sit one per automerge:* arm inside its case block — a description could ship unmeasured (two arms on a line, a quoted arm pattern, or an assignment outside the block)"
-  failed=1
-elif grep -q ' over$' <<< "$lengths"; then
-  while read -r label n verdict; do
-    if [ "$verdict" = "over" ] && [ "$n" = "0" ]; then
-      echo "✗ $label: description is empty or does not evaluate — the POST would mint a bare label"
-    elif [ "$verdict" = "over" ]; then
-      echo "✗ $label: description is $n characters — GitHub rejects > $LABEL_DESC_MAX, so create AND edit fail and the POST mints a bare label"
-    fi
-  done <<< "$lengths"
+# Every label the step can publish: each arm of its decision case block plus
+# each decision it assigns. A decision with no arm reaches no create call
+# (the step would die under set -u) and fails below. The tail stops before
+# the add (POST), which needs PR/GITHUB_REPOSITORY and records nothing.
+step_tail=$(awk '/case "\$decision" in/{f=1} f && /gh api -X POST/{exit} f' "$T/decision.sh")
+arms=$(printf '%s\n' "$step_tail" | awk '/case "\$decision" in/{f=1} f{print} f && /^[[:space:]]*esac$/{exit}' | grep -oE 'automerge:[a-z0-9-]+\)' | tr -d ')' || true)
+chain=$(grep -oE 'decision="automerge:[a-z0-9-]+"' "$T/decision.sh" | sed 's/^decision="//; s/"$//' || true)
+if [ -z "$arms" ] || [ -z "$chain" ]; then
+  echo "✗ could not enumerate the decision labels (case arms: [$arms], assigned decisions: [$chain]) — the length pin would pass vacuously"
   failed=1
 else
-  echo "✓ all $(grep -c . <<< "$lengths") decision-label descriptions fit GitHub's $LABEL_DESC_MAX-character cap"
+  lengths=$(measure_descs "$step_tail" "$(printf '%s\n%s\n' "$arms" "$chain" | sort -u)")
+  if grep -q ' over$' <<< "$lengths"; then
+    while read -r label n verdict; do
+      if [ "$verdict" = "over" ] && [ "$n" = "0" ]; then
+        echo "✗ $label: no description reaches gh label create (empty, or the step errors first) — the add would mint a bare label"
+      elif [ "$verdict" = "over" ]; then
+        echo "✗ $label: description is $n characters — GitHub rejects > $LABEL_DESC_MAX, so create AND edit fail and the POST mints a bare label"
+      fi
+    done <<< "$lengths"
+    failed=1
+  else
+    echo "✓ all $(grep -c . <<< "$lengths") decision-label descriptions fit GitHub's $LABEL_DESC_MAX-character cap, as gh label create receives them"
+  fi
 fi
 
 # The stand-downs that a fix alone cannot re-fire must say so in their lever:
@@ -323,7 +344,7 @@ fi
 # unarmed under a stale label (codex round 2 + independent review — the
 # refused-body lever had dropped the push that its sticky comment names).
 for arm in automerge:refused-body automerge:body-changed automerge:refused-base; do
-  d=$(desc_of "$arm" "$case_block")
+  d=$(desc_of "$arm" "$step_tail")
   d=${d%.}
   case "$d" in
     *push*) echo "✓ $arm names the re-fire (push) in its lever" ;;
