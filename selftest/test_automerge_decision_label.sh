@@ -252,13 +252,19 @@ case "${1:-} ${2:-}" in
   "label edit") [ "${DESC_MODE:-create}" = edit ] || exit 0 ;;
   *) exit 0 ;;
 esac
+# gh's flag parser (pflag) keeps the LAST description, in any spelling.
+found=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --description|-d) printf '%s.' "${2-}" >&3; exit 0 ;;
-    --description=*) printf '%s.' "${1#--description=}" >&3; exit 0 ;;
+    --description|-d) found=1; d=${2-}; shift ;;
+    --description=*) found=1; d=${1#--description=} ;;
+    -d=*) found=1; d=${1#-d=} ;;
+    -d?*) found=1; d=${1#-d} ;;
   esac
   shift
 done
+[ "$found" = 1 ] && printf '%s.' "$d" >&3
+exit 0
 STUB
 chmod +x "$T/descbin/gh"
 desc_of() { # decision, step tail, create|edit
