@@ -6,8 +6,10 @@
 # Incident context (whois-api-llc/wxa-graph#553, 2026-09-16): the PR was
 # auto-merged at 2:54 PM PT; a review report pushed to its head branch at
 # 3:06 PM PT was accepted by git and never reached main, and an accepted
-# ADR cited the missing evidence for two days (recovered in #597). Same
-# shape as wxa_vpn#1736. The branch was still there to push to because
+# ADR cited the missing evidence for two days (recovered in #597). (Its
+# twin, wxa_vpn#1736, is NOT this bug: that user-merged branch WAS deleted
+# at merge and the later push re-created it.) The branch was still there
+# to push to because
 # GitHub runs the repo's "Automatically delete head branches" only for a
 # USER-attributed merge. wxa-graph's callers used `secrets: inherit`
 # across accounts, which delivers nothing, so the arm ran on the

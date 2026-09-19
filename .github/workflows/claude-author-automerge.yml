@@ -1850,7 +1850,7 @@ jobs:
           # performs the merge as github-actions[bot]: the head branch
           # survives, and a later push to it succeeds but never reaches
           # main (wxa-graph#553: a review report pushed 12 minutes after the
-          # merge sat off main for two days; wxa_vpn#1736). The same merge
+          # merge sat off main for two days). The same merge
           # also suppresses every push-on-main workflow. Measured 2026-09-18
           # across the 44 caller repos: 0 of 97 bot-attributed merges since
           # 2026-05-03 had their branch auto-deleted, against 1746 of 1746

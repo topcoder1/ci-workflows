@@ -84,7 +84,7 @@ arbitrary helper scripts; that's a different kind of repo.
   without the caller's `automerge_pat`. GitHub deletes a merged head branch
   (`delete_branch_on_merge`) only for a USER-attributed merge; after a
   GITHUB_TOKEN arm the merge is github-actions[bot]'s, the branch survives,
-  and a later push to it never reaches main (wxa-graph#553, wxa_vpn#1736).
+  and a later push to it never reaches main (wxa-graph#553).
   Measured 2026-09-18: 0/97 bot-attributed fleet merges auto-deleted vs
   1746/1746 user-attributed; a scratch-repo repeat matched (4/4 vs 5/5). Runs
   both extracted arm steps: no PAT refuses without disarming (and publishes
