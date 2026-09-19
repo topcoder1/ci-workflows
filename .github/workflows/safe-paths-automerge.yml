@@ -716,8 +716,8 @@ jobs:
           # after a GITHUB_TOKEN arm GitHub merges as github-actions[bot],
           # skips the automatic head-branch deletion, and a later push to
           # the surviving branch never reaches main. Declines to arm (exit
-          # 0, never a revoke: any arm already on the PR is a human's or a
-          # PAT-wired sibling's, both user-attributed). Not a failing
+          # 0; a user's arm — a human's or a PAT-wired sibling's — is never
+          # revoked, and a bot's arm is removed below). Not a failing
           # step: this check must never block a click-merge, and a red run
           # here would carry no more information than the annotation.
           # Dependabot's own PRs keep the old behavior — their runs never
@@ -745,6 +745,27 @@ jobs:
               arm_as=""
               sleep 2
             done
+          fi
+          # A BOT's arm already on a non-Dependabot PR merges as that bot
+          # whatever this run does (re-arming keeps the original enabler —
+          # measured), so remove it and let the arm below or the refusal take
+          # over (Codex round 5). A user's arm is never touched; an unreadable
+          # arm state leaves things as they are. Done before the head read so
+          # it adds no time between that read and the arm.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+              2>/dev/null) || armed_by="unknown"
+            if [ "$armed_by" = "bot" ]; then
+              echo "::notice::a bot armed this PR — its merge would skip the head-branch deletion, so removing that arm."
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+              if [ "$state" != "OFF" ]; then
+                echo "::error::could not verify the bot's arm is off (state '$state') — failing closed."
+                exit 1
+              fi
+            fi
           fi
           # Arm only the head this run actually classified. `gh pr merge
           # --auto` acts on the PR's CURRENT head, so a run that classified

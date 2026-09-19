@@ -1804,6 +1804,29 @@ jobs:
               sleep 2
             done
           fi
+          # A BOT's arm already on a non-Dependabot PR (placed by
+          # GITHUB_TOKEN before this gate shipped, or by a caller that lost
+          # its PAT) merges as that bot whatever this run does: enabling
+          # auto-merge again keeps the original enabler (measured). So remove
+          # it, and let the arm below (as the user) or the refusal take over
+          # (Codex round 5). A user's arm is never touched. Done here, with
+          # the probe, so it adds no time between the revalidations and the
+          # arm; an unreadable arm state leaves things as they are.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+              2>/dev/null) || armed_by="unknown"
+            if [ "$armed_by" = "bot" ]; then
+              echo "::notice::a bot armed this PR — its merge would skip the head-branch deletion, so removing that arm."
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+              if [ "$state" != "OFF" ]; then
+                echo "::error::could not verify the bot's arm is off (state '$state') — failing closed."
+                disarm_then_exit 1
+              fi
+            fi
+          fi
           now_base=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .base.ref) || {
             echo "::error::could not re-read the base ref before arming — refusing to arm (fail closed)."
             disarm_then_exit 1
@@ -1886,15 +1909,14 @@ jobs:
           # usual cause is a caller using `secrets: inherit` across
           # accounts, which passes nothing (see the automerge_pat docstring).
           #
-          # Deliberately NO disarm, unlike every rejection above. Those
-          # re-validate PR state that an earlier arm was placed under; this
-          # gate is about the credential, and an arm already on the PR was
-          # placed by a human or by a sibling run that had the PAT — both
-          # user-attributed, both correct to keep. The one exception is a
-          # GITHUB_TOKEN arm placed before this gate shipped, and re-arming
-          # would not repair it anyway: enabling auto-merge on an armed PR
-          # keeps the original enabler (measured). Clearing those is a
-          # one-time migration step, not a per-run disarm.
+          # Deliberately NO disarm of a USER's arm, unlike every rejection
+          # above. Those re-validate PR state that an earlier arm was placed
+          # under; this gate is about the credential, and a user's arm (a
+          # human's, or a PAT-wired sibling's) is user-attributed and correct
+          # to keep. A BOT's arm is the exception and was already removed at
+          # the top of this step: re-arming could never repair it, because
+          # enabling auto-merge on an armed PR keeps the original enabler
+          # (measured).
           #
           # Dependabot's own PRs are exempt: Dependabot-triggered runs never
           # receive Actions secrets, and Dependabot deletes its branch after
@@ -1909,22 +1931,14 @@ jobs:
           # type=User. An unreadable answer refuses too (fail closed; the
           # next PR event retries).
           #
-          # The refusal never disarms, and a PR a USER already armed (a
-          # human, or a PAT-wired sibling) reads as armed to the reconciler
-          # — natively visible state, no refusal label (Codex round 2). A
-          # bot's arm (placed before this gate shipped) keeps the label:
-          # that PR will still merge as the bot, and the label is the cue.
+          # The refusal never disarms a user's arm (a bot's arm was already
+          # removed at the top of this step). Whether the PR then carries the
+          # refusal label is decided by the reconciler from the arm state it
+          # reads at publish time: a user's arm is natively visible and gets
+          # no label (Codex rounds 2, 3 and 5).
           refuse_unattributed_arm() {
             echo "::error::$1 Arming here would make GitHub merge this PR as a bot, which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret — a USER PAT — explicitly as automerge_pat; secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
-            armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
-              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
-              2>/dev/null) || armed_by="unknown"
-            if [ "$armed_by" = "user" ]; then
-              echo "::notice::a user already armed this PR — keeping that arm; it merges user-attributed."
-              echo "stood_down=already-armed" >> "$GITHUB_OUTPUT"
-            else
-              echo "stood_down=no-pat" >> "$GITHUB_OUTPUT"
-            fi
+            echo "stood_down=no-pat" >> "$GITHUB_OUTPUT"
             exit 0
           }
           # The decision: no network call between here and the arm (the
@@ -2177,9 +2191,7 @@ jobs:
           # state, natively visible — clear stale arbiter labels).
           decision=""
           publish=1
-          if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ] || [ "${ARM_STOOD_DOWN:-}" = "already-armed" ]; then
-            # already-armed: the attribution gate refused to arm, but a
-            # user's arm is on the PR — the same natively visible state.
+          if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ]; then
             decision=""
           elif [ "${BLOCKED:-}" = "1" ]; then
             # Publishes rather than defers to the risk:* label: the verdict
@@ -2230,11 +2242,12 @@ jobs:
             echo "Head moved (${HEAD_SHA} → ${live}) — the newer head's run owns the labels; not publishing."
             exit 0
           fi
-          # A refused-no-pat verdict rests on an arm-state read the arm step
-          # took seconds ago, and a user may have armed the PR since (Codex
-          # round 3). Re-read at publish time: a user's arm is natively
-          # visible state, reconciled like ARMED. An unreadable answer keeps
-          # the verdict (advisory surface).
+          # A refused-no-pat verdict: whether it shows depends on the arm
+          # state NOW, read at publish time (Codex rounds 3 and 5) — a user
+          # may have armed the PR before or after the arm step ran, or a
+          # user's arm may have been revoked since. A user's arm is natively
+          # visible state, reconciled like ARMED; no arm or a bot's arm gets
+          # the label. An unreadable answer keeps the label (advisory surface).
           if [ "$decision" = "automerge:refused-no-pat" ]; then
             armed_now=$(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
               --jq 'if .auto_merge == null then "none" elif .auto_merge.enabled_by.type == "Bot" then "bot" else "user" end' \

@@ -80,12 +80,9 @@
 #       github-actions[bot]'s and GitHub would have kept the branch) ⇒
 #       `automerge:refused-no-pat` with the caller-fix lever in its
 #       description (2026-09-18; selftest/test_automerge_pat_attribution_gate.sh).
-#  20.  the attribution gate kept a USER's existing arm
-#       (stood_down=already-armed) ⇒ reconciled like ARMED: stale arbiter
-#       labels cleared, nothing added (Codex round 2).
-#  21.  refused-no-pat, but a USER armed the PR after the arm step read it
-#       ⇒ the publish-time re-read clears labels and adds none; a BOT's arm
-#       keeps the refusal label (Codex round 3).
+#  21.  refused-no-pat follows the arm state read at PUBLISH time: a user's
+#       arm clears labels and adds none; a bot's arm, no arm, or an
+#       unreadable answer publishes the label (Codex rounds 2, 3 and 5).
 #
 # Structural pins:
 #   * the arm step carries `id: arm` and publishes `armed=1` AFTER the
@@ -241,7 +238,8 @@ case "$1" in
         # emit the sha) and the refused-no-pat arm-state re-read (--jq on
         # .auto_merge, emit none|bot|user).
         case "$*" in
-          *auto_merge*) printf '%s\n' "${STUB_LIVE_ARMED_BY:-none}" ;;
+          *auto_merge*) [ "${STUB_LIVE_ARMED_FAIL:-0}" = "1" ] && exit 1
+                        printf '%s\n' "${STUB_LIVE_ARMED_BY:-none}" ;;
           *) printf '%s\n' "${STUB_LIVE_HEAD:-}" ;;
         esac
         exit 0 ;;
@@ -519,23 +517,14 @@ expect "19c: the stale arbiter label is swapped out" \
 export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------
-# 20. the attribution gate kept a USER's arm (stood_down=already-armed) ⇒
-#     reconciled like ARMED: stale arbiter labels cleared, nothing added.
-# ---------------------------------------------------------------------------
-export ARM_STOOD_DOWN="already-armed" STUB_LABELS="automerge:refused-no-pat"
-run_case already_armed
-expect "20a: a stale refused-no-pat label is removed from the user-armed PR" \
-  "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Arefused-no-pat" "$T/gh.log"
-expect_absent "20b: no arbiter label is added to an armed PR" "labels[]=" "$T/gh.log"
-export ARM_STOOD_DOWN=""
-
-# ---------------------------------------------------------------------------
-# 21. refused-no-pat, but a USER armed the PR after the arm step read it ⇒
-#     the publish-time re-read wins: labels cleared, nothing added.
+# 21. refused-no-pat: the label follows the arm state read at PUBLISH time.
+#     A user's arm (before or after the arm step) ⇒ labels cleared, nothing
+#     added; a bot's arm or no arm ⇒ the label; an unreadable answer ⇒ the
+#     label (advisory surface fails toward the refusal it records).
 # ---------------------------------------------------------------------------
 export ARM_STOOD_DOWN="no-pat" STUB_LABELS="automerge:refused-no-pat" STUB_LIVE_ARMED_BY="user"
-run_case no_pat_armed_since
-expect "21a: the refusal label comes off a PR a user armed since" \
+run_case no_pat_user_armed
+expect "21a: the refusal label comes off a PR a user has armed" \
   "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Arefused-no-pat" "$T/gh.log"
 expect_absent "21b: no refusal label is added to that armed PR" "labels[]=" "$T/gh.log"
 export STUB_LIVE_ARMED_BY="bot" STUB_LABELS=""
@@ -543,6 +532,11 @@ run_case no_pat_bot_armed
 expect "21c: a BOT's arm keeps the refusal label (it will merge as the bot)" \
   "labels[]=automerge:refused-no-pat" "$T/gh.log"
 unset STUB_LIVE_ARMED_BY
+export STUB_LIVE_ARMED_FAIL=1 STUB_LABELS=""
+run_case no_pat_unreadable
+expect "21d: an unreadable arm state keeps the refusal label" \
+  "labels[]=automerge:refused-no-pat" "$T/gh.log"
+unset STUB_LIVE_ARMED_FAIL
 export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------

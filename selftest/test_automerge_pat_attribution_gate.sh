@@ -32,12 +32,13 @@
 #   claude-author-automerge.yml
 #    1.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, NO disarm, no
 #        /user probe, stood_down=no-pat, an ::error:: naming the fix.
-#    1b. same, but a USER already armed the PR ⇒ the arm is kept and the
-#        run reports stood_down=already-armed, so the reconciler publishes
-#        no refusal label on an armed PR (Codex round 2).
-#    1c. same, but a BOT armed it ⇒ stood_down=no-pat (that PR will merge
-#        as the bot; the label is the operator's cue).
-#    1d. the arm state is unreadable ⇒ stood_down=no-pat.
+#    1b. same, but a USER already armed the PR ⇒ that arm is never
+#        disarmed; the reconciler decides the label from the live arm
+#        state at publish time (Codex rounds 2, 3, 5).
+#    1c. same, but a BOT armed it ⇒ the bot's arm is removed (it would
+#        merge as the bot; re-arming keeps the enabler), then the refusal.
+#    1d. the arm state is unreadable ⇒ nothing disarmed, stood_down=no-pat.
+#    1e. a bot's arm that will not come off ⇒ exit 1 (fail closed).
 #    2.  PAT that is a user ⇒ arms (head-bound), armed=1, no stood_down.
 #    2b. PAT whose /user read fails 3× (an App installation token's 403)
 #        ⇒ refused after exactly 3 attempts, no arm, stood_down=no-pat.
@@ -45,6 +46,8 @@
 #    2d. /user fails twice, then answers ⇒ arms (the retry recovers).
 #    2e. the /user probe precedes the base/body revalidation reads, so its
 #        retries never widen the revalidate-to-arm window (Codex round 3).
+#    2f. user PAT + a BOT's arm ⇒ the bot's arm is removed before the
+#        live-state reads, then the PR is armed as the user (Codex round 5).
 #    3.  no PAT, author dependabot[bot] ⇒ arms, no /user probe (exception).
 #    4.  near-miss authors (dependabot, Dependabot[bot], dependabot[bot]x)
 #        ⇒ refused — the exception is an exact login match.
@@ -59,11 +62,17 @@
 #    7d. the arm fails on an unchanged head ⇒ exit 1.
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
+#    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
+#    8b. user PAT + a BOT's arm ⇒ removed before the head read, then the
+#        bound arm as the user.
+#    8c. a bot's arm that will not come off ⇒ exit 1 (fail closed).
 #   negative controls (each proves a case above can fail)
 #    9.  claude-author with both refusal calls neutralized ⇒ arms under no
 #        PAT (case 1).
 #    9b. claude-author with only the /user refusal neutralized ⇒ arms with
 #        an App-token-shaped credential (case 2b).
+#    9c. claude-author with only the bot-arm removal neutralized ⇒ a
+#        bot-armed PR is re-armed over with no disarm first (case 2f).
 #    10. safe-paths with both refusal calls neutralized ⇒ arms (case 6).
 #
 # Structural pins (hardcoded, not derived from the files under test):
@@ -205,10 +214,11 @@ if grep -qF '"${ARM_STOOD_DOWN:-}" = "no-pat"' "$CA" && grep -qF 'decision="auto
 else
   fail "reconciler does not map stood_down=no-pat to automerge:refused-no-pat — the refusal would read as the unlabeled wedge"
 fi
-if grep -qF 'if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ] || [ "${ARM_STOOD_DOWN:-}" = "already-armed" ]; then' "$CA"; then
-  pass "reconciler treats stood_down=already-armed like ARMED (no label on an armed PR)"
+if grep -qF 'if [ "$decision" = "automerge:refused-no-pat" ]; then' "$CA" \
+   && grep -qF '.auto_merge.enabled_by.type == "Bot"' "$CA"; then
+  pass "reconciler re-reads the live arm state before publishing refused-no-pat"
 else
-  fail "reconciler does not clear labels on stood_down=already-armed — a user-armed PR would carry a refusal label"
+  fail "reconciler publishes refused-no-pat without re-reading the arm state — a user-armed PR could carry a refusal label"
 fi
 desc=$(awk -F'desc="' '/automerge:refused-no-pat\)[[:space:]]+color=/{split($2, a, "\""); print a[1]}' "$CA")
 dlen=$(printf '%s' "$desc" | python3 -c 'import sys; print(len(sys.stdin.read()))')
@@ -238,12 +248,12 @@ case "$1 $2" in
     esac
     exit 0 ;;
   "pr view")
-    # The refusal helper asks WHO armed the PR (none|bot|user); the
-    # disarm verification asks only ON/OFF.
+    # The bot-arm check asks WHO armed the PR (none|bot|user); a disarm
+    # verification asks only ON/OFF (STUB_DISARM_STUCK=1 ⇒ still ON).
     case "$*" in
       *is_bot*) [ "${STUB_ARMED_BY_FAIL:-0}" = "1" ] && exit 1
                 echo "${STUB_ARMED_BY:-none}" ;;
-      *) echo "OFF" ;;
+      *) if [ "${STUB_DISARM_STUCK:-0}" = "1" ]; then echo "ON"; else echo "OFF"; fi ;;
     esac
     exit 0 ;;
 esac
@@ -316,29 +326,37 @@ fi
 export STUB_ARMED_BY="user"
 run_step "$T/ca.sh" 0 "topcoder1"
 unset STUB_ARMED_BY
-if ! armed && ! disarmed && has "$T/ghout" "stood_down=already-armed" && ! has "$T/ghout" "stood_down=no-pat" \
-   && has "$T/out.log" "rc=0"; then
-  pass "1b: no PAT, a USER already armed the PR ⇒ arm kept, stood_down=already-armed (no refusal label)"
+if ! armed && ! disarmed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0"; then
+  pass "1b: no PAT, a USER already armed the PR ⇒ that arm is kept (no disarm); the reconciler decides the label"
 else
-  fail "1b: a user's existing arm must be kept and read as armed, not labeled refused"; dump
+  fail "1b: a user's existing arm must never be disarmed by the attribution gate"; dump
 fi
 
 export STUB_ARMED_BY="bot"
 run_step "$T/ca.sh" 0 "topcoder1"
 unset STUB_ARMED_BY
-if ! armed && ! disarmed && has "$T/ghout" "stood_down=no-pat"; then
-  pass "1c: no PAT, a BOT armed the PR ⇒ stood_down=no-pat (it will merge as the bot; the label is the cue)"
+if ! armed && disarmed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0"; then
+  pass "1c: no PAT, a BOT armed the PR ⇒ the bot's arm is removed, then the refusal (stood_down=no-pat)"
 else
-  fail "1c: a bot's existing arm must keep the refusal label"; dump
+  fail "1c: a bot's arm on a non-Dependabot PR must be removed — it would merge as the bot (Codex round 5)"; dump
 fi
 
 export STUB_ARMED_BY_FAIL=1
 run_step "$T/ca.sh" 0 "topcoder1"
 unset STUB_ARMED_BY_FAIL
-if ! armed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0"; then
-  pass "1d: no PAT, arm state unreadable ⇒ stood_down=no-pat, exit 0"
+if ! armed && ! disarmed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0"; then
+  pass "1d: no PAT, arm state unreadable ⇒ nothing disarmed, stood_down=no-pat, exit 0"
 else
-  fail "1d: an unreadable arm state must fall back to the refusal label"; dump
+  fail "1d: an unreadable arm state must leave arms alone and still refuse"; dump
+fi
+
+export STUB_ARMED_BY="bot" STUB_DISARM_STUCK=1
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_ARMED_BY STUB_DISARM_STUCK
+if ! armed && has "$T/out.log" "rc=1" && has "$T/out.log" "::error::could not verify the bot's arm is off"; then
+  pass "1e: a bot's arm that will not come off ⇒ exit 1 (fail closed), no arm"
+else
+  fail "1e: an unverifiable bot-arm removal must fail the step"; dump
 fi
 
 run_step "$T/ca.sh" 1 "topcoder1"
@@ -353,6 +371,23 @@ if probe_before "--jq .base.ref"; then
   pass "2e: claude-author probes /user BEFORE the base/body revalidation reads (no retry gap before the arm)"
 else
   fail "2e: the /user probe runs after the live-state revalidation — its retries widen the revalidate-to-arm window (Codex round 3)"; dump
+fi
+
+# before_in_log A B: the first log line containing A precedes the first containing B.
+before_in_log() {
+  local a b
+  a=$(grep -n -m1 -F -- "$1" "$T/gh.log" | cut -d: -f1)
+  b=$(grep -n -m1 -F -- "$2" "$T/gh.log" | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+export STUB_ARMED_BY="bot"
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_ARMED_BY
+if has "$T/ghout" "armed=1" && before_in_log "gh pr merge --disable-auto" "--jq .base.ref" \
+   && before_in_log "gh pr merge --disable-auto" "gh pr merge --auto"; then
+  pass "2f: user PAT + a BOT's arm ⇒ the bot's arm is removed before the live-state reads, then the PR is armed as the user"
+else
+  fail "2f: a bot's arm must be replaced, not re-armed over — GitHub keeps the original enabler (Codex round 5)"; dump
 fi
 
 export STUB_USER_FAIL_TIMES=3
@@ -462,10 +497,38 @@ else
 fi
 
 run_step "$T/sp.sh" 0 "dependabot[bot]"
-if armed && has "$T/out.log" "rc=0" && [ "$(user_calls)" = "0" ]; then
-  pass "8: safe-paths, no PAT, dependabot[bot] ⇒ arms (exception kept)"
+if armed && has "$T/out.log" "rc=0" && [ "$(user_calls)" = "0" ] && ! disarmed; then
+  pass "8: safe-paths, no PAT, dependabot[bot] ⇒ arms (exception kept, no bot-arm check)"
 else
   fail "8: safe-paths must keep arming Dependabot's own safe-paths PRs"; dump
+fi
+
+export STUB_ARMED_BY="bot"
+run_step "$T/sp.sh" 0 "wxacoeur"
+unset STUB_ARMED_BY
+if ! armed && disarmed && has "$T/out.log" "::error::No automerge_pat reached this workflow." && has "$T/out.log" "rc=0"; then
+  pass "6b: safe-paths, no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal"
+else
+  fail "6b: safe-paths must remove a bot's arm on a non-Dependabot PR"; dump
+fi
+
+export STUB_ARMED_BY="bot"
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARMED_BY
+if armed && before_in_log "gh pr merge --disable-auto" "--jq .head.sha" \
+   && before_in_log "gh pr merge --disable-auto" "gh pr merge --auto" && has "$T/out.log" "rc=0"; then
+  pass "8b: safe-paths, user PAT + a BOT's arm ⇒ removed before the head read, then the bound arm as the user"
+else
+  fail "8b: safe-paths must replace a bot's arm before arming as the user"; dump
+fi
+
+export STUB_ARMED_BY="bot" STUB_DISARM_STUCK=1
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARMED_BY STUB_DISARM_STUCK
+if ! armed && has "$T/out.log" "rc=1" && has "$T/out.log" "::error::could not verify the bot's arm is off"; then
+  pass "8c: safe-paths, a bot's arm that will not come off ⇒ exit 1 (fail closed), no arm"
+else
+  fail "8c: an unverifiable bot-arm removal must fail the safe-paths step"; dump
 fi
 
 # ---------------------------------------------------------------------------
@@ -500,6 +563,23 @@ if neutralize "$T/ca.sh" "automerge_pat is not a user credential" 1 "$T/ca_mut2.
   fi
 else
   fail "9b: negative control mutation did not neutralize exactly the /user refusal"
+fi
+
+# 9c: neutralize only the bot-arm REMOVAL (the first --disable-auto after the
+# "a bot armed this PR" notice); case 2f must then see no disarm before the arm.
+awk '/a bot armed this PR/{seen=1} seen && !done && /gh pr merge --disable-auto/{sub(/gh pr merge --disable-auto "\$PR_URL" 2>&1 \|\| true/, ": removal-neutralized"); done=1} {print}' \
+  "$T/ca.sh" > "$T/ca_mut3.sh"
+if [ "$(grep -c 'removal-neutralized' "$T/ca_mut3.sh")" = "1" ]; then
+  export STUB_ARMED_BY="bot"
+  run_step "$T/ca_mut3.sh" 1 "topcoder1"
+  unset STUB_ARMED_BY
+  if ! before_in_log "gh pr merge --disable-auto" "gh pr merge --auto"; then
+    pass "9c: negative control — without the bot-arm removal, a bot-armed PR is re-armed over (case 2f can fail)"
+  else
+    fail "9c: negative control — a disarm still preceded the arm with the removal neutralized; case 2f proves nothing"
+  fi
+else
+  fail "9c: negative control mutation did not neutralize exactly the bot-arm removal"
 fi
 
 if neutralize "$T/sp.sh" "" 2 "$T/sp_mut.sh"; then
