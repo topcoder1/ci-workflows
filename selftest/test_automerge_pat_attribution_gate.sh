@@ -48,6 +48,8 @@
 #        retries never widen the revalidate-to-arm window (Codex round 3).
 #    2f. user PAT + a BOT's arm ⇒ the bot's arm is removed before the
 #        live-state reads, then the PR is armed as the user (Codex round 5).
+#    2g. the first arm read fails and a bot's arm stays ⇒ the read-back
+#        after the arm catches it, removes it, exit 1 (review pass 2).
 #    3.  no PAT, author dependabot[bot] ⇒ arms, no /user probe (exception).
 #    4.  near-miss authors (dependabot, Dependabot[bot], dependabot[bot]x)
 #        ⇒ refused — the exception is an exact login match.
@@ -65,7 +67,9 @@
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
 #    8b. user PAT + a BOT's arm ⇒ removed before the head read, then the
 #        bound arm as the user.
-#    8c. a bot's arm that will not come off ⇒ exit 1 (fail closed).
+#    8c. a bot's arm that will not come off ⇒ 3 disable attempts, exit 1.
+#    8d. the first arm read fails and a bot's arm stays ⇒ the read-back
+#        after the arm catches it, removes it, exit 1 (review pass 2).
 #   negative controls (each proves a case above can fail)
 #    9.  claude-author with both refusal calls neutralized ⇒ arms under no
 #        PAT (case 1).
@@ -74,6 +78,9 @@
 #    9c. claude-author with only the bot-arm removal neutralized ⇒ a
 #        bot-armed PR is re-armed over with no disarm first (case 2f).
 #    10. safe-paths with both refusal calls neutralized ⇒ arms (case 6).
+#    9d/10b. the arm-owner jq path misspelled (`.enabled_by.is_bot`) in
+#        each step ⇒ a bot's arm slips through; the stub runs the shipped
+#        filters, so the harness sees it (review pass 2).
 #
 # Structural pins (hardcoded, not derived from the files under test):
 #   * exactly ONE non-comment `gh pr merge --auto` per workflow, and both
@@ -229,39 +236,56 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 0c. Stubs: `gh` logs every call and answers the reads both steps make;
-#     `sleep` no-ops the /user retry backoff. Knobs (env):
-#       STUB_BASE             — the claude-author base re-read (main)
-#       STUB_HEAD             — the head-sha read (the event's head)
-#       STUB_USER             — the login GET /user yields as a User; an
-#                               EMPTY value models a non-User answer
-#       STUB_USER_FAIL_TIMES  — first N /user reads exit 1 (a 403)
+# 0c. Stubs: `gh` logs every call and models the PR's auto-merge state; its
+#     `pr view` and `api user` answers are computed by running the SHIPPED
+#     --jq filter over gh-shaped JSON, so a wrong field path in a workflow
+#     filter (e.g. `.enabled_by.is_bot`) gives a wrong answer here exactly
+#     as it would in production (independent review, second pass).
+#     `sleep` no-ops the retry backoffs. Knobs (env):
+#       STUB_ARMED_BY              — the arm at the start: none|bot|user
+#       STUB_ARMED_BY_FAIL_TIMES   — first N `pr view` reads exit 1
+#       STUB_DISARM_STUCK          — 1 ⇒ --disable-auto leaves the arm on
+#       STUB_ARM_FAIL              — 1 ⇒ `gh pr merge --auto` exits 1
+#       STUB_BASE / STUB_HEAD / STUB_HEAD_LATER — the live-state reads
+#       STUB_USER_TYPE             — GET /user's `type` (default User)
+#       STUB_USER_FAIL_TIMES       — first N /user reads exit 1 (a 403)
+#     `gh pr merge --auto` models GitHub: it sets the enabler only when the
+#     PR is not armed (USING_PAT=1 ⇒ the user, else the Actions bot) and
+#     KEEPS an existing enabler — measured 2026-09-18.
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "gh $*" >> "$GH_LOG"
+arm_state() { cat "$ARM_STATE" 2>/dev/null || echo none; }
+jq_filter() { while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && { printf '%s' "$2"; return; }; shift; done; }
 case "$1 $2" in
   "pr merge")
-    case "$*" in
-      *" --auto "*) [ "${STUB_ARM_FAIL:-0}" = "1" ] && exit 1 ;;
+    case " $* " in
+      *" --disable-auto "*) [ "${STUB_DISARM_STUCK:-0}" = "1" ] || echo none > "$ARM_STATE" ;;
+      *" --auto "*)
+        [ "${STUB_ARM_FAIL:-0}" = "1" ] && exit 1
+        if [ "$(arm_state)" = "none" ]; then
+          if [ "${USING_PAT:-0}" = "1" ]; then echo user > "$ARM_STATE"; else echo bot > "$ARM_STATE"; fi
+        fi ;;
     esac
     exit 0 ;;
   "pr view")
-    # The bot-arm check asks WHO armed the PR (none|bot|user); a disarm
-    # verification asks only ON/OFF (STUB_DISARM_STUCK=1 ⇒ still ON).
-    case "$*" in
-      *is_bot*) [ "${STUB_ARMED_BY_FAIL:-0}" = "1" ] && exit 1
-                echo "${STUB_ARMED_BY:-none}" ;;
-      *) if [ "${STUB_DISARM_STUCK:-0}" = "1" ]; then echo "ON"; else echo "OFF"; fi ;;
+    n=$(cat "$VIEW_READS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$VIEW_READS"
+    [ "$n" -le "${STUB_ARMED_BY_FAIL_TIMES:-0}" ] && exit 1
+    case "$(arm_state)" in
+      none) json='{"autoMergeRequest":null}' ;;
+      bot)  json='{"autoMergeRequest":{"enabledBy":{"login":"app/github-actions","is_bot":true}}}' ;;
+      user) json='{"autoMergeRequest":{"enabledBy":{"login":"topcoder1","is_bot":false}}}' ;;
     esac
-    exit 0 ;;
+    printf '%s\n' "$json" | jq -r "$(jq_filter "$@")"
+    exit $? ;;
 esac
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then
   n=$(cat "$USER_CALLS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$USER_CALLS"
   [ "$n" -le "${STUB_USER_FAIL_TIMES:-0}" ] && exit 1
-  printf '%s\n' "${STUB_USER-topcoder1}"
-  exit 0
+  printf '{"login":"topcoder1","type":"%s"}\n' "${STUB_USER_TYPE:-User}" | jq -r "$(jq_filter "$@")"
+  exit $?
 fi
 if [ "$1" = "api" ]; then
   case "$*" in
@@ -284,9 +308,11 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 HEAD="c0ffee0000000000000000000000000000000001"
 
 run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T/summary
-  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls" "$T/head_reads"
+  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls" "$T/head_reads" "$T/view_reads"
+  echo "${STUB_ARMED_BY:-none}" > "$T/arm_state"
   local rc=0
   ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" USER_CALLS="$T/user_calls" HEAD_READS="$T/head_reads" \
+      ARM_STATE="$T/arm_state" VIEW_READS="$T/view_reads" \
       GITHUB_OUTPUT="$T/ghout" GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
       GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
       HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY=0 \
@@ -341,9 +367,9 @@ else
   fail "1c: a bot's arm on a non-Dependabot PR must be removed — it would merge as the bot (Codex round 5)"; dump
 fi
 
-export STUB_ARMED_BY_FAIL=1
+export STUB_ARMED_BY_FAIL_TIMES=1
 run_step "$T/ca.sh" 0 "topcoder1"
-unset STUB_ARMED_BY_FAIL
+unset STUB_ARMED_BY_FAIL_TIMES
 if ! armed && ! disarmed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0"; then
   pass "1d: no PAT, arm state unreadable ⇒ nothing disarmed, stood_down=no-pat, exit 0"
 else
@@ -390,6 +416,16 @@ else
   fail "2f: a bot's arm must be replaced, not re-armed over — GitHub keeps the original enabler (Codex round 5)"; dump
 fi
 
+export STUB_ARMED_BY="bot" STUB_ARMED_BY_FAIL_TIMES=1
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_ARMED_BY STUB_ARMED_BY_FAIL_TIMES
+if has "$T/out.log" "rc=1" && ! has "$T/ghout" "armed=1" \
+   && has "$T/out.log" "::error::after arming, auto-merge is enabled by 'bot'" && disarmed; then
+  pass "2g: the first arm read fails and a BOT's arm stays ⇒ the read-back after the arm catches it, removes it, exit 1"
+else
+  fail "2g: an arm left with a bot as enabler must not be reported as armed (review pass 2, #1)"; dump
+fi
+
 export STUB_USER_FAIL_TIMES=3
 run_step "$T/ca.sh" 1 "topcoder1"
 unset STUB_USER_FAIL_TIMES
@@ -400,9 +436,9 @@ else
   fail "2b: a credential GET /user refuses must not arm"; dump
 fi
 
-export STUB_USER=""
+export STUB_USER_TYPE="Bot"
 run_step "$T/ca.sh" 1 "topcoder1"
-unset STUB_USER
+unset STUB_USER_TYPE
 if ! armed && [ "$(user_calls)" = "1" ] && has "$T/ghout" "stood_down=no-pat"; then
   pass "2c: claude-author, /user answers but not as a User ⇒ refused, no retry"
 else
@@ -525,10 +561,20 @@ fi
 export STUB_ARMED_BY="bot" STUB_DISARM_STUCK=1
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_ARMED_BY STUB_DISARM_STUCK
-if ! armed && has "$T/out.log" "rc=1" && has "$T/out.log" "::error::could not verify the bot's arm is off"; then
-  pass "8c: safe-paths, a bot's arm that will not come off ⇒ exit 1 (fail closed), no arm"
+if ! armed && has "$T/out.log" "rc=1" && has "$T/out.log" "::error::could not verify the bot's arm is off" \
+   && [ "$(grep -c 'gh pr merge --disable-auto' "$T/gh.log")" = "3" ]; then
+  pass "8c: safe-paths, a bot's arm that will not come off ⇒ 3 disable attempts, then exit 1 (fail closed), no arm"
 else
   fail "8c: an unverifiable bot-arm removal must fail the safe-paths step"; dump
+fi
+
+export STUB_ARMED_BY="bot" STUB_ARMED_BY_FAIL_TIMES=1
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARMED_BY STUB_ARMED_BY_FAIL_TIMES
+if has "$T/out.log" "rc=1" && has "$T/out.log" "::error::after arming, auto-merge is enabled by 'bot'" && disarmed; then
+  pass "8d: safe-paths, the first arm read fails and a BOT's arm stays ⇒ caught after the arm, removed, exit 1"
+else
+  fail "8d: safe-paths must not leave a bot's arm behind when the first read failed (review pass 2, #1)"; dump
 fi
 
 # ---------------------------------------------------------------------------
@@ -592,6 +638,28 @@ if neutralize "$T/sp.sh" "" 2 "$T/sp_mut.sh"; then
 else
   fail "10: negative control mutation did not neutralize exactly two refusal calls"
 fi
+
+# 9d / 10b: the TYPO controls for the arm-owner jq (independent review, pass
+# 2). With the enabler path misspelled, a bot's arm reads as a user's; the
+# stub runs the SHIPPED filter, so the bot-armed cases must then fail —
+# proving the harness can see a filter typo that would be silent in prod.
+typo_control() { # label, script, author
+  sed 's/\.autoMergeRequest\.enabledBy\.is_bot/.autoMergeRequest.enabled_by.is_bot/g' "$2" > "$2.typo"
+  if [ "$(grep -c 'enabled_by.is_bot' "$2.typo")" -ge 2 ]; then
+    export STUB_ARMED_BY="bot"
+    run_step "$2.typo" 1 "$3"
+    unset STUB_ARMED_BY
+    if disarmed; then
+      fail "$1: negative control — a misspelled enabler path still removed the bot's arm; the stub is not running the shipped filter"
+    else
+      pass "$1: negative control — a misspelled enabler path lets a bot's arm through unseen by the step, and the harness catches it"
+    fi
+  else
+    fail "$1: typo mutation did not reach both enabler reads (top-of-step and read-back)"
+  fi
+}
+typo_control "9d" "$T/ca.sh" "topcoder1"
+typo_control "10b" "$T/sp.sh" "wxacoeur"
 
 # ---------------------------------------------------------------------------
 if [ "$failed" -ne 0 ]; then

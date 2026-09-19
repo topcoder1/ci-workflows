@@ -1812,13 +1812,14 @@ jobs:
           # (Codex round 5). A user's arm is never touched. Done here, with
           # the probe, so it adds no time between the revalidations and the
           # arm; an unreadable arm state leaves things as they are.
-          # Residual race, accepted (Codex round 6): a user arm placed
-          # between the read and the disable below is revoked too — GitHub's
-          # disable takes no expected enabler, so this cannot be atomic. The
-          # two calls are back to back, and the cost is a PR left unarmed
-          # until its next event or a click: bounded, visible, recoverable —
-          # the trade the base-gate disarm below makes — against a
-          # bot-attributed merge that strands every later push.
+          # Residual race, accepted (Codex round 6): a user arm placed while
+          # this removal runs — from the read through the disable, its
+          # verification, and disarm_then_exit's retry — is revoked too.
+          # GitHub's disable takes no expected enabler, so this cannot be
+          # atomic. The cost is a PR left unarmed until its next event or a
+          # click (or a red run): bounded, visible, recoverable — the trade
+          # the base-gate disarm below makes — against a bot-attributed merge
+          # that strands every later push.
           if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
             armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
               --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
@@ -1995,6 +1996,31 @@ jobs:
             fi
             echo "::error::enable auto-merge failed and the head still matches ${HEAD_SHA} — investigate."
             exit 1
+          fi
+          # Read the enabler back (independent review, second pass): enabling
+          # auto-merge on an already-armed PR keeps the ORIGINAL enabler, so
+          # if the bot-arm read at the top was unreadable — or a bot armed
+          # in between — this PR would still merge as that bot while the run
+          # reports armed. A bot's arm is removed and the run fails closed;
+          # so does an answer still unreadable after 3 attempts. An immediate
+          # merge (`--auto` on a clean PR) reads "none" and is fine: it was
+          # made with the user's credential. Dependabot's own arm is a bot's
+          # by design and is left alone.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            post=""
+            for _ in 1 2 3; do
+              if post=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+                2>/dev/null); then
+                break
+              fi
+              post=""
+              sleep 2
+            done
+            if [ "$post" = "bot" ] || [ -z "$post" ]; then
+              echo "::error::after arming, auto-merge is enabled by '${post:-<unreadable>}' rather than the PAT user — the PR would merge as a bot. Removing the arm; failing closed."
+              disarm_then_exit 1
+            fi
           fi
           # Published for the decision-label reconciler below: `armed=1`
           # means THIS run enabled auto-merge, so any stale `automerge:*`

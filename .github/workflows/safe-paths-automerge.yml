@@ -732,6 +732,21 @@ jobs:
             echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           }
+          # Disable auto-merge and VERIFY it is off, 3 attempts — the same
+          # shape as the revoke step above. Nothing after this step retries a
+          # failed disable, so a single attempt is not fail-closed.
+          remove_arm() {
+            local after="UNKNOWN"
+            for _ in 1 2 3; do
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              after=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+              [ "$after" = "OFF" ] && return 0
+              sleep 3
+            done
+            echo "::error::could not verify the bot's arm is off (state '$after' after 3 attempts) — failing closed."
+            return 1
+          }
           # The GET /user probe runs FIRST, before the head read below (Codex
           # round 3): its retries and backoff take seconds, and that time must
           # not sit between the head read and the arm. Only the answer is
@@ -762,13 +777,7 @@ jobs:
               2>/dev/null) || armed_by="unknown"
             if [ "$armed_by" = "bot" ]; then
               echo "::notice::a bot armed this PR — its merge would skip the head-branch deletion, so removing that arm."
-              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
-              state=$(gh pr view "$PR_URL" --json autoMergeRequest \
-                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
-              if [ "$state" != "OFF" ]; then
-                echo "::error::could not verify the bot's arm is off (state '$state') — failing closed."
-                exit 1
-              fi
+              remove_arm || exit 1
             fi
           fi
           # Arm only the head this run actually classified. `gh pr merge
@@ -811,4 +820,27 @@ jobs:
             fi
             echo "::error::enable auto-merge failed and the head still matches ${HEAD_SHA} — investigate."
             exit 1
+          fi
+          # Read the enabler back: re-arming an already-armed PR keeps the
+          # ORIGINAL enabler, so an unreadable bot-arm read above (or a bot
+          # arming in between) would still leave a bot's arm. Remove it and
+          # fail closed; an answer unreadable after 3 attempts fails closed
+          # too. "none" is an immediate merge made with the user's
+          # credential. Dependabot's own arm is a bot's by design.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            post=""
+            for _ in 1 2 3; do
+              if post=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+                2>/dev/null); then
+                break
+              fi
+              post=""
+              sleep 2
+            done
+            if [ "$post" = "bot" ] || [ -z "$post" ]; then
+              echo "::error::after arming, auto-merge is enabled by '${post:-<unreadable>}' rather than the PAT user — the PR would merge as a bot. Removing the arm; failing closed."
+              remove_arm || true
+              exit 1
+            fi
           fi

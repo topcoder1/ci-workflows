@@ -83,6 +83,8 @@
 #  21.  refused-no-pat follows the arm state read at PUBLISH time: a user's
 #       arm clears labels and adds none; a bot's arm, no arm, or an
 #       unreadable answer publishes the label (Codex rounds 2, 3 and 5).
+#       21e is the typo negative control for that filter: the stub runs
+#       the shipped filter over REST-shaped JSON (review pass 2).
 #
 # Structural pins:
 #   * the arm step carries `id: arm` and publishes `armed=1` AFTER the
@@ -235,11 +237,22 @@ case "$1" in
       "GET "*"/pulls/"*)
         if [ "${STUB_HEAD_FAIL:-0}" = "1" ]; then exit 1; fi
         # Two reads hit this path: the ownership probe (--jq .head.sha,
-        # emit the sha) and the refused-no-pat arm-state re-read (--jq on
-        # .auto_merge, emit none|bot|user).
+        # emit the sha) and the refused-no-pat arm-state re-read, whose
+        # answer is computed by running the SHIPPED --jq filter over a
+        # REST-shaped PR (so a misspelled field path answers wrongly here,
+        # as it would in production — independent review, pass 2).
         case "$*" in
-          *auto_merge*) [ "${STUB_LIVE_ARMED_FAIL:-0}" = "1" ] && exit 1
-                        printf '%s\n' "${STUB_LIVE_ARMED_BY:-none}" ;;
+          *auto_merge*)
+            [ "${STUB_LIVE_ARMED_FAIL:-0}" = "1" ] && exit 1
+            case "${STUB_LIVE_ARMED_BY:-none}" in
+              none) json='{"auto_merge":null}' ;;
+              bot)  json='{"auto_merge":{"enabled_by":{"login":"github-actions[bot]","type":"Bot"}}}' ;;
+              user) json='{"auto_merge":{"enabled_by":{"login":"topcoder1","type":"User"}}}' ;;
+            esac
+            filter=""
+            while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && { filter="$2"; break; }; shift; done
+            printf '%s\n' "$json" | jq -r "$filter"
+            exit $? ;;
           *) printf '%s\n' "${STUB_LIVE_HEAD:-}" ;;
         esac
         exit 0 ;;
@@ -537,6 +550,23 @@ run_case no_pat_unreadable
 expect "21d: an unreadable arm state keeps the refusal label" \
   "labels[]=automerge:refused-no-pat" "$T/gh.log"
 unset STUB_LIVE_ARMED_FAIL
+# 21e. TYPO control for the publish-time filter: with the enabler path
+#      misspelled, a bot's arm reads as a user's and the label would be
+#      wrongly cleared — the stub runs the shipped filter, so 21c must then
+#      fail on the mutant (independent review, pass 2).
+sed 's/\.auto_merge\.enabled_by\.type/.auto_merge.enabledBy.type/' "$T/decision.sh" > "$T/decision_typo.sh"
+if [ "$(grep -c 'auto_merge.enabledBy.type' "$T/decision_typo.sh")" = "1" ]; then
+  cp "$T/decision.sh" "$T/decision.sh.orig" && cp "$T/decision_typo.sh" "$T/decision.sh"
+  export STUB_LIVE_ARMED_BY="bot" STUB_LABELS=""
+  run_case no_pat_bot_armed_typo
+  unset STUB_LIVE_ARMED_BY
+  cp "$T/decision.sh.orig" "$T/decision.sh"
+  expect_absent "21e: negative control — a misspelled enabler path drops the bot-armed PR's label (21c can fail)" \
+    "labels[]=automerge:refused-no-pat" "$T/gh.log"
+else
+  echo "✗ 21e: typo mutation did not apply to the publish-time filter"
+  failed=1
+fi
 export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------
