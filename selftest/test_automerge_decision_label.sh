@@ -75,6 +75,16 @@
 #  18.  the create conflict falls through to `gh label edit`, so a
 #       repo that minted the label under older wording gets its
 #       description refreshed (codex round-3 P3).
+#  19.  arm stood down on the attribution gate (stood_down=no-pat — no
+#       automerge_pat reached the run, so the merge would have been
+#       github-actions[bot]'s and GitHub would have kept the branch) ⇒
+#       `automerge:refused-no-pat` with the caller-fix lever in its
+#       description (2026-09-18; selftest/test_automerge_pat_attribution_gate.sh).
+#  21.  refused-no-pat follows the arm state read at PUBLISH time: a user's
+#       arm clears labels and adds none; a bot's arm, no arm, or an
+#       unreadable answer publishes the label (Codex rounds 2, 3 and 5).
+#       21e is the typo negative control for that filter: the stub runs
+#       the shipped filter over REST-shaped JSON (review pass 2).
 #
 # Structural pins:
 #   * the arm step carries `id: arm` and publishes `armed=1` AFTER the
@@ -226,8 +236,25 @@ case "$1" in
     case "$method $path" in
       "GET "*"/pulls/"*)
         if [ "${STUB_HEAD_FAIL:-0}" = "1" ]; then exit 1; fi
-        # The step pipes through --jq .head.sha; emit the sha directly.
-        printf '%s\n' "${STUB_LIVE_HEAD:-}"
+        # Two reads hit this path: the ownership probe (--jq .head.sha,
+        # emit the sha) and the refused-no-pat arm-state re-read, whose
+        # answer is computed by running the SHIPPED --jq filter over a
+        # REST-shaped PR (so a misspelled field path answers wrongly here,
+        # as it would in production — independent review, pass 2).
+        case "$*" in
+          *auto_merge*)
+            [ "${STUB_LIVE_ARMED_FAIL:-0}" = "1" ] && exit 1
+            case "${STUB_LIVE_ARMED_BY:-none}" in
+              none) json='{"auto_merge":null}' ;;
+              bot)  json='{"auto_merge":{"enabled_by":{"login":"github-actions[bot]","type":"Bot"}}}' ;;
+              user) json='{"auto_merge":{"enabled_by":{"login":"topcoder1","type":"User"}}}' ;;
+            esac
+            filter=""
+            while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && { filter="$2"; break; }; shift; done
+            printf '%s\n' "$json" | jq -r "$filter"
+            exit $? ;;
+          *) printf '%s\n' "${STUB_LIVE_HEAD:-}" ;;
+        esac
         exit 0 ;;
       "GET "*"/labels?per_page=100")
         if [ "${STUB_LABELS_FAIL:-0}" = "1" ]; then exit 1; fi
@@ -487,6 +514,60 @@ expect "17b: step exits 0" "rc=0" "$T/out.log"
 expect "18: create conflict falls through to gh label edit (stale description refresh)" \
   "label edit automerge:withheld-findings" "$T/gh.log"
 export STUB_CREATE_FAIL=0
+
+# ---------------------------------------------------------------------------
+# 19. arm stood down on the attribution gate (stood_down=no-pat) ⇒
+#     refused-no-pat, minted with its own lever text, stale label swapped.
+# ---------------------------------------------------------------------------
+export QF_REASON="" ARM_STOOD_DOWN="no-pat" STUB_LABELS="automerge:withheld-quiet-cap"
+run_case no_pat
+expect "19a: attribution-gate stand-down publishes automerge:refused-no-pat" \
+  "labels[]=automerge:refused-no-pat" "$T/gh.log"
+expect "19b: the label is created with the caller-fix lever in its description" \
+  "label create automerge:refused-no-pat --color e99695 --description Automerge arbiter: no user PAT reached this run — forward a user automerge_pat, or click-merge" "$T/gh.log"
+expect "19c: the stale arbiter label is swapped out" \
+  "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Awithheld-quiet-cap" "$T/gh.log"
+export ARM_STOOD_DOWN=""
+
+# ---------------------------------------------------------------------------
+# 21. refused-no-pat: the label follows the arm state read at PUBLISH time.
+#     A user's arm (before or after the arm step) ⇒ labels cleared, nothing
+#     added; a bot's arm or no arm ⇒ the label; an unreadable answer ⇒ the
+#     label (advisory surface fails toward the refusal it records).
+# ---------------------------------------------------------------------------
+export ARM_STOOD_DOWN="no-pat" STUB_LABELS="automerge:refused-no-pat" STUB_LIVE_ARMED_BY="user"
+run_case no_pat_user_armed
+expect "21a: the refusal label comes off a PR a user has armed" \
+  "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Arefused-no-pat" "$T/gh.log"
+expect_absent "21b: no refusal label is added to that armed PR" "labels[]=" "$T/gh.log"
+export STUB_LIVE_ARMED_BY="bot" STUB_LABELS=""
+run_case no_pat_bot_armed
+expect "21c: a BOT's arm keeps the refusal label (it will merge as the bot)" \
+  "labels[]=automerge:refused-no-pat" "$T/gh.log"
+unset STUB_LIVE_ARMED_BY
+export STUB_LIVE_ARMED_FAIL=1 STUB_LABELS=""
+run_case no_pat_unreadable
+expect "21d: an unreadable arm state keeps the refusal label" \
+  "labels[]=automerge:refused-no-pat" "$T/gh.log"
+unset STUB_LIVE_ARMED_FAIL
+# 21e. TYPO control for the publish-time filter: with the enabler path
+#      misspelled, a bot's arm reads as a user's and the label would be
+#      wrongly cleared — the stub runs the shipped filter, so 21c must then
+#      fail on the mutant (independent review, pass 2).
+sed 's/\.auto_merge\.enabled_by\.type/.auto_merge.enabledBy.type/' "$T/decision.sh" > "$T/decision_typo.sh"
+if [ "$(grep -c 'auto_merge.enabledBy.type' "$T/decision_typo.sh")" = "1" ]; then
+  cp "$T/decision.sh" "$T/decision.sh.orig" && cp "$T/decision_typo.sh" "$T/decision.sh"
+  export STUB_LIVE_ARMED_BY="bot" STUB_LABELS=""
+  run_case no_pat_bot_armed_typo
+  unset STUB_LIVE_ARMED_BY
+  cp "$T/decision.sh.orig" "$T/decision.sh"
+  expect_absent "21e: negative control — a misspelled enabler path drops the bot-armed PR's label (21c can fail)" \
+    "labels[]=automerge:refused-no-pat" "$T/gh.log"
+else
+  echo "✗ 21e: typo mutation did not apply to the publish-time filter"
+  failed=1
+fi
+export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------
 if [ "$failed" -ne 0 ]; then
