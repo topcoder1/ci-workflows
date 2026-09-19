@@ -91,6 +91,11 @@
 #   * the decision-label run block is `${{ }}`-free (extraction-safe
 #     and injection-safe), its label read paginates, and the step sits
 #     BEFORE the always() error-revoke step (which must stay last).
+#   * every `desc="…"` in the decision case block fits GitHub's
+#     100-character label-description cap, counted in characters, not
+#     bytes — over it, create and edit both fail silently and the add
+#     mints a bare label. A negative control (101 chars) and a boundary
+#     control (100 chars / 106 bytes) run through the same check.
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_decision_label.sh
@@ -201,6 +206,55 @@ if grep -q 'labels?per_page=100' "$T/decision.sh" && grep -A1 'labels?per_page=1
 else
   echo "✗ label read does not paginate"
   failed=1
+fi
+
+# Every decision label's description must fit GitHub's 100-character cap.
+# Over it, `gh label create` AND its `gh label edit` fallback are both
+# rejected, `|| true` swallows both, and the POST that follows mints a BARE
+# label (color ededed, empty description) — so the operator contract "read
+# the label description for the lever" finds nothing. Measured 2026-09-18:
+# automerge:refused-body (114 chars) and automerge:body-changed (125) were
+# bare on every repo that had them. GitHub counts characters, not bytes
+# (refused-base, 99 chars / 101 bytes, is painted in full), while bash's
+# ${#s} counts BYTES under LC_CTYPE=C — so count UTF-8 code points
+# explicitly: drop continuation bytes (0x80-0xBF), count what is left.
+LABEL_DESC_MAX=100
+char_len() { printf '%s' "$1" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' '; }
+desc_fits() { [ "$(char_len "$1")" -le "$LABEL_DESC_MAX" ]; }
+
+# Controls through the SAME check: an over-long string must be rejected (the
+# pin can fail at all), and one exactly at the cap whose em dashes push it
+# past 100 BYTES must be accepted (the pin counts characters).
+if desc_fits "$(printf '%0101d' 0)"; then
+  echo "✗ negative control: a 101-character description passed the length check — this pin cannot fail"
+  failed=1
+else
+  echo "✓ negative control: a 101-character description is rejected"
+fi
+if desc_fits "$(printf '%097d' 0)—…—"; then
+  echo "✓ boundary control: 100 characters / 106 bytes is accepted (characters, not bytes)"
+else
+  echo "✗ boundary control: a 100-character, 106-byte description was rejected — the check is counting bytes"
+  failed=1
+fi
+
+case_block=$(awk '/case "\$decision" in/{f=1} f{print} f && /^[[:space:]]*esac$/{exit}' "$T/decision.sh")
+descs=$(printf '%s\n' "$case_block" | sed -n 's/.*desc="\(.*\)".*/\1/p')
+n_assign=$(printf '%s\n' "$case_block" | grep -v '^[[:space:]]*#' | grep -c 'desc=' || true)
+n_desc=$(printf '%s\n' "$descs" | grep -c . || true)
+if [ "$n_desc" -eq 0 ] || [ "$n_desc" -ne "$n_assign" ]; then
+  echo "✗ measured $n_desc desc=\"…\" value(s) against $n_assign desc= assignment(s) in the decision case block — keep every description a plain one-line double-quoted string so this pin can measure it"
+  failed=1
+else
+  over=0
+  while IFS= read -r d; do
+    if ! desc_fits "$d"; then
+      echo "✗ label description is $(char_len "$d") characters (GitHub rejects > $LABEL_DESC_MAX — create AND edit fail, the POST mints a bare label): $d"
+      over=1
+      failed=1
+    fi
+  done <<< "$descs"
+  [ "$over" = "0" ] && echo "✓ all $n_desc decision-label descriptions fit GitHub's $LABEL_DESC_MAX-character cap"
 fi
 
 # ---------------------------------------------------------------------------

@@ -2156,8 +2156,8 @@ jobs:
             automerge:withheld-findings)  color="d93f0b"; desc="Automerge arbiter: review findings postdate the last commit — push a fix or merge manually" ;;
             automerge:withheld-quiet-cap) color="fbca04"; desc="Automerge arbiter: review activity never went quiet — the next PR event retries" ;;
             automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
-            automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: PR body closes an issue with a qualifier (closes #N …) — rewrite as 'part of #N' or click-merge" ;;
-            automerge:body-changed)       color="bfd4f2"; desc="Automerge arbiter: the PR body changed after this run gated it — push a commit or re-apply a label to re-gate, or click-merge" ;;
+            automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: PR body closes #N with a qualifier — rewrite as 'part of #N' or click-merge" ;;
+            automerge:body-changed)       color="bfd4f2"; desc="Automerge arbiter: PR body changed after gating — push a commit or re-apply a label, or click-merge" ;;
           esac
           # create-else-EDIT (not a create-retry): create's failure is the
           # EXPECTED already-exists conflict, and the edit refreshes a
