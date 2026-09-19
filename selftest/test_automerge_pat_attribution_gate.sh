@@ -32,6 +32,12 @@
 #   claude-author-automerge.yml
 #    1.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, NO disarm, no
 #        /user probe, stood_down=no-pat, an ::error:: naming the fix.
+#    1b. same, but a USER already armed the PR ⇒ the arm is kept and the
+#        run reports stood_down=already-armed, so the reconciler publishes
+#        no refusal label on an armed PR (Codex round 2).
+#    1c. same, but a BOT armed it ⇒ stood_down=no-pat (that PR will merge
+#        as the bot; the label is the operator's cue).
+#    1d. the arm state is unreadable ⇒ stood_down=no-pat.
 #    2.  PAT that is a user ⇒ arms (head-bound), armed=1, no stood_down.
 #    2b. PAT whose /user read fails 3× (an App installation token's 403)
 #        ⇒ refused after exactly 3 attempts, no arm, stood_down=no-pat.
@@ -194,6 +200,11 @@ if grep -qF '"${ARM_STOOD_DOWN:-}" = "no-pat"' "$CA" && grep -qF 'decision="auto
 else
   fail "reconciler does not map stood_down=no-pat to automerge:refused-no-pat — the refusal would read as the unlabeled wedge"
 fi
+if grep -qF 'if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ] || [ "${ARM_STOOD_DOWN:-}" = "already-armed" ]; then' "$CA"; then
+  pass "reconciler treats stood_down=already-armed like ARMED (no label on an armed PR)"
+else
+  fail "reconciler does not clear labels on stood_down=already-armed — a user-armed PR would carry a refusal label"
+fi
 desc=$(awk -F'desc="' '/automerge:refused-no-pat\)[[:space:]]+color=/{split($2, a, "\""); print a[1]}' "$CA")
 dlen=$(printf '%s' "$desc" | python3 -c 'import sys; print(len(sys.stdin.read()))')
 if [ -n "$desc" ] && [ "$dlen" -le 100 ]; then
@@ -217,7 +228,15 @@ cat > "$T/bin/gh" <<'STUB'
 echo "gh $*" >> "$GH_LOG"
 case "$1 $2" in
   "pr merge") exit 0 ;;
-  "pr view") echo "OFF"; exit 0 ;;
+  "pr view")
+    # The refusal helper asks WHO armed the PR (none|bot|user); the
+    # disarm verification asks only ON/OFF.
+    case "$*" in
+      *is_bot*) [ "${STUB_ARMED_BY_FAIL:-0}" = "1" ] && exit 1
+                echo "${STUB_ARMED_BY:-none}" ;;
+      *) echo "OFF" ;;
+    esac
+    exit 0 ;;
 esac
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then
   n=$(cat "$USER_CALLS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$USER_CALLS"
@@ -269,6 +288,34 @@ if ! armed && ! disarmed && [ "$(user_calls)" = "0" ] && has "$T/out.log" "rc=0"
   pass "1: claude-author, no PAT ⇒ no arm, no disarm, no probe, stood_down=no-pat, exit 0"
 else
   fail "1: claude-author, no PAT should refuse cleanly"; dump
+fi
+
+export STUB_ARMED_BY="user"
+run_step "$T/ca.sh" 0 "topcoder1"
+unset STUB_ARMED_BY
+if ! armed && ! disarmed && has "$T/ghout" "stood_down=already-armed" && ! has "$T/ghout" "stood_down=no-pat" \
+   && has "$T/out.log" "rc=0"; then
+  pass "1b: no PAT, a USER already armed the PR ⇒ arm kept, stood_down=already-armed (no refusal label)"
+else
+  fail "1b: a user's existing arm must be kept and read as armed, not labeled refused"; dump
+fi
+
+export STUB_ARMED_BY="bot"
+run_step "$T/ca.sh" 0 "topcoder1"
+unset STUB_ARMED_BY
+if ! armed && ! disarmed && has "$T/ghout" "stood_down=no-pat"; then
+  pass "1c: no PAT, a BOT armed the PR ⇒ stood_down=no-pat (it will merge as the bot; the label is the cue)"
+else
+  fail "1c: a bot's existing arm must keep the refusal label"; dump
+fi
+
+export STUB_ARMED_BY_FAIL=1
+run_step "$T/ca.sh" 0 "topcoder1"
+unset STUB_ARMED_BY_FAIL
+if ! armed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0"; then
+  pass "1d: no PAT, arm state unreadable ⇒ stood_down=no-pat, exit 0"
+else
+  fail "1d: an unreadable arm state must fall back to the refusal label"; dump
 fi
 
 run_step "$T/ca.sh" 1 "topcoder1"

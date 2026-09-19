@@ -239,9 +239,10 @@ on:
       automerge_pat:
         description: >-
           Fine-grained USER PAT used to enable auto-merge, so the merge
-          is attributed to the PAT user. Without it this workflow does
-          not arm (it publishes `automerge:refused-no-pat`; Dependabot
-          PRs excepted): a GITHUB_TOKEN arm merges as github-actions[bot],
+          is attributed to the PAT user. Without it, or when it is not a
+          user credential (GET /user must answer type=User), this
+          workflow does not arm (it publishes `automerge:refused-no-pat`;
+          Dependabot PRs excepted): a GITHUB_TOKEN arm merges as github-actions[bot],
           and GitHub then skips the repo's automatic head-branch deletion
           (the merged branch survives and a later push to it never
           reaches main — wxa-graph#553) and suppresses every push-on-main
@@ -1890,9 +1891,23 @@ jobs:
           # included, get a 403 — so the arm requires it to return
           # type=User. An unreadable answer refuses too (fail closed; the
           # next PR event retries).
+          #
+          # The refusal never disarms, and a PR a USER already armed (a
+          # human, or a PAT-wired sibling) reads as armed to the reconciler
+          # — natively visible state, no refusal label (Codex round 2). A
+          # bot's arm (placed before this gate shipped) keeps the label:
+          # that PR will still merge as the bot, and the label is the cue.
           refuse_unattributed_arm() {
             echo "::error::$1 Arming here would make GitHub merge this PR as a bot, which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret — a USER PAT — explicitly as automerge_pat; secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
-            echo "stood_down=no-pat" >> "$GITHUB_OUTPUT"
+            armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+              2>/dev/null) || armed_by="unknown"
+            if [ "$armed_by" = "user" ]; then
+              echo "::notice::a user already armed this PR — keeping that arm; it merges user-attributed."
+              echo "stood_down=already-armed" >> "$GITHUB_OUTPUT"
+            else
+              echo "stood_down=no-pat" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           }
           if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
@@ -2151,7 +2166,9 @@ jobs:
           # state, natively visible — clear stale arbiter labels).
           decision=""
           publish=1
-          if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ]; then
+          if [ "${ARMED:-}" = "1" ] || [ "${HOLD:-}" = "1" ] || [ "${ARM_STOOD_DOWN:-}" = "already-armed" ]; then
+            # already-armed: the attribution gate refused to arm, but a
+            # user's arm is on the PR — the same natively visible state.
             decision=""
           elif [ "${BLOCKED:-}" = "1" ]; then
             # Publishes rather than defers to the risk:* label: the verdict
@@ -2169,8 +2186,9 @@ jobs:
             decision="automerge:body-changed"
           elif [ "${ARM_STOOD_DOWN:-}" = "no-pat" ]; then
             # The arm step's attribution gate: every other gate passed, but
-            # without the caller's PAT the merge would be github-actions[bot]'s
-            # and GitHub would keep the branch. The fix is in the caller.
+            # no USER credential arrived (missing, or not a user), so the
+            # merge would be a bot's and GitHub would keep the branch. The
+            # fix is in the caller; the run's ::error:: names which case.
             decision="automerge:refused-no-pat"
           elif [ "${BODY_REFUSE:-}" = "1" ]; then
             decision="automerge:refused-body"
@@ -2241,7 +2259,7 @@ jobs:
             automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
             automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: PR body closes an issue with a qualifier (closes #N …) — rewrite as 'part of #N' or click-merge" ;;
             automerge:body-changed)       color="bfd4f2"; desc="Automerge arbiter: the PR body changed after this run gated it — push a commit or re-apply a label to re-gate, or click-merge" ;;
-            automerge:refused-no-pat)     color="e99695"; desc="Automerge arbiter: no automerge_pat reached this run — wire the PAT in the caller, or click-merge" ;;
+            automerge:refused-no-pat)     color="e99695"; desc="Automerge arbiter: no user PAT reached this run — forward a user automerge_pat, or click-merge" ;;
           esac
           # create-else-EDIT (not a create-retry): create's failure is the
           # EXPECTED already-exists conflict, and the edit refreshes a

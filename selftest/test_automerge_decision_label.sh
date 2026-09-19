@@ -80,6 +80,9 @@
 #       github-actions[bot]'s and GitHub would have kept the branch) ⇒
 #       `automerge:refused-no-pat` with the caller-fix lever in its
 #       description (2026-09-18; selftest/test_automerge_pat_attribution_gate.sh).
+#  20.  the attribution gate kept a USER's existing arm
+#       (stood_down=already-armed) ⇒ reconciled like ARMED: stale arbiter
+#       labels cleared, nothing added (Codex round 2).
 #
 # Structural pins:
 #   * the arm step carries `id: arm` and publishes `armed=1` AFTER the
@@ -502,9 +505,20 @@ run_case no_pat
 expect "19a: attribution-gate stand-down publishes automerge:refused-no-pat" \
   "labels[]=automerge:refused-no-pat" "$T/gh.log"
 expect "19b: the label is created with the caller-fix lever in its description" \
-  "label create automerge:refused-no-pat --color e99695 --description Automerge arbiter: no automerge_pat reached this run — wire the PAT in the caller, or click-merge" "$T/gh.log"
+  "label create automerge:refused-no-pat --color e99695 --description Automerge arbiter: no user PAT reached this run — forward a user automerge_pat, or click-merge" "$T/gh.log"
 expect "19c: the stale arbiter label is swapped out" \
   "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Awithheld-quiet-cap" "$T/gh.log"
+export ARM_STOOD_DOWN=""
+
+# ---------------------------------------------------------------------------
+# 20. the attribution gate kept a USER's arm (stood_down=already-armed) ⇒
+#     reconciled like ARMED: stale arbiter labels cleared, nothing added.
+# ---------------------------------------------------------------------------
+export ARM_STOOD_DOWN="already-armed" STUB_LABELS="automerge:refused-no-pat"
+run_case already_armed
+expect "20a: a stale refused-no-pat label is removed from the user-armed PR" \
+  "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Arefused-no-pat" "$T/gh.log"
+expect_absent "20b: no arbiter label is added to an armed PR" "labels[]=" "$T/gh.log"
 export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------

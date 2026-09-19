@@ -50,8 +50,9 @@ on:
       automerge_pat:
         description: >-
           Fine-grained USER PAT used to enable auto-merge, so the merge
-          is attributed to the PAT user. Without it this workflow does
-          not arm (Dependabot PRs excepted): a GITHUB_TOKEN arm merges as
+          is attributed to the PAT user. Without it, or when it is not a
+          user credential (GET /user must answer type=User), this workflow
+          does not arm (Dependabot PRs excepted): a GITHUB_TOKEN arm merges as
           github-actions[bot], and GitHub then skips the repo's automatic
           head-branch deletion (the merged branch survives and a later
           push to it never reaches main — wxa-graph#553) and suppresses
