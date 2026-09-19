@@ -9,51 +9,56 @@
 # ADR cited the missing evidence for two days (recovered in #597). (Its
 # twin, wxa_vpn#1736, is NOT this bug: that user-merged branch WAS deleted
 # at merge and the later push re-created it.) The branch was still there
-# to push to because
-# GitHub runs the repo's "Automatically delete head branches" only for a
-# USER-attributed merge. wxa-graph's callers used `secrets: inherit`
-# across accounts, which delivers nothing, so the arm ran on the
-# GITHUB_TOKEN fallback (the run log shows `USING_PAT: 0`) and GitHub
-# performed the merge as github-actions[bot].
+# to push to because GitHub runs the repo's "Automatically delete head
+# branches" only for a USER-attributed merge. wxa-graph's callers used
+# `secrets: inherit` across accounts, which delivers nothing, so the arm
+# ran on the GITHUB_TOKEN fallback (the run log shows `USING_PAT: 0`) and
+# GitHub performed the merge as github-actions[bot].
 #
 # Measured 2026-09-18 over the 44 caller repos, merges since 2026-05-03
 # (when delete_branch_on_merge was on fleet-wide): 0 of 97 bot-attributed
 # merges had their head branch auto-deleted; 1746 of 1746 user-attributed
 # merges did. A controlled repeat in a scratch repo with one required check
 # matched: GITHUB_TOKEN armed or merged 4 of 4 survived, a user token or
-# the fleet PAT 5 of 5 were deleted within 2 s. So the gate: without the
-# caller's PAT, neither workflow arms (Dependabot's own PRs excepted —
-# their runs never get Actions secrets, and Dependabot deletes its own
-# branch: 0 of 281 survived).
+# the fleet PAT 5 of 5 were deleted within 2 s. So the gate: neither
+# workflow arms unless the caller's PAT arrived AND is a user credential
+# (GET /user returns type=User; App installation tokens get a 403).
+# Dependabot's own PRs are excepted — their runs never get Actions
+# secrets, and Dependabot deletes its own branch (0 of 281 survived).
 #
 # The arm steps are EXTRACTED from the workflow YAML (the shipped bash,
 # not a mirrored copy) and run against a stubbed `gh`:
 #
 #   claude-author-automerge.yml
-#    1. no PAT, non-Dependabot author ⇒ exit 0, NO arm, NO disarm,
-#       stood_down=no-pat, an ::error:: naming the caller fix.
-#    2. PAT present ⇒ arms (head-bound), armed=1, no stood_down.
-#    3. no PAT, author dependabot[bot] ⇒ arms (exception kept).
-#    4. near-miss authors (dependabot, Dependabot[bot], dependabot[bot]x)
-#       ⇒ refused — the exception is an exact login match.
-#    5. no PAT AND the base moved ⇒ the base revalidation still runs first:
-#       disarm + stood_down=base, not no-pat. The gate sits after the
-#       revalidations so their safety disarms keep working.
+#    1.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, NO disarm, no
+#        /user probe, stood_down=no-pat, an ::error:: naming the fix.
+#    2.  PAT that is a user ⇒ arms (head-bound), armed=1, no stood_down.
+#    2b. PAT whose /user read fails 3× (an App installation token's 403)
+#        ⇒ refused after exactly 3 attempts, no arm, stood_down=no-pat.
+#    2c. PAT whose /user answer is not a User ⇒ refused, 1 attempt.
+#    2d. /user fails twice, then answers ⇒ arms (the retry recovers).
+#    3.  no PAT, author dependabot[bot] ⇒ arms, no /user probe (exception).
+#    4.  near-miss authors (dependabot, Dependabot[bot], dependabot[bot]x)
+#        ⇒ refused — the exception is an exact login match.
+#    5.  no PAT AND the base moved ⇒ the base revalidation still runs first:
+#        disarm + stood_down=base, not no-pat.
 #   safe-paths-automerge.yml
-#    6. no PAT, non-Dependabot author ⇒ exit 0, NO arm, ::error::, and the
-#       step summary carries the reason.
-#    7. PAT present ⇒ arms.
-#    8. no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
-#       docs/package.json bumps take this path).
-#   negative controls (the cases above can fail)
-#    9. claude-author step with the gate call neutralized ⇒ the harness
-#       sees an arm under no PAT.
-#   10. safe-paths step with the gate condition neutralized ⇒ same.
+#    6.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, ::error:: + summary.
+#    7.  PAT that is a user ⇒ arms.
+#    7b. PAT whose /user read fails 3× ⇒ refused, no arm.
+#    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
+#        docs/package.json bumps take this path).
+#   negative controls (each proves a case above can fail)
+#    9.  claude-author with both refusal calls neutralized ⇒ arms under no
+#        PAT (case 1).
+#    9b. claude-author with only the /user refusal neutralized ⇒ arms with
+#        an App-token-shaped credential (case 2b).
+#    10. safe-paths with both refusal calls neutralized ⇒ arms (case 6).
 #
 # Structural pins (hardcoded, not derived from the files under test):
-#   * exactly ONE non-comment `gh pr merge --auto` per workflow, and the
-#     gate precedes it in the same step — a second arm path would bypass
-#     the gate;
+#   * exactly ONE non-comment `gh pr merge --auto` per workflow, and both
+#     the refusal and the /user probe precede it in the same step — a
+#     second arm path would bypass the gate;
 #   * PR_AUTHOR comes from github.event.pull_request.user.login (the one
 #     field PR contents cannot set) and USING_PAT from
 #     secrets.automerge_pat, in both arm steps;
@@ -62,15 +67,14 @@
 #   * automerge_pat stays `required: false` in both: a required secret
 #     fails a misconfigured caller at STARTUP, which would also stop the
 #     hold-label and error revokes that protect already-armed PRs;
-#   * the refusal helper never calls --disable-auto (see the workflow
-#     comment: any arm already present is user-attributed);
+#   * the refusal helper never calls --disable-auto (any arm already
+#     present is user-attributed);
 #   * both run blocks are `${{ }}`-free — Actions evaluates expressions in
 #     a run block before bash starts, so even an error message quoting
 #     `${{ secrets.AUTOMERGE_PAT }}` would inject the secret into the script;
 #   * the decision label: stood_down=no-pat ⇒ automerge:refused-no-pat,
 #     with a description within GitHub's 100-character label limit;
-#   * the docstrings no longer offer a GitHub App token as an alternative
-#     (GITHUB_TOKEN is one; the merge would still be bot-attributed).
+#   * the docstrings ask for a user PAT, not an App token.
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_pat_attribution_gate.sh
@@ -124,18 +128,19 @@ for wf in "$CA" "$SP"; do
   fi
 done
 
-gate_before_arm() { # extracted block → 0 when the gate line precedes the arm line
-  awk '
-    /if \[ "\$USING_PAT" != "1" \] && \[ "\$PR_AUTHOR" != "dependabot\[bot\]" \]; then/ && !gate { gate=NR }
+precedes_arm() { # extracted block, fixed string → 0 when that string's first line precedes the arm line
+  awk -v s="$2" '
+    index($0, s) && !mark { mark=NR }
     !/^[[:space:]]*#/ && /gh pr merge --auto/ && !arm { arm=NR }
-    END { exit !(gate && arm && gate < arm) }
+    END { exit !(mark && arm && mark < arm) }
   ' "$1"
 }
 for f in ca sp; do
-  if gate_before_arm "$T/$f.sh"; then
-    pass "$f: the attribution gate precedes the arm"
+  if precedes_arm "$T/$f.sh" 'refuse_unattributed_arm "No automerge_pat reached this workflow."' \
+    && precedes_arm "$T/$f.sh" "gh api user --jq 'select(.type == \"User\") | .login'"; then
+    pass "$f: the no-PAT refusal and the /user probe both precede the arm"
   else
-    fail "$f: no attribution gate before the arm command"
+    fail "$f: the attribution gate (refusal + /user probe) does not precede the arm command"
   fi
 done
 
@@ -198,9 +203,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 0c. Stub `gh`: logs every call; answers the reads both steps make.
-#       STUB_BASE   — what the claude-author base re-read returns (main)
-#       STUB_HEAD   — what the head-sha read returns (the event's head)
+# 0c. Stubs: `gh` logs every call and answers the reads both steps make;
+#     `sleep` no-ops the /user retry backoff. Knobs (env):
+#       STUB_BASE             — the claude-author base re-read (main)
+#       STUB_HEAD             — the head-sha read (the event's head)
+#       STUB_USER             — the login GET /user yields as a User; an
+#                               EMPTY value models a non-User answer
+#       STUB_USER_FAIL_TIMES  — first N /user reads exit 1 (a 403)
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
@@ -210,6 +219,12 @@ case "$1 $2" in
   "pr merge") exit 0 ;;
   "pr view") echo "OFF"; exit 0 ;;
 esac
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  n=$(cat "$USER_CALLS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$USER_CALLS"
+  [ "$n" -le "${STUB_USER_FAIL_TIMES:-0}" ] && exit 1
+  printf '%s\n' "${STUB_USER-topcoder1}"
+  exit 0
+fi
 if [ "$1" = "api" ]; then
   case "$*" in
     *"--jq .base.ref"*) printf '%s\n' "${STUB_BASE:-main}" ;;
@@ -220,15 +235,16 @@ if [ "$1" = "api" ]; then
 fi
 exit 0
 STUB
-chmod +x "$T/bin/gh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/sleep"
+chmod +x "$T/bin/gh" "$T/bin/sleep"
 
 HEAD="c0ffee0000000000000000000000000000000001"
 
 run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T/summary
-  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"
+  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls"
   local rc=0
-  ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" GITHUB_OUTPUT="$T/ghout" \
-      GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
+  ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" USER_CALLS="$T/user_calls" \
+      GITHUB_OUTPUT="$T/ghout" GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
       GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
       HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY=0 \
       BYPASS_LABEL=0 BYPASS_CODEX=0 GATE_BASE_REF=main GATE_BODY_SHA="" \
@@ -240,31 +256,63 @@ run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T
 has() { grep -qF -- "$2" "$1"; }
 armed() { grep -q 'gh pr merge --auto' "$T/gh.log"; }
 disarmed() { grep -q 'gh pr merge --disable-auto' "$T/gh.log"; }
+user_calls() { grep -c '^gh api user' "$T/gh.log" || true; }
+dump() { sed 's/^/    /' "$T/out.log" "$T/gh.log" "$T/ghout"; }
 
 # ---------------------------------------------------------------------------
 # claude-author-automerge.yml
 # ---------------------------------------------------------------------------
 run_step "$T/ca.sh" 0 "topcoder1"
-if ! armed && ! disarmed && has "$T/out.log" "rc=0" && has "$T/ghout" "stood_down=no-pat" \
-   && has "$T/out.log" "::error::No automerge_pat reached this workflow" && ! has "$T/ghout" "armed=1"; then
-  pass "1: claude-author, no PAT ⇒ no arm, no disarm, stood_down=no-pat, exit 0"
+if ! armed && ! disarmed && [ "$(user_calls)" = "0" ] && has "$T/out.log" "rc=0" \
+   && has "$T/ghout" "stood_down=no-pat" && ! has "$T/ghout" "armed=1" \
+   && has "$T/out.log" "::error::No automerge_pat reached this workflow."; then
+  pass "1: claude-author, no PAT ⇒ no arm, no disarm, no probe, stood_down=no-pat, exit 0"
 else
-  fail "1: claude-author, no PAT should refuse cleanly"; sed 's/^/    /' "$T/out.log" "$T/gh.log" "$T/ghout"
+  fail "1: claude-author, no PAT should refuse cleanly"; dump
 fi
 
 run_step "$T/ca.sh" 1 "topcoder1"
 if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https://github.com/stub/repo/pull/42" \
-   && has "$T/ghout" "armed=1" && ! has "$T/ghout" "stood_down=" && has "$T/out.log" "rc=0"; then
-  pass "2: claude-author, PAT present ⇒ head-bound arm, armed=1"
+   && has "$T/ghout" "armed=1" && ! has "$T/ghout" "stood_down=" && has "$T/out.log" "Arming as topcoder1" \
+   && has "$T/out.log" "rc=0"; then
+  pass "2: claude-author, user PAT ⇒ head-bound arm, armed=1"
 else
-  fail "2: claude-author with the PAT should arm"; sed 's/^/    /' "$T/out.log" "$T/gh.log" "$T/ghout"
+  fail "2: claude-author with a user PAT should arm"; dump
+fi
+
+export STUB_USER_FAIL_TIMES=3
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_USER_FAIL_TIMES
+if ! armed && ! disarmed && [ "$(user_calls)" = "3" ] && has "$T/ghout" "stood_down=no-pat" \
+   && has "$T/out.log" "::error::automerge_pat is not a user credential" && has "$T/out.log" "rc=0"; then
+  pass "2b: claude-author, App-token-shaped PAT (/user 403 ×3) ⇒ refused after 3 attempts"
+else
+  fail "2b: a credential GET /user refuses must not arm"; dump
+fi
+
+export STUB_USER=""
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_USER
+if ! armed && [ "$(user_calls)" = "1" ] && has "$T/ghout" "stood_down=no-pat"; then
+  pass "2c: claude-author, /user answers but not as a User ⇒ refused, no retry"
+else
+  fail "2c: a non-User /user answer must refuse"; dump
+fi
+
+export STUB_USER_FAIL_TIMES=2
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_USER_FAIL_TIMES
+if armed && [ "$(user_calls)" = "3" ] && has "$T/ghout" "armed=1"; then
+  pass "2d: claude-author, /user fails twice then answers ⇒ arms (retry recovers)"
+else
+  fail "2d: a transient /user failure should be retried"; dump
 fi
 
 run_step "$T/ca.sh" 0 "dependabot[bot]"
-if armed && has "$T/ghout" "armed=1" && ! has "$T/ghout" "stood_down=no-pat"; then
-  pass "3: claude-author, no PAT, dependabot[bot] ⇒ arms (exception kept)"
+if armed && has "$T/ghout" "armed=1" && ! has "$T/ghout" "stood_down=no-pat" && [ "$(user_calls)" = "0" ]; then
+  pass "3: claude-author, no PAT, dependabot[bot] ⇒ arms, no probe (exception kept)"
 else
-  fail "3: claude-author must keep arming Dependabot's own PRs without a PAT"; sed 's/^/    /' "$T/out.log" "$T/gh.log"
+  fail "3: claude-author must keep arming Dependabot's own PRs without a PAT"; dump
 fi
 
 for author in "dependabot" "Dependabot[bot]" "dependabot[bot]x"; do
@@ -272,7 +320,7 @@ for author in "dependabot" "Dependabot[bot]" "dependabot[bot]x"; do
   if ! armed && has "$T/ghout" "stood_down=no-pat"; then
     pass "4: near-miss author '$author' ⇒ refused (exact-match exception)"
   else
-    fail "4: near-miss author '$author' took the Dependabot exception"; sed 's/^/    /' "$T/gh.log"
+    fail "4: near-miss author '$author' took the Dependabot exception"; dump
   fi
 done
 
@@ -282,61 +330,87 @@ unset STUB_BASE
 if disarmed && has "$T/ghout" "stood_down=base" && ! has "$T/ghout" "stood_down=no-pat" && ! armed; then
   pass "5: no PAT + moved base ⇒ the base revalidation still disarms first (stood_down=base)"
 else
-  fail "5: the attribution gate pre-empted the base revalidation's disarm"; sed 's/^/    /' "$T/out.log" "$T/gh.log" "$T/ghout"
+  fail "5: the attribution gate pre-empted the base revalidation's disarm"; dump
 fi
 
 # ---------------------------------------------------------------------------
 # safe-paths-automerge.yml
 # ---------------------------------------------------------------------------
 run_step "$T/sp.sh" 0 "wxacoeur"
-if ! armed && ! disarmed && has "$T/out.log" "rc=0" && has "$T/out.log" "::error::No automerge_pat reached this workflow" \
-   && has "$T/summary" "No automerge_pat reached this workflow"; then
+if ! armed && ! disarmed && has "$T/out.log" "rc=0" \
+   && has "$T/out.log" "::error::No automerge_pat reached this workflow." \
+   && has "$T/summary" "No automerge_pat reached this workflow."; then
   pass "6: safe-paths, no PAT ⇒ no arm, no disarm, ::error:: + step summary, exit 0"
 else
-  fail "6: safe-paths, no PAT should refuse cleanly"; sed 's/^/    /' "$T/out.log" "$T/gh.log" "$T/summary"
+  fail "6: safe-paths, no PAT should refuse cleanly"; dump; sed 's/^/    /' "$T/summary"
 fi
 
 run_step "$T/sp.sh" 1 "wxacoeur"
 if has "$T/gh.log" "gh pr merge --auto --squash https://github.com/stub/repo/pull/42" && has "$T/out.log" "rc=0"; then
-  pass "7: safe-paths, PAT present ⇒ arms"
+  pass "7: safe-paths, user PAT ⇒ arms"
 else
-  fail "7: safe-paths with the PAT should arm"; sed 's/^/    /' "$T/out.log" "$T/gh.log"
+  fail "7: safe-paths with a user PAT should arm"; dump
+fi
+
+export STUB_USER_FAIL_TIMES=3
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_USER_FAIL_TIMES
+if ! armed && [ "$(user_calls)" = "3" ] && has "$T/out.log" "::error::automerge_pat is not a user credential"; then
+  pass "7b: safe-paths, App-token-shaped PAT ⇒ refused after 3 attempts"
+else
+  fail "7b: safe-paths must not arm with a non-user credential"; dump
 fi
 
 run_step "$T/sp.sh" 0 "dependabot[bot]"
-if armed && has "$T/out.log" "rc=0"; then
+if armed && has "$T/out.log" "rc=0" && [ "$(user_calls)" = "0" ]; then
   pass "8: safe-paths, no PAT, dependabot[bot] ⇒ arms (exception kept)"
 else
-  fail "8: safe-paths must keep arming Dependabot's own safe-paths PRs"; sed 's/^/    /' "$T/out.log" "$T/gh.log"
+  fail "8: safe-paths must keep arming Dependabot's own safe-paths PRs"; dump
 fi
 
 # ---------------------------------------------------------------------------
-# Negative controls: neutralize each gate; the harness must then see the
-# bot arm the gate exists to prevent. Each mutation is verified to have
-# applied, so a control can never pass vacuously.
+# Negative controls: neutralize a refusal; the harness must then see the
+# bot arm it exists to prevent. Each mutation is verified to have applied
+# the expected number of times, so no control can pass vacuously.
 # ---------------------------------------------------------------------------
-sed 's/^\( *\)refuse_unattributed_arm$/\1: gate-neutralized/' "$T/ca.sh" > "$T/ca_mut.sh"
-if [ "$(grep -c 'gate-neutralized' "$T/ca_mut.sh")" = "1" ]; then
+neutralize() { # script, which-regex, expected-count, out
+  sed "s/^\( *\)refuse_unattributed_arm \"$2.*\"$/\1: neutralized/" "$1" > "$4"
+  [ "$(grep -c ': neutralized' "$4")" = "$3" ]
+}
+
+if neutralize "$T/ca.sh" "" 2 "$T/ca_mut.sh"; then
   run_step "$T/ca_mut.sh" 0 "topcoder1"
   if armed; then
-    pass "9: negative control — claude-author without the gate arms under no PAT (case 1 can fail)"
+    pass "9: negative control — claude-author without its refusals arms under no PAT (case 1 can fail)"
   else
     fail "9: negative control — the neutralized claude-author step did not arm; case 1 proves nothing"
   fi
 else
-  fail "9: negative control mutation did not apply to exactly one gate call"
+  fail "9: negative control mutation did not neutralize exactly two refusal calls"
 fi
 
-sed 's/if \[ "\$USING_PAT" != "1" \] && \[ "\$PR_AUTHOR" != "dependabot\[bot\]" \]; then/if false; then/' "$T/sp.sh" > "$T/sp_mut.sh"
-if ! cmp -s "$T/sp.sh" "$T/sp_mut.sh"; then
+if neutralize "$T/ca.sh" "automerge_pat is not a user credential" 1 "$T/ca_mut2.sh"; then
+  export STUB_USER_FAIL_TIMES=3
+  run_step "$T/ca_mut2.sh" 1 "topcoder1"
+  unset STUB_USER_FAIL_TIMES
+  if armed; then
+    pass "9b: negative control — without the /user refusal an App-token-shaped PAT arms (case 2b can fail)"
+  else
+    fail "9b: negative control — the neutralized /user refusal did not arm; case 2b proves nothing"
+  fi
+else
+  fail "9b: negative control mutation did not neutralize exactly the /user refusal"
+fi
+
+if neutralize "$T/sp.sh" "" 2 "$T/sp_mut.sh"; then
   run_step "$T/sp_mut.sh" 0 "wxacoeur"
   if armed; then
-    pass "10: negative control — safe-paths without the gate arms under no PAT (case 6 can fail)"
+    pass "10: negative control — safe-paths without its refusals arms under no PAT (case 6 can fail)"
   else
     fail "10: negative control — the neutralized safe-paths step did not arm; case 6 proves nothing"
   fi
 else
-  fail "10: negative control mutation did not apply"
+  fail "10: negative control mutation did not neutralize exactly two refusal calls"
 fi
 
 # ---------------------------------------------------------------------------

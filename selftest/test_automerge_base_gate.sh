@@ -161,7 +161,7 @@ fi
 plant_after() { # anchor-regex → the enable block with a bare `exit 0` after the first match
   awk -v pat="$1" '{print} $0 ~ pat && !done {print "            exit 0"; done=1}' <<< "$enable_block"
 }
-for anchor in 'could not re-read the base ref before arming' 'refuse_unattributed_arm$'; do
+for anchor in 'could not re-read the base ref before arming' 'did not return a User after 3 attempts'; do
   mutant=$(plant_after "$anchor")
   if [ "$(grep -cE '^ *exit 0$' <<< "$mutant")" -gt "$(grep -cE '^ *exit 0$' <<< "$enable_block")" ] \
     && grep -qE '^ *exit [01]$' <<< "$(prearm_of <<< "$mutant")"; then

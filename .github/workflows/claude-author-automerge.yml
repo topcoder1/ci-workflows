@@ -1882,13 +1882,35 @@ jobs:
           # receive Actions secrets, and Dependabot deletes its branch after
           # the merge whoever performs it (0 of 281 Dependabot branches
           # survived in the same sweep).
+          #
+          # A present secret is not yet proof of a USER credential: a GitHub
+          # App installation token (which the old docstring offered) arms
+          # as that App's bot, with the same result. GET /user answers only
+          # for a user credential — installation tokens, GITHUB_TOKEN
+          # included, get a 403 — so the arm requires it to return
+          # type=User. An unreadable answer refuses too (fail closed; the
+          # next PR event retries).
           refuse_unattributed_arm() {
-            echo "::error::No automerge_pat reached this workflow. Arming here would make GitHub merge this PR as github-actions[bot], which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret explicitly as automerge_pat — secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
+            echo "::error::$1 Arming here would make GitHub merge this PR as a bot, which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret — a USER PAT — explicitly as automerge_pat; secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
             echo "stood_down=no-pat" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          if [ "$USING_PAT" != "1" ] && [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
-            refuse_unattributed_arm
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            if [ "$USING_PAT" != "1" ]; then
+              refuse_unattributed_arm "No automerge_pat reached this workflow."
+            fi
+            arm_as=""
+            for _ in 1 2 3; do
+              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
+                break
+              fi
+              arm_as=""
+              sleep 2
+            done
+            if [ -z "$arm_as" ]; then
+              refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
+            fi
+            echo "Arming as $arm_as (user credential)."
           fi
           if [ "$BYPASS_LABEL" = "1" ]; then
             echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via approval label"

@@ -734,12 +734,31 @@ jobs:
           # Dependabot's own PRs keep the old behavior — their runs never
           # receive Actions secrets, and Dependabot deletes its branch after
           # the merge (wxa-mcp-server's docs/package.json bumps take this
-          # path).
-          if [ "$USING_PAT" != "1" ] && [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
-            msg="No automerge_pat reached this workflow. Arming here would make GitHub merge this PR as github-actions[bot], which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret explicitly as automerge_pat — secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
+          # path). A present secret must also BE a user credential: an App
+          # installation token arms as its bot, and GET /user answers only
+          # for a user (installation tokens get a 403).
+          refuse_unattributed_arm() {
+            msg="$1 Arming here would make GitHub merge this PR as a bot, which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret — a USER PAT — explicitly as automerge_pat; secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
             echo "::error::$msg"
             echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
+          }
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            if [ "$USING_PAT" != "1" ]; then
+              refuse_unattributed_arm "No automerge_pat reached this workflow."
+            fi
+            arm_as=""
+            for _ in 1 2 3; do
+              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
+                break
+              fi
+              arm_as=""
+              sleep 2
+            done
+            if [ -z "$arm_as" ]; then
+              refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
+            fi
+            echo "Arming as $arm_as (user credential)."
           fi
           echo "Safe-paths-only diff — enabling auto-merge ($METHOD)."
           if [ "$USING_PAT" = "1" ]; then
