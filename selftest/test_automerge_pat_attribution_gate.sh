@@ -162,10 +162,10 @@ for wf in "$CA" "$SP"; do
   else
     fail "$wf: automerge_pat is 'required: ${req:-<missing>}' — a required secret fails misconfigured callers at startup, killing their hold/error revokes"
   fi
-  if grep -q 'Optional fine-grained PAT (or GitHub App token)' "$wf" || ! grep -q 'A GitHub App token does not help' "$wf"; then
-    fail "$wf: the automerge_pat docstring still offers a GitHub App token — its merges are bot-attributed too"
+  if grep -q 'Optional fine-grained PAT (or GitHub App token)' "$wf" || ! grep -q 'Use a USER PAT, not an App token' "$wf"; then
+    fail "$wf: the automerge_pat docstring still offers a GitHub App token — GITHUB_TOKEN is one, and its merges keep the branch"
   else
-    pass "$wf: docstring says a GitHub App token does not help"
+    pass "$wf: docstring asks for a user PAT, not an App token"
   fi
 done
 

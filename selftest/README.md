@@ -78,8 +78,8 @@ arbitrary helper scripts; that's a different kind of repo.
   non-default bases need the opt-in label, and every unreadable input
   refuses. Its "every pre-arm rejection disarms" scan now ends at the arm
   command rather than at a comment quoting it — the old anchor read 47 lines
-  of comments and no rejection path — with a line-count floor and a planted
-  bare-exit negative control.
+  of comments and no rejection path — with a line-count floor and planted
+  bare-exit negative controls on both sides of the attribution-gate helper.
 - `test_automerge_pat_attribution_gate.sh` — neither arming reusable may arm
   without the caller's `automerge_pat`. GitHub deletes a merged head branch
   (`delete_branch_on_merge`) only for a USER-attributed merge; after a

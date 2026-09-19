@@ -153,16 +153,24 @@ else
   echo "✗ a pre-arm rejection exits without disarming, or the scan covered only $prearm_lines lines — an arm placed by an earlier run survives the rejection"
   failed=1
 fi
-# Negative control: the same scan must catch a bare exit planted in a real
-# rejection path.
-mutant=$(awk '{print} /could not re-read the base ref before arming/ && !done {print "            exit 0"; done=1}' <<< "$enable_block")
-if [ "$(grep -cE '^ *exit 0$' <<< "$mutant")" -gt "$(grep -cE '^ *exit 0$' <<< "$enable_block")" ] \
-  && grep -qE '^ *exit [01]$' <<< "$(prearm_of <<< "$mutant")"; then
-  echo "✓ negative control: a bare exit planted in a pre-arm rejection path is caught"
-else
-  echo "✗ negative control: the pre-arm scan missed a planted bare exit — the pin above is vacuous"
-  failed=1
-fi
+# Negative controls: the same scan must catch a bare exit planted in a real
+# rejection path, both BEFORE the refuse_unattributed_arm helper and AFTER
+# it (between the attribution gate and the arm). The second plant is what
+# catches a helper-strip that swallows everything up to the arm command,
+# which the line floor alone would not.
+plant_after() { # anchor-regex → the enable block with a bare `exit 0` after the first match
+  awk -v pat="$1" '{print} $0 ~ pat && !done {print "            exit 0"; done=1}' <<< "$enable_block"
+}
+for anchor in 'could not re-read the base ref before arming' 'refuse_unattributed_arm$'; do
+  mutant=$(plant_after "$anchor")
+  if [ "$(grep -cE '^ *exit 0$' <<< "$mutant")" -gt "$(grep -cE '^ *exit 0$' <<< "$enable_block")" ] \
+    && grep -qE '^ *exit [01]$' <<< "$(prearm_of <<< "$mutant")"; then
+    echo "✓ negative control: a bare exit planted after /$anchor/ is caught"
+  else
+    echo "✗ negative control: the pre-arm scan missed a bare exit planted after /$anchor/ — the pin above is vacuous there"
+    failed=1
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 0b. Extract the base-gate step's run block — the shipped bash.

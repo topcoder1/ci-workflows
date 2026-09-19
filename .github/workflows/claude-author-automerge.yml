@@ -245,8 +245,10 @@ on:
           and GitHub then skips the repo's automatic head-branch deletion
           (the merged branch survives and a later push to it never
           reaches main — wxa-graph#553) and suppresses every push-on-main
-          workflow. A GitHub App token does not help: GITHUB_TOKEN is
-          itself one, and the merge is still bot-attributed. Required
+          workflow. Use a USER PAT, not an App token: GITHUB_TOKEN is
+          itself an App installation token and its merges keep the branch
+          (measured); other Apps' merges are reported to as well (GitHub
+          community discussion 63409, untested here). Required
           scopes - repo contents r/w, pull-requests r/w. Pass it
           EXPLICITLY (`automerge_pat: <the repo's AUTOMERGE_PAT secret>`);
           `secrets: inherit` passes nothing to a reusable owned by a
@@ -1711,11 +1713,12 @@ jobs:
             steps.bypass_codex.outputs.bypass == '1'
           )
         env:
-          # Prefer the caller-supplied PAT so the merge commit triggers
-          # downstream `push:` workflows (deploy, CI). Fall back to the
-          # workflow-issued GITHUB_TOKEN when no PAT is wired — auto-merge
-          # still works but downstream workflows are silenced. See the
-          # `automerge_pat` secret docstring above for the full rationale.
+          # The caller's PAT, so the merge is user-attributed: GitHub then
+          # deletes the head branch and push-on-main workflows run. The
+          # github.token fallback only serves the pre-arm revalidation
+          # reads/disarms and a Dependabot PR's arm; the attribution gate in
+          # the script refuses every other arm without the PAT. See the
+          # `automerge_pat` secret docstring above.
           GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
@@ -1859,7 +1862,9 @@ jobs:
           #
           # So without the caller's PAT this workflow declines to arm. The
           # PR waits for a human click, which is user-attributed and so
-          # deletes the branch, and carries `automerge:refused-no-pat`. The
+          # deletes the branch, and carries `automerge:refused-no-pat`.
+          # Deletion does not stop a later push: it re-creates the branch,
+          # but visibly (`* [new branch]`) instead of landing silently. The
           # usual cause is a caller using `secrets: inherit` across
           # accounts, which passes nothing (see the automerge_pat docstring).
           #

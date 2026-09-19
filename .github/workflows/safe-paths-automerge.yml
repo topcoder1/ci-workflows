@@ -55,8 +55,10 @@ on:
           github-actions[bot], and GitHub then skips the repo's automatic
           head-branch deletion (the merged branch survives and a later
           push to it never reaches main — wxa-graph#553) and suppresses
-          every push-on-main workflow. A GitHub App token does not help:
-          GITHUB_TOKEN is itself one. Same contract as
+          every push-on-main workflow. Use a USER PAT, not an App token:
+          GITHUB_TOKEN is itself an App installation token (measured), and
+          other Apps' merges are reported to keep the branch too (untested
+          here). Same contract as
           claude-author-automerge.yml. Required scopes - repo contents r/w,
           pull-requests r/w. Pass it EXPLICITLY; `secrets: inherit` passes
           nothing to a reusable owned by a different account.
@@ -692,11 +694,11 @@ jobs:
           steps.classify.outputs.all_safe == '1' &&
           steps.classifier_hold.outputs.hold == '0'
         env:
-          # Prefer the caller-supplied PAT so the merge commit triggers
-          # downstream `push:` workflows (deploy, CI). Fall back to the
-          # workflow-issued GITHUB_TOKEN when no PAT is wired — auto-merge
-          # still works but downstream workflows are silenced. See the
-          # `automerge_pat` secret docstring above for the full rationale.
+          # The caller's PAT, so the merge is user-attributed: GitHub then
+          # deletes the head branch and push-on-main workflows run. The
+          # github.token fallback only serves the head read and a Dependabot
+          # PR's arm; the attribution gate in the script refuses every other
+          # arm without the PAT. See the `automerge_pat` secret docstring.
           GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
