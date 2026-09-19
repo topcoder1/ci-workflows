@@ -83,6 +83,9 @@
 #  20.  the attribution gate kept a USER's existing arm
 #       (stood_down=already-armed) ⇒ reconciled like ARMED: stale arbiter
 #       labels cleared, nothing added (Codex round 2).
+#  21.  refused-no-pat, but a USER armed the PR after the arm step read it
+#       ⇒ the publish-time re-read clears labels and adds none; a BOT's arm
+#       keeps the refusal label (Codex round 3).
 #
 # Structural pins:
 #   * the arm step carries `id: arm` and publishes `armed=1` AFTER the
@@ -234,8 +237,13 @@ case "$1" in
     case "$method $path" in
       "GET "*"/pulls/"*)
         if [ "${STUB_HEAD_FAIL:-0}" = "1" ]; then exit 1; fi
-        # The step pipes through --jq .head.sha; emit the sha directly.
-        printf '%s\n' "${STUB_LIVE_HEAD:-}"
+        # Two reads hit this path: the ownership probe (--jq .head.sha,
+        # emit the sha) and the refused-no-pat arm-state re-read (--jq on
+        # .auto_merge, emit none|bot|user).
+        case "$*" in
+          *auto_merge*) printf '%s\n' "${STUB_LIVE_ARMED_BY:-none}" ;;
+          *) printf '%s\n' "${STUB_LIVE_HEAD:-}" ;;
+        esac
         exit 0 ;;
       "GET "*"/labels?per_page=100")
         if [ "${STUB_LABELS_FAIL:-0}" = "1" ]; then exit 1; fi
@@ -519,6 +527,22 @@ run_case already_armed
 expect "20a: a stale refused-no-pat label is removed from the user-armed PR" \
   "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Arefused-no-pat" "$T/gh.log"
 expect_absent "20b: no arbiter label is added to an armed PR" "labels[]=" "$T/gh.log"
+export ARM_STOOD_DOWN=""
+
+# ---------------------------------------------------------------------------
+# 21. refused-no-pat, but a USER armed the PR after the arm step read it ⇒
+#     the publish-time re-read wins: labels cleared, nothing added.
+# ---------------------------------------------------------------------------
+export ARM_STOOD_DOWN="no-pat" STUB_LABELS="automerge:refused-no-pat" STUB_LIVE_ARMED_BY="user"
+run_case no_pat_armed_since
+expect "21a: the refusal label comes off a PR a user armed since" \
+  "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Arefused-no-pat" "$T/gh.log"
+expect_absent "21b: no refusal label is added to that armed PR" "labels[]=" "$T/gh.log"
+export STUB_LIVE_ARMED_BY="bot" STUB_LABELS=""
+run_case no_pat_bot_armed
+expect "21c: a BOT's arm keeps the refusal label (it will merge as the bot)" \
+  "labels[]=automerge:refused-no-pat" "$T/gh.log"
+unset STUB_LIVE_ARMED_BY
 export ARM_STOOD_DOWN=""
 
 # ---------------------------------------------------------------------------

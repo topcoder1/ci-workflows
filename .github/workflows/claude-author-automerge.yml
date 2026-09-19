@@ -1787,6 +1787,23 @@ jobs:
             fi
             exit "$1"
           }
+          # The attribution gate's GET /user probe (see "Attribution gate"
+          # below) runs HERE, before every live-state read (Codex round 3):
+          # its retries and backoff take seconds, and none of that time may
+          # sit between the revalidations below and the arm — a retarget or
+          # body edit in that gap fires no event, and --match-head-commit does
+          # not bind the base or body. Only the answer is recorded here; the
+          # decision is taken right before the arm, with no network call.
+          arm_as=""
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ] && [ "$USING_PAT" = "1" ]; then
+            for _ in 1 2 3; do
+              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
+                break
+              fi
+              arm_as=""
+              sleep 2
+            done
+          fi
           now_base=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .base.ref) || {
             echo "::error::could not re-read the base ref before arming — refusing to arm (fail closed)."
             disarm_then_exit 1
@@ -1910,18 +1927,12 @@ jobs:
             fi
             exit 0
           }
+          # The decision: no network call between here and the arm (the
+          # probe's answer, arm_as, was taken at the top of this step).
           if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
             if [ "$USING_PAT" != "1" ]; then
               refuse_unattributed_arm "No automerge_pat reached this workflow."
             fi
-            arm_as=""
-            for _ in 1 2 3; do
-              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
-                break
-              fi
-              arm_as=""
-              sleep 2
-            done
             if [ -z "$arm_as" ]; then
               refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
             fi
@@ -2218,6 +2229,20 @@ jobs:
           if [ "$live" != "$HEAD_SHA" ]; then
             echo "Head moved (${HEAD_SHA} → ${live}) — the newer head's run owns the labels; not publishing."
             exit 0
+          fi
+          # A refused-no-pat verdict rests on an arm-state read the arm step
+          # took seconds ago, and a user may have armed the PR since (Codex
+          # round 3). Re-read at publish time: a user's arm is natively
+          # visible state, reconciled like ARMED. An unreadable answer keeps
+          # the verdict (advisory surface).
+          if [ "$decision" = "automerge:refused-no-pat" ]; then
+            armed_now=$(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
+              --jq 'if .auto_merge == null then "none" elif .auto_merge.enabled_by.type == "Bot" then "bot" else "user" end' \
+              2>/dev/null) || armed_now="unknown"
+            if [ "$armed_now" = "user" ]; then
+              echo "A user armed this PR after the arm step read it — reconciling like ARMED (no refusal label)."
+              decision=""
+            fi
           fi
           # Paginated read — a hold label past the 30-label default page must
           # not read as absent (same pin as the manual-hold gate).

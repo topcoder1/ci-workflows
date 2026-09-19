@@ -711,18 +711,6 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # Arm only the head this run actually classified. `gh pr merge
-          # --auto` acts on the PR's CURRENT head, so a run that classified
-          # an older docs-only revision would otherwise arm a newer revision
-          # it never inspected — including one that added docs/legal/**.
-          # Fail CLOSED on an unreadable head: skipping an arm is harmless
-          # (the newer head's own run arms it), arming blind is not.
-          # (Codex review round 8 P1.)
-          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
-          if [ "$now" != "$HEAD_SHA" ]; then
-            echo "::notice::head is '${now:-<unreadable>}' but this run classified '${HEAD_SHA}' — not arming; the current head's own run owns that decision."
-            exit 0
-          fi
           # Attribution gate (2026-09-18) — the same gate, for the same
           # measured reason, as the arm step in claude-author-automerge.yml:
           # after a GITHUB_TOKEN arm GitHub merges as github-actions[bot],
@@ -744,11 +732,12 @@ jobs:
             echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           }
-          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
-            if [ "$USING_PAT" != "1" ]; then
-              refuse_unattributed_arm "No automerge_pat reached this workflow."
-            fi
-            arm_as=""
+          # The GET /user probe runs FIRST, before the head read below (Codex
+          # round 3): its retries and backoff take seconds, and that time must
+          # not sit between the head read and the arm. Only the answer is
+          # recorded here; the decision comes after the head read.
+          arm_as=""
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ] && [ "$USING_PAT" = "1" ]; then
             for _ in 1 2 3; do
               if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
                 break
@@ -756,6 +745,24 @@ jobs:
               arm_as=""
               sleep 2
             done
+          fi
+          # Arm only the head this run actually classified. `gh pr merge
+          # --auto` acts on the PR's CURRENT head, so a run that classified
+          # an older docs-only revision would otherwise arm a newer revision
+          # it never inspected — including one that added docs/legal/**.
+          # Fail CLOSED on an unreadable head: skipping an arm is harmless
+          # (the newer head's own run arms it), arming blind is not.
+          # (Codex review round 8 P1.)
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+          if [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head is '${now:-<unreadable>}' but this run classified '${HEAD_SHA}' — not arming; the current head's own run owns that decision."
+            exit 0
+          fi
+          # The attribution decision — no network call before the arm.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            if [ "$USING_PAT" != "1" ]; then
+              refuse_unattributed_arm "No automerge_pat reached this workflow."
+            fi
             if [ -z "$arm_as" ]; then
               refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
             fi
@@ -767,4 +774,16 @@ jobs:
           else
             echo "::notice::Auth: GITHUB_TOKEN for a Dependabot PR — Dependabot-triggered runs never receive Actions secrets, and Dependabot deletes its own branch after the merge."
           fi
-          gh pr merge --auto --"$METHOD" "$PR_URL"
+          # Bound to the classified head (Codex round 3): --match-head-commit
+          # makes GitHub reject the arm atomically if the head moved after the
+          # read above, closing that window instead of only narrowing it —
+          # the same binding claude-author-automerge.yml uses.
+          if ! gh pr merge --auto --"$METHOD" --match-head-commit "$HEAD_SHA" "$PR_URL"; then
+            now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+            if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+              echo "::notice::head moved (${HEAD_SHA} → ${now}) between the head read and the arm — not arming; the newer head's own run owns that decision."
+              exit 0
+            fi
+            echo "::error::enable auto-merge failed and the head still matches ${HEAD_SHA} — investigate."
+            exit 1
+          fi

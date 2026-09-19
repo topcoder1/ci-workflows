@@ -43,6 +43,8 @@
 #        ⇒ refused after exactly 3 attempts, no arm, stood_down=no-pat.
 #    2c. PAT whose /user answer is not a User ⇒ refused, 1 attempt.
 #    2d. /user fails twice, then answers ⇒ arms (the retry recovers).
+#    2e. the /user probe precedes the base/body revalidation reads, so its
+#        retries never widen the revalidate-to-arm window (Codex round 3).
 #    3.  no PAT, author dependabot[bot] ⇒ arms, no /user probe (exception).
 #    4.  near-miss authors (dependabot, Dependabot[bot], dependabot[bot]x)
 #        ⇒ refused — the exception is an exact login match.
@@ -50,8 +52,11 @@
 #        disarm + stood_down=base, not no-pat.
 #   safe-paths-automerge.yml
 #    6.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, ::error:: + summary.
-#    7.  PAT that is a user ⇒ arms.
+#    7.  PAT that is a user ⇒ arms, bound with --match-head-commit.
+#    7a. the /user probe precedes the head read (Codex round 3).
 #    7b. PAT whose /user read fails 3× ⇒ refused, no arm.
+#    7c. the head moves before the bound arm ⇒ rejected, exit 0 + notice.
+#    7d. the arm fails on an unchanged head ⇒ exit 1.
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #   negative controls (each proves a case above can fail)
@@ -227,7 +232,11 @@ cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "gh $*" >> "$GH_LOG"
 case "$1 $2" in
-  "pr merge") exit 0 ;;
+  "pr merge")
+    case "$*" in
+      *" --auto "*) [ "${STUB_ARM_FAIL:-0}" = "1" ] && exit 1 ;;
+    esac
+    exit 0 ;;
   "pr view")
     # The refusal helper asks WHO armed the PR (none|bot|user); the
     # disarm verification asks only ON/OFF.
@@ -247,7 +256,12 @@ fi
 if [ "$1" = "api" ]; then
   case "$*" in
     *"--jq .base.ref"*) printf '%s\n' "${STUB_BASE:-main}" ;;
-    *"--jq .head.sha"*) printf '%s\n' "${STUB_HEAD:-$HEAD_SHA}" ;;
+    *"--jq .head.sha"*)
+      # The first head read answers STUB_HEAD (default: the event's head);
+      # later reads answer STUB_HEAD_LATER when set (a push mid-run).
+      h=$(cat "$HEAD_READS" 2>/dev/null || echo 0); h=$((h + 1)); echo "$h" > "$HEAD_READS"
+      if [ "$h" -gt 1 ] && [ -n "${STUB_HEAD_LATER:-}" ]; then printf '%s\n' "$STUB_HEAD_LATER"
+      else printf '%s\n' "${STUB_HEAD:-$HEAD_SHA}"; fi ;;
     *"--jq .body"*) printf '%s\n' "" ;;
   esac
   exit 0
@@ -260,9 +274,9 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 HEAD="c0ffee0000000000000000000000000000000001"
 
 run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T/summary
-  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls"
+  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls" "$T/head_reads"
   local rc=0
-  ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" USER_CALLS="$T/user_calls" \
+  ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" USER_CALLS="$T/user_calls" HEAD_READS="$T/head_reads" \
       GITHUB_OUTPUT="$T/ghout" GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
       GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
       HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY=0 \
@@ -276,6 +290,15 @@ has() { grep -qF -- "$2" "$1"; }
 armed() { grep -q 'gh pr merge --auto' "$T/gh.log"; }
 disarmed() { grep -q 'gh pr merge --disable-auto' "$T/gh.log"; }
 user_calls() { grep -c '^gh api user' "$T/gh.log" || true; }
+# Codex round 3: the /user probe's retries must never sit between a
+# live-state read and the arm, so its first call must PRECEDE the step's
+# first live-state read in the call log.
+probe_before() { # fixed string of the first live-state read
+  local p r
+  p=$(grep -n -m1 -F -- "gh api user" "$T/gh.log" | cut -d: -f1)
+  r=$(grep -n -m1 -F -- "$1" "$T/gh.log" | cut -d: -f1)
+  [ -n "$p" ] && [ -n "$r" ] && [ "$p" -lt "$r" ]
+}
 dump() { sed 's/^/    /' "$T/out.log" "$T/gh.log" "$T/ghout"; }
 
 # ---------------------------------------------------------------------------
@@ -325,6 +348,11 @@ if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https:
   pass "2: claude-author, user PAT ⇒ head-bound arm, armed=1"
 else
   fail "2: claude-author with a user PAT should arm"; dump
+fi
+if probe_before "--jq .base.ref"; then
+  pass "2e: claude-author probes /user BEFORE the base/body revalidation reads (no retry gap before the arm)"
+else
+  fail "2e: the /user probe runs after the live-state revalidation — its retries widen the revalidate-to-arm window (Codex round 3)"; dump
 fi
 
 export STUB_USER_FAIL_TIMES=3
@@ -393,10 +421,35 @@ else
 fi
 
 run_step "$T/sp.sh" 1 "wxacoeur"
-if has "$T/gh.log" "gh pr merge --auto --squash https://github.com/stub/repo/pull/42" && has "$T/out.log" "rc=0"; then
-  pass "7: safe-paths, user PAT ⇒ arms"
+if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https://github.com/stub/repo/pull/42" \
+   && has "$T/out.log" "rc=0"; then
+  pass "7: safe-paths, user PAT ⇒ arms, bound to the classified head"
 else
-  fail "7: safe-paths with a user PAT should arm"; dump
+  fail "7: safe-paths with a user PAT should arm with --match-head-commit"; dump
+fi
+if probe_before "--jq .head.sha"; then
+  pass "7a: safe-paths probes /user BEFORE the head read (no retry gap before the arm)"
+else
+  fail "7a: the /user probe runs after the head read — its retries widen the read-to-arm window (Codex round 3)"; dump
+fi
+
+export STUB_ARM_FAIL=1 STUB_HEAD_LATER="0000000000000000000000000000000000000bad"
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARM_FAIL STUB_HEAD_LATER
+if has "$T/out.log" "rc=0" && has "$T/out.log" "head moved ($HEAD → 0000000000000000000000000000000000000bad)" \
+   && ! has "$T/out.log" "::error::"; then
+  pass "7c: safe-paths, the head moves before the bound arm ⇒ the arm is rejected, exit 0 with a notice"
+else
+  fail "7c: a head-moved arm rejection must stand down cleanly"; dump
+fi
+
+export STUB_ARM_FAIL=1
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARM_FAIL
+if has "$T/out.log" "rc=1" && has "$T/out.log" "::error::enable auto-merge failed and the head still matches $HEAD"; then
+  pass "7d: safe-paths, the arm fails with the head unchanged ⇒ exit 1 (investigate)"
+else
+  fail "7d: an arm failure on an unchanged head must fail the step"; dump
 fi
 
 export STUB_USER_FAIL_TIMES=3
