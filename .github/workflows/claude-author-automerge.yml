@@ -1812,6 +1812,13 @@ jobs:
           # (Codex round 5). A user's arm is never touched. Done here, with
           # the probe, so it adds no time between the revalidations and the
           # arm; an unreadable arm state leaves things as they are.
+          # Residual race, accepted (Codex round 6): a user arm placed
+          # between the read and the disable below is revoked too — GitHub's
+          # disable takes no expected enabler, so this cannot be atomic. The
+          # two calls are back to back, and the cost is a PR left unarmed
+          # until its next event or a click: bounded, visible, recoverable —
+          # the trade the base-gate disarm below makes — against a
+          # bot-attributed merge that strands every later push.
           if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
             armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
               --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \

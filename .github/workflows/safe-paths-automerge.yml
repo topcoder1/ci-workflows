@@ -751,7 +751,11 @@ jobs:
           # measured), so remove it and let the arm below or the refusal take
           # over (Codex round 5). A user's arm is never touched; an unreadable
           # arm state leaves things as they are. Done before the head read so
-          # it adds no time between that read and the arm.
+          # it adds no time between that read and the arm. Residual race,
+          # accepted (Codex round 6): a user arm placed between the read and
+          # the disable is revoked too (GitHub's disable takes no expected
+          # enabler); the cost is a PR left unarmed until its next event or a
+          # click, against a bot-attributed merge that strands later pushes.
           if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
             armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
               --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
