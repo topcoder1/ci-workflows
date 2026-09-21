@@ -1645,6 +1645,8 @@ test("a numbered host family cannot widen past the family it names", async () =>
     "https://xproductionresultssa14.blob.core.windows.net", // prefix extended
     "https://productionresultssa14x.blob.core.windows.net", // non-digit in the gap
     "https://productionresultssa14.blob.core.windows.net.", // trailing dot
+    "https://productionresultssa14Xblob.core.windows.net", // a dot is literal, not "any character"
+    "https://productionresultssa14.blobXcore.windows.net", // ... in every position
     "https://attacker.test", // unrelated host
   ]) {
     const f = fixture({
@@ -1688,6 +1690,8 @@ test("only a single trailing-digit star inside the first label is a valid entry"
     "https://productionresultssa*.blob.core.windows.net/path", // a path
     "https://productionresultssa*.blob.core.windows.net:8443", // a port
     "*", // not a URL at all
+    "https://prodsa.blob*.core.windows.net", // star at the end of the second label
+    "https://sa*.", // nothing but the root after the star
   ];
   for (const value of refused) {
     assert.throws(
@@ -1727,4 +1731,17 @@ test("duplicate origin entries are still refused, patterns included", () => {
       (error) => error.code === "invalid_input",
     );
   }
+});
+
+test("the run's own re-read still refuses a changed updated_at, unlike the attempt", async () => {
+  // sameExecution() excuses updated_at between the run record and the attempt
+  // record only. The run endpoint read twice is one record read twice, and a
+  // change there means it was written in between.
+  const f = fixture({
+    respond: ({ url, count }) =>
+      url === runURL && count === 2
+        ? json({ ...run(), updated_at: iso(now - 1000) })
+        : undefined,
+  });
+  await fails(f.client, "metadata_changed");
 });

@@ -318,6 +318,13 @@ function fakeFetch(api, { receiptFor, report, state }) {
   // Artifact ids are fixed per cycle in this fake; each belongs to the run
   // the cycle dispatched, which is the newest run the API answered with.
   const currentRun = () => api.runs.at(-1)?.id ?? 101;
+  // The client checks expiry against the real clock
+  // (merge-policy-github-artifact.mjs: expires_at > Date.now()), so this field
+  // cannot come from the fixture's frozen clock — pinning it there made the
+  // whole suite fail from the day after that date. It is computed ONCE per
+  // fixture: read() fetches the artifact twice and compares the two, and a
+  // per-fetch value straddling a second boundary reads as a changed artifact.
+  const expiresAt = iso(Date.now() + 3600000);
   const artifact = (id) => {
     const entry = archives(currentRun()).get(id);
     return {
@@ -328,11 +335,7 @@ function fakeFetch(api, { receiptFor, report, state }) {
       expired: false,
       created_at: iso(api.clock.t - 40000),
       updated_at: iso(api.clock.t - 20000),
-      // The client checks expiry against the real clock
-      // (merge-policy-github-artifact.mjs: expires_at > Date.now()), so this one
-      // field cannot come from the fixture's frozen clock: pinning it there made
-      // the whole suite start failing the day after that date.
-      expires_at: iso(Date.now() + 3600000),
+      expires_at: expiresAt,
       workflow_run: {
         id: currentRun(),
         repository_id: 11,
@@ -739,6 +742,7 @@ test("dispatch records are exclusive, validated and never overwritten", async (t
     () => readDispatchRecord(join(directory, "..", "missing.json")),
     /ENOENT/,
   );
+  let minute = 0;
   for (const bad of [
     { ...record, kind: "other" },
     {
@@ -751,7 +755,8 @@ test("dispatch records are exclusive, validated and never overwritten", async (t
   ]) {
     const badPath = writeDispatchRecord(directory, {
       ...bad,
-      dispatchedAt: `2026-09-20T12:0${Math.floor(Math.random() * 10)}:${String(Math.floor(Math.random() * 60)).padStart(2, "0")}Z`,
+      // Distinct by construction: random stamps collided about one run in 60.
+      dispatchedAt: `2026-09-20T13:${String(++minute).padStart(2, "0")}:00Z`,
     });
     assert.throws(
       () => readDispatchRecord(badPath),
