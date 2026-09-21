@@ -170,6 +170,18 @@ function originMatcher(value) {
     matches: (origin) => pattern.test(origin),
   });
 }
+/** Refuse a download-origin list the client itself would refuse, before any
+ * request is made. The one validator: callers must not keep a second copy of
+ * these rules, which is how a driver once refused the family form this client
+ * accepts. */
+export function assertDownloadOrigins(value) {
+  try {
+    originsCopy(value);
+  } catch (error) {
+    if (error instanceof ArtifactError) throw error;
+    throw new ArtifactError("invalid_input");
+  }
+}
 function originsCopy(value) {
   requireThat(
     Array.isArray(value) &&

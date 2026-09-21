@@ -826,6 +826,10 @@ test("cycle options are validated before any request", async (t) => {
     { downloadOrigins: [] },
     { downloadOrigins: ["http://insecure.example"] },
     { downloadOrigins: ["https://host.example/path"] },
+    // The family form is the client's; malformed ones fail here, unpaid.
+    { downloadOrigins: ["https://*.blob.core.windows.net"] },
+    { downloadOrigins: ["https://productionresultssa*blob.core.windows.net"] },
+    { downloadOrigins: ["https://productionresultssa*.blob.*.windows.net"] },
   ]) {
     await assert.rejects(
       runShadowCycle(f.deps, { ...f.cycleOptions, ...patch }),
@@ -1031,4 +1035,26 @@ test("a log that cannot be written at all leaves the cycle's entry intact with t
   assert.equal(entry.failure, null);
   assert.equal(existsSync(join(blocker, "shadow.jsonl")), false);
   assert.equal(f.api.value(ledgerPath).events.at(-1).type, "review");
+});
+
+test("the family origin the runbook documents drives a whole cycle to a recorded intake", async (t) => {
+  // SHADOW-MODE.md tells the operator to pass this exact string. The driver once
+  // refused it with its own stricter origin regex while the client accepted
+  // it, so every documented cycle would have failed before dispatch; no test
+  // drove the family form through a cycle.
+  const f = fixture(t);
+  const entry = await runShadowCycle(f.deps, {
+    ...f.cycleOptions,
+    downloadOrigins: ["https://productionresultssa*.blob.core.windows.net"],
+  });
+  assert.equal(entry.refusal, null);
+  assert.equal(entry.failure, null);
+  assert.equal(entry.intake.outcome, "recorded");
+  assert.equal(entry.verdict.decision, "pass");
+  // The fake storage host is sa12, a member of the family.
+  assert.ok(
+    f.fetch.calls.some(({ url }) =>
+      url.startsWith("https://productionresultssa12.blob.core.windows.net/"),
+    ),
+  );
 });
