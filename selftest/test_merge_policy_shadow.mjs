@@ -328,7 +328,11 @@ function fakeFetch(api, { receiptFor, report, state }) {
       expired: false,
       created_at: iso(api.clock.t - 40000),
       updated_at: iso(api.clock.t - 20000),
-      expires_at: iso(api.clock.t + 3600000),
+      // The client checks expiry against the real clock
+      // (merge-policy-github-artifact.mjs: expires_at > Date.now()), so this one
+      // field cannot come from the fixture's frozen clock: pinning it there made
+      // the whole suite start failing the day after that date.
+      expires_at: iso(Date.now() + 3600000),
       workflow_run: {
         id: currentRun(),
         repository_id: 11,

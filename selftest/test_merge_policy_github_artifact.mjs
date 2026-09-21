@@ -327,14 +327,54 @@ for (const [name, mutate, code] of runMutations) {
     assert.equal(f.calls.length, 1);
   });
 }
-test("attempt endpoint must independently match authenticated current run", async () => {
-  const f = fixture({
+test("attempt endpoint must independently match the authenticated current run, apart from when its own record was written", async () => {
+  // GitHub stamps the run record and the attempt record independently: live,
+  // the two settled one second apart and stayed there permanently. Refusing a
+  // genuine artifact over that would make every intake a coin toss.
+  const tolerated = fixture({
     respond: ({ url }) =>
       url === attemptURL
         ? json({ ...run(), updated_at: iso(now - 5000) })
         : undefined,
   });
-  await fails(f.client, "metadata_changed");
+  const result = await tolerated.client.read(selector());
+  assert.equal(result.run.id, 101);
+  assert.equal(result.run.updatedAt, iso(now - 10000));
+  // Everything that identifies or authorizes the execution still has to agree,
+  // including the other two timestamps, which describe the run and not its row.
+  for (const [name, patch] of [
+    ["a different run", { id: 999 }],
+    ["a different attempt", { run_attempt: 3 }],
+    ["a different revision", { head_sha: "b".repeat(40) }],
+    ["a different conclusion", { conclusion: "failure" }],
+    ["a different status", { status: "in_progress" }],
+    ["a different event", { event: "push" }],
+    ["a different workflow path", { path: ".github/workflows/other.yml" }],
+    ["a different creation time", { created_at: iso(now - 999999) }],
+    ["a different start time", { run_started_at: iso(now - 999999) }],
+  ]) {
+    const f = fixture({
+      respond: ({ url }) =>
+        url === attemptURL ? json({ ...run(), ...patch }) : undefined,
+    });
+    await assert.rejects(
+      f.client.read(selector()),
+      (error) => {
+        assert.equal(error.name, "GitHubArtifactError", name);
+        assert.ok(
+          [
+            "metadata_changed",
+            "run_binding_mismatch",
+            "run_not_current_success",
+            "unsupported_execution",
+          ].includes(error.code),
+          `${name}: ${error.code}`,
+        );
+        return true;
+      },
+      name,
+    );
+  }
 });
 const artifactMutations = [
   [
@@ -1506,7 +1546,7 @@ test("recheck fails closed on a changed run, a changed artifact or a moved tag",
   const attempt = fixture({
     respond: ({ url }) =>
       url === attemptURL
-        ? json({ ...run(), updated_at: iso(now - 5000) })
+        ? json({ ...run(), created_at: iso(now - 999999) })
         : undefined,
   });
   await recheckFails(attempt.client, "metadata_changed");
@@ -1567,4 +1607,124 @@ test("recheck deadline spans its requests and a late response body is cancelled"
   });
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(cancelled, true);
+});
+
+// GitHub picks one of a pool of numbered storage hosts per artifact —
+// productionresultssa3, sa12, sa14 and sa16 were all seen within five
+// consecutive runs of one workflow — so an exact origin list cannot name them.
+const family = "https://productionresultssa*.blob.core.windows.net";
+const familyHost = (n) =>
+  `https://productionresultssa${n}.blob.core.windows.net`;
+
+test("a numbered host family accepts every member of that family", async () => {
+  for (const n of [0, 3, 12, 14, 16, 99, 100, 999]) {
+    const host = familyHost(n);
+    const f = fixture({
+      origins: [family],
+      respond: ({ url }) =>
+        url === zipURL
+          ? new Response(null, {
+              status: 302,
+              headers: { location: `${host}/archive.zip?opaque=signed` },
+            })
+          : url === `${host}/archive.zip?opaque=signed`
+            ? new Response(archive)
+            : undefined,
+    });
+    const result = await f.client.read(selector());
+    assert.equal(result.artifact.archiveSha256, hash(archive), host);
+  }
+});
+
+test("a numbered host family cannot widen past the family it names", async () => {
+  for (const host of [
+    "https://productionresultssa.blob.core.windows.net", // no digits at all
+    "https://productionresultssa1234.blob.core.windows.net", // four digits
+    "https://productionresultssa14.blob.core.windows.net.evil.test", // suffix extended
+    "https://evil.productionresultssa14.blob.core.windows.net", // label prepended
+    "https://xproductionresultssa14.blob.core.windows.net", // prefix extended
+    "https://productionresultssa14x.blob.core.windows.net", // non-digit in the gap
+    "https://productionresultssa14.blob.core.windows.net.", // trailing dot
+    "https://attacker.test", // unrelated host
+  ]) {
+    const f = fixture({
+      origins: [family],
+      respond: ({ url }) =>
+        url === zipURL
+          ? new Response(null, {
+              status: 302,
+              headers: { location: `${host}/archive.zip?opaque=signed` },
+            })
+          : undefined,
+    });
+    await fails(f.client, "untrusted_download_origin", selector());
+  }
+});
+
+test("only a single trailing-digit star inside the first label is a valid entry", async () => {
+  const accepted = [
+    family,
+    origin, // an exact origin still works
+    "https://sa*.example.test",
+  ];
+  for (const value of accepted) {
+    assert.doesNotThrow(
+      () =>
+        createGitHubArtifactClient({
+          producer: producer(),
+          downloadOrigins: [value],
+          fetchImpl: async () => new Response(null),
+          tokenProvider: async () => "t",
+        }),
+      value,
+    );
+  }
+  const refused = [
+    "https://*.blob.core.windows.net", // the whole label
+    "https://productionresultssa*blob.core.windows.net", // star spans the dot
+    "https://productionresultssa*.blob.*.windows.net", // two stars
+    "https://*", // nothing but a star
+    "http://productionresultssa*.blob.core.windows.net", // not https
+    "https://productionresultssa*.blob.core.windows.net/path", // a path
+    "https://productionresultssa*.blob.core.windows.net:8443", // a port
+    "*", // not a URL at all
+  ];
+  for (const value of refused) {
+    assert.throws(
+      () =>
+        createGitHubArtifactClient({
+          producer: producer(),
+          downloadOrigins: [value],
+          fetchImpl: async () => new Response(null),
+          tokenProvider: async () => "t",
+        }),
+      (error) => {
+        assert.equal(error.name, "GitHubArtifactError", value);
+        assert.ok(
+          ["invalid_input", "invalid_download_url"].includes(error.code),
+          `${value}: ${error.code}`,
+        );
+        return true;
+      },
+      value,
+    );
+  }
+});
+
+test("duplicate origin entries are still refused, patterns included", () => {
+  for (const pair of [
+    [family, family],
+    [origin, origin],
+  ]) {
+    assert.throws(
+      () =>
+        createGitHubArtifactClient({
+          producer: producer(),
+          downloadOrigins: pair,
+          fetchImpl: async () => new Response(null),
+          tokenProvider: async () => "t",
+        }),
+      (error) => error.code === "invalid_input",
+    );
+  }
 });
