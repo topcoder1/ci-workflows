@@ -318,13 +318,6 @@ function fakeFetch(api, { receiptFor, report, state }) {
   // Artifact ids are fixed per cycle in this fake; each belongs to the run
   // the cycle dispatched, which is the newest run the API answered with.
   const currentRun = () => api.runs.at(-1)?.id ?? 101;
-  // The client checks expiry against the real clock
-  // (merge-policy-github-artifact.mjs: expires_at > Date.now()), so this field
-  // cannot come from the fixture's frozen clock — pinning it there made the
-  // whole suite fail from the day after that date. It is computed ONCE per
-  // fixture: read() fetches the artifact twice and compares the two, and a
-  // per-fetch value straddling a second boundary reads as a changed artifact.
-  const expiresAt = iso(Date.now() + 3600000);
   const artifact = (id) => {
     const entry = archives(currentRun()).get(id);
     return {
@@ -335,7 +328,9 @@ function fakeFetch(api, { receiptFor, report, state }) {
       expired: false,
       created_at: iso(api.clock.t - 40000),
       updated_at: iso(api.clock.t - 20000),
-      expires_at: expiresAt,
+      // The fixture clock, like every timestamp here: the cycle hands deps.now
+      // to its artifact clients, so expiry is never judged on the real clock.
+      expires_at: iso(api.clock.t + 3600000),
       workflow_run: {
         id: currentRun(),
         repository_id: 11,
