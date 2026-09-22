@@ -1010,7 +1010,7 @@ test("no comparison data reaches the output schema", async () => {
   // renders the schema into its own format prompt, and a per-request path enum
   // failed compilation (HTTP 400) above about 4-8K characters.
   const schemas = [];
-  for (const input of [
+  const inputs = [
     fixture(),
     fixture([
       {
@@ -1026,13 +1026,27 @@ test("no comparison data reaches the output schema", async () => {
         after: null,
       },
     ]),
-  ]) {
+  ];
+  for (const input of inputs) {
     await client(async (url, init) => {
       schemas.push(JSON.parse(init.body).output_config.format.schema);
       return response();
     }).review(input);
   }
   assert.deepEqual(schemas[0], schemas[1]);
+  // A finding on a deleted file is still a changed-file finding.
+  const deleted = await client(async () =>
+    response(
+      envelope({
+        complete: true,
+        outcome: "findings",
+        findingCount: 1,
+        summary: "Issues",
+        findings: [{ ...finding, path: "lib/z.mjs" }],
+      }),
+    ),
+  ).review(inputs[1]);
+  assert.equal(deleted.review.findings[0].path, "lib/z.mjs");
   const text = JSON.stringify(schemas);
   for (const path of ["src/check.mjs", "src/new.mjs", "lib/a.mjs", "lib/z.mjs"])
     assert.ok(!text.includes(path), path);
