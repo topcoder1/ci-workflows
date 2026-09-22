@@ -380,7 +380,9 @@ fi
 # caller subscribes to, so "rewrite the body" on its own leaves the PR
 # unarmed under a stale label (codex round 2 + independent review — the
 # refused-body lever had dropped the push that its sticky comment names).
-for arm in automerge:refused-body automerge:body-changed automerge:refused-base; do
+# refused-no-pat is the same shape: its fix lands in the caller or its
+# secrets, which fires no run on the refused PR.
+for arm in automerge:refused-body automerge:body-changed automerge:refused-base automerge:refused-no-pat; do
   d=$(desc_of "$arm" "$step_tail" create)
   d=${d%.}
   case "$d" in
@@ -700,7 +702,7 @@ run_case no_pat
 expect "19a: attribution-gate stand-down publishes automerge:refused-no-pat" \
   "labels[]=automerge:refused-no-pat" "$T/gh.log"
 expect "19b: the label is created with the caller-fix lever in its description" \
-  "label create automerge:refused-no-pat --color e99695 --description Automerge arbiter: no user PAT reached this run — forward a user automerge_pat, or click-merge" "$T/gh.log"
+  "label create automerge:refused-no-pat --color e99695 --description Automerge arbiter: no user PAT — forward a user automerge_pat, then push/re-label, or click-merge" "$T/gh.log"
 expect "19c: the stale arbiter label is swapped out" \
   "api -X DELETE /repos/stub/repo/issues/42/labels/automerge%3Awithheld-quiet-cap" "$T/gh.log"
 export ARM_STOOD_DOWN=""

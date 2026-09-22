@@ -2330,7 +2330,7 @@ jobs:
             automerge:refused-base)       color="5319e7"; desc="Automerge arbiter: stood down on base-branch state — re-fire with a push/label event or click-merge" ;;
             automerge:refused-body)       color="c5def5"; desc="Automerge arbiter: qualified 'closes #N' — edit to 'part of #N', then push/re-label, or click-merge" ;;
             automerge:body-changed)       color="bfd4f2"; desc="Automerge arbiter: PR body changed after gating — push a commit or re-apply a label, or click-merge" ;;
-            automerge:refused-no-pat)     color="e99695"; desc="Automerge arbiter: no user PAT reached this run — forward a user automerge_pat, or click-merge" ;;
+            automerge:refused-no-pat)     color="e99695"; desc="Automerge arbiter: no user PAT — forward a user automerge_pat, then push/re-label, or click-merge" ;;
           esac
           # create-else-EDIT (not a create-retry): create's failure is the
           # EXPECTED already-exists conflict, and the edit refreshes a
