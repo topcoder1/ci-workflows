@@ -244,21 +244,46 @@ for (const cls of Object.keys(excludeRules)) {
 				`${PATTERN_CLASSES.join(', ')}. A typo here would silently exclude nothing, so it fails closed.`
 		);
 	}
-	// Subtracting from `blocked` is refused outright. blocked is the hardest
-	// tier — it hard-fails the classify check and never bypasses — and it
-	// carries the secrets family ('**/.env', '**/secrets*'), Dockerfiles and
-	// deploy/. A stray '**' in an exclusion there silently un-gates all of it,
-	// and an exclusion is exactly the kind of subtraction that is easy to get
-	// subtly wrong, where deleting a blocked: entry outright is at least
+	// Subtracting from `blocked` is refused outright. blocked is the top class
+	// (it outranks sensitive when a PR matches both) and the hardest human
+	// gate: claude-author-automerge.yml and safe-paths-automerge.yml refuse to
+	// arm it, and no bypass label or Codex-success bypass releases it. Both
+	// lanes refuse sensitive the same way, but sensitive has one sanctioned
+	// exception — a repo's declared sensitive_deploy_gated subset, which the
+	// babysit-prs loop may merge while the deploy hold is on (ci-workflows#191
+	// proposes the same for claude-author-automerge.yml); blocked has none.
+	// It carries the secrets family ('**/.env', '**/secrets*'), Dockerfiles
+	// and deploy/. A stray '**' in an exclusion there silently un-gates all of
+	// it, and an exclusion is exactly the kind of subtraction that is easy to
+	// get subtly wrong, where deleting a blocked: entry outright is at least
 	// visible in review. No concrete need for this has appeared; per the same
 	// reasoning as the bracket and negation bans above, strictness costs
 	// nothing today. Lift this if a real case turns up.
+	//
+	// CORRECTION: from ci-workflows#145 (2026-08-07) until this rewrite, this
+	// comment and the message below said blocked "hard-fails the classify
+	// check and never bypasses". The first half was already false when
+	// written: pr-classify.yml stopped exiting non-zero on blocked in
+	// ci-workflows#21 (2026-05-02); it labels risk:blocked and posts a sticky
+	// manual-merge comment, and the check stays green. The claim nearly
+	// became the stated reason for a tier choice (wxa_webcat#1607).
+	//
+	// Choosing between blocked and sensitive for a path? Beyond the above, the
+	// difference is set by each caller — above all its pr-codex-review.yml
+	// routing, which decides whether a blocked PR gets a Codex review at all
+	// and is not uniform: a 2026-09-22 sweep of both orgs found 42 of 44
+	// callers routing blocked to Codex, while this repo's own caller and
+	// wxa_webcat's route only sensitive and standard. Read the caller's
+	// routing before choosing a tier for its review coverage. And not every
+	// merge lane reads this verdict: dependabot-auto-merge.yml never runs this
+	// classifier.
 	if (cls === 'blocked') {
 		fail(
 			`${RULES_PATH}: '${EXCLUDE_KEY}:' may not subtract from 'blocked' — it is the hardest ` +
-				`tier (hard-fails classify, never bypasses) and covers the secrets, Dockerfile and ` +
-				`deploy paths. Narrow the 'blocked:' patterns themselves if something is over-matched, ` +
-				`so the change is visible rather than subtracted.`
+				`human gate (claude-author and safe-paths automerge never arm it, and no bypass label ` +
+				`releases it) and covers the secrets, Dockerfile and deploy paths, which an over-broad ` +
+				`exclusion would silently un-gate. Narrow the 'blocked:' patterns themselves if ` +
+				`something is over-matched, so the change is visible rather than subtracted.`
 		);
 	}
 	// A scalar where a list belongs is a fail-OPEN, not a syntax error: JS
