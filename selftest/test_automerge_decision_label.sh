@@ -101,6 +101,19 @@
 #   * the decision-label run block is `${{ }}`-free (extraction-safe
 #     and injection-safe), its label read paginates, and the step sits
 #     BEFORE the always() error-revoke step (which must stay last).
+#   * every label the step can publish (each case arm, each assigned
+#     decision) carries a description that fits GitHub's 100-character
+#     label-description cap on BOTH label calls — `gh label create` and
+#     the `gh label edit` fallback that repaints an existing label —
+#     measured as each call receives it and counted in characters, not
+#     bytes. Over it, create and edit both fail silently and the add mints
+#     a bare label. Controls run through the same code: 101 chars is
+#     rejected, 100 chars / 106 bytes is accepted, and a continuation past
+#     an escaped quote, escaped quotes spelling 102 chars that evaluate to
+#     100, a desc+= after esac, and a longer edit-only description measure
+#     over, fits, over, and over on the edit alone.
+#   * refused-body, body-changed and refused-base name the re-fire (push)
+#     in their lever — the fix each asks for fires no run on its own.
 #
 # Run from the repo root:
 #   bash selftest/test_automerge_decision_label.sh
@@ -212,6 +225,169 @@ else
   echo "✗ label read does not paginate"
   failed=1
 fi
+
+# Every decision label's description must fit GitHub's 100-character cap.
+# Over it, `gh label create` AND its `gh label edit` fallback are both
+# rejected, `|| true` swallows both, and the POST that follows mints a BARE
+# label (color ededed, empty description) — so the operator contract "read
+# the label description for the lever" finds nothing. Measured 2026-09-18:
+# automerge:refused-body (114 chars) and automerge:body-changed (125) were
+# bare on every repo that had them. GitHub counts characters, not bytes
+# (refused-base, 99 chars / 101 bytes, is painted in full), while bash's
+# ${#s} counts BYTES under LC_CTYPE=C — so count UTF-8 code points
+# explicitly: drop continuation bytes (0x80-0xBF), count what is left.
+LABEL_DESC_MAX=100
+char_len() { printf '%s' "$1" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' '; }
+desc_fits() { [ "$(char_len "$1")" -le "$LABEL_DESC_MAX" ]; }
+
+# The description one of the step's two label calls hands GitHub for one
+# decision: `create`, or the `edit` fallback that repaints a label that
+# already exists (codex round 4: a create stub that always succeeded never
+# measured the edit). Runs the step's tail (its decision case block through
+# those calls) in a child bash with $decision preset and the step's own
+# `set -euo pipefail`, so quoting, escapes, line continuations and any later
+# edit (desc+=, an override after esac) all count — codex rounds 2-3 showed
+# that reading the source spelling, and counting desc= assignments, each let
+# a shape through. gh resolves to a PATH stub that records --description on
+# fd 3 (DESC_MODE=edit fails create the way the already-exists conflict
+# does); GH_TOKEN=x, an empty GH_CONFIG_DIR and no other token keep even
+# `command gh` or a full path from reaching GitHub as the operator (codex
+# round 4). Prints the value plus a trailing "." (so the caller's $(…)
+# cannot eat trailing newlines), or nothing when the call is never reached.
+mkdir -p "$T/descbin" "$T/ghconfig"
+cat > "$T/descbin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "label create") [ "${DESC_MODE:-create}" = create ] || exit 1 ;;
+  "label edit") [ "${DESC_MODE:-create}" = edit ] || exit 0 ;;
+  *) exit 0 ;;
+esac
+# gh's flag parser (pflag) keeps the LAST description, in any spelling.
+found=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --description|-d) found=1; d=${2-}; shift ;;
+    --description=*) found=1; d=${1#--description=} ;;
+    -d=*) found=1; d=${1#-d=} ;;
+    -d?*) found=1; d=${1#-d} ;;
+  esac
+  shift
+done
+[ "$found" = 1 ] && printf '%s.' "$d" >&3
+exit 0
+STUB
+chmod +x "$T/descbin/gh"
+desc_of() { # decision, step tail, create|edit
+  # -u desc/color: an arm that sets neither must not inherit a stray export.
+  env -u desc -u color -u GITHUB_TOKEN -u GH_HOST -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+    PATH="$T/descbin:$PATH" GH_TOKEN=x GH_CONFIG_DIR="$T/ghconfig" DESC_MODE="$3" decision="$1" \
+    "$BASH" -euo pipefail -c "$2" 3>&1 >/dev/null 2>&1 || true
+}
+
+# Prints "<decision> <call> <chars> fits|over" for each decision in $2 (one
+# per line) and each label call; an empty or unreached description counts
+# as over.
+measure_descs() { # step tail, decisions
+  local dec call d
+  while IFS= read -r dec; do
+    for call in create edit; do
+      d=$(desc_of "$dec" "$1" "$call")
+      d=${d%.}
+      if [ -n "$d" ] && desc_fits "$d"; then
+        echo "$dec $call $(char_len "$d") fits"
+      else
+        echo "$dec $call $(char_len "$d") over"
+      fi
+    done
+  done <<< "$2"
+}
+
+# Controls through the SAME code: an over-long string must be rejected (the
+# pin can fail at all); one exactly at the cap whose em dashes push it past
+# 100 BYTES must be accepted (the pin counts characters); and measurement
+# must see what each label call receives — a description continued past an
+# escaped quote measures over, escaped quotes that spell 102 characters but
+# evaluate to 100 fit, a 99-character description pushed to 101 by a
+# `desc+=` after esac measures over, and an edit fallback handed a longer
+# description than its create is caught on the edit alone.
+if desc_fits "$(printf '%0101d' 0)"; then
+  echo "✗ negative control: a 101-character description passed the length check — this pin cannot fail"
+  failed=1
+else
+  echo "✓ negative control: a 101-character description is rejected"
+fi
+if desc_fits "$(printf '%097d' 0)—…—"; then
+  echo "✓ boundary control: 100 characters / 106 bytes is accepted (characters, not bytes)"
+else
+  echo "✗ boundary control: a 100-character, 106-byte description was rejected — the check is counting bytes"
+  failed=1
+fi
+# read -d '' rather than $(cat <<…): bash 3.2 ends a $(…) at the first
+# unbalanced ")" inside a heredoc body — here, the case arms.
+IFS= read -r -d '' ctl_tail <<CTL || true
+case "\$decision" in
+  automerge:ctl-long)   color="000000"; desc="rewrite as \"part of #N\"
+$(printf '%0101d' 0)" ;;
+  automerge:ctl-edge)   color="000000"; desc="\"\"$(printf '%098d' 0)" ;;
+  automerge:ctl-append) color="000000"; desc="$(printf '%099d' 0)" ;;
+  automerge:ctl-edit)   color="000000"; desc="$(printf '%099d' 0)" ;;
+esac
+if [ "\$decision" = "automerge:ctl-append" ]; then desc+="xx"; fi
+edit_desc=\$desc
+if [ "\$decision" = "automerge:ctl-edit" ]; then edit_desc+="xx"; fi
+gh label create "\$decision" --color "\$color" --description "\$desc" 2>/dev/null || gh label edit "\$decision" --color "\$color" --description "\$edit_desc" >/dev/null 2>&1 || true
+CTL
+ctl=$(measure_descs "$ctl_tail" "$(printf '%s\n' automerge:ctl-long automerge:ctl-edge automerge:ctl-append automerge:ctl-edit)" | paste -sd, -) || true
+ctl_want="automerge:ctl-long create 125 over,automerge:ctl-long edit 125 over,automerge:ctl-edge create 100 fits,automerge:ctl-edge edit 100 fits,automerge:ctl-append create 101 over,automerge:ctl-append edit 101 over,automerge:ctl-edit create 99 fits,automerge:ctl-edit edit 101 over"
+if [ "$ctl" = "$ctl_want" ]; then
+  echo "✓ measurement control: descriptions are measured as each label call receives them"
+else
+  echo "✗ measurement control: expected '$ctl_want', measured '$ctl' — the pin is not measuring what gh receives"
+  failed=1
+fi
+
+# Every label the step can publish: each arm of its decision case block plus
+# each decision it assigns — any name up to the ")" or closing quote (codex
+# round 4: a narrower class silently skipped names like automerge:blocked_CI).
+# A decision with no arm reaches no label call (the step would die under
+# set -u) and fails below. The tail stops before the add (POST), which needs
+# PR/GITHUB_REPOSITORY and records nothing.
+step_tail=$(awk '/case "\$decision" in/{f=1} f && /gh api -X POST/{exit} f' "$T/decision.sh")
+arms=$(printf '%s\n' "$step_tail" | awk '/case "\$decision" in/{f=1} f{print} f && /^[[:space:]]*esac$/{exit}' | grep -oE 'automerge:[^)"|[:space:]]+\)' | tr -d ')' || true)
+chain=$(grep -oE 'decision="automerge:[^"]+"' "$T/decision.sh" | sed 's/^decision="//; s/"$//' || true)
+decisions=$(printf '%s\n%s\n' "$arms" "$chain" | sort -u)
+if [ -z "$arms" ] || [ -z "$chain" ]; then
+  echo "✗ could not enumerate the decision labels (case arms: [$arms], assigned decisions: [$chain]) — the length pin would pass vacuously"
+  failed=1
+else
+  lengths=$(measure_descs "$step_tail" "$decisions")
+  if grep -q ' over$' <<< "$lengths"; then
+    while read -r label call n verdict; do
+      if [ "$verdict" = "over" ] && [ "$n" = "0" ]; then
+        echo "✗ $label: no description reaches gh label $call (empty, or the step errors first) — the label would mint bare"
+      elif [ "$verdict" = "over" ]; then
+        echo "✗ $label: gh label $call gets a $n-character description — GitHub rejects > $LABEL_DESC_MAX, so the label mints bare"
+      fi
+    done <<< "$lengths"
+    failed=1
+  else
+    echo "✓ all $(grep -c . <<< "$decisions") decision-label descriptions fit GitHub's $LABEL_DESC_MAX-character cap on both gh label create and its edit fallback"
+  fi
+fi
+
+# The stand-downs that a fix alone cannot re-fire must say so in their lever:
+# a body edit or a base retarget fires only `pull_request: edited`, which no
+# caller subscribes to, so "rewrite the body" on its own leaves the PR
+# unarmed under a stale label (codex round 2 + independent review — the
+# refused-body lever had dropped the push that its sticky comment names).
+for arm in automerge:refused-body automerge:body-changed automerge:refused-base; do
+  d=$(desc_of "$arm" "$step_tail" create)
+  d=${d%.}
+  case "$d" in
+    *push*) echo "✓ $arm names the re-fire (push) in its lever" ;;
+    *) echo "✗ $arm lever does not name a re-fire — the fix it asks for fires no workflow run on its own: '$d'"; failed=1 ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------
 # 0c. Stubs. `gh` dispatches on argv and logs every call. Knobs (env):
