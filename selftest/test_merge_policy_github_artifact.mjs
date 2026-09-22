@@ -32,7 +32,7 @@ const zipURL = `${artifactURL}/zip`;
 const signedURL = `${origin}/archive.zip?opaque=signed-test`;
 const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
-function run() {
+function run(base = now) {
   return {
     id: 101,
     workflow_id: 21,
@@ -46,21 +46,21 @@ function run() {
     path: ".github/workflows/review.yml",
     referenced_workflows: [],
     pull_requests: [],
-    created_at: iso(now - 100000),
-    updated_at: iso(now - 10000),
-    run_started_at: iso(now - 50000),
+    created_at: iso(base - 100000),
+    updated_at: iso(base - 10000),
+    run_started_at: iso(base - 50000),
   };
 }
-function artifact() {
+function artifact(base = now) {
   return {
     id: 301,
     name: "review.json",
     size_in_bytes: archive.length,
     digest: `sha256:${hash(archive)}`,
     expired: false,
-    created_at: iso(now - 40000),
-    updated_at: iso(now - 20000),
-    expires_at: iso(now + 3600000),
+    created_at: iso(base - 40000),
+    updated_at: iso(base - 20000),
+    expires_at: iso(base + 3600000),
     workflow_run: {
       id: 101,
       repository_id: 11,
@@ -94,6 +94,7 @@ function fixture(options = {}) {
     producer: options.producer ?? producer(),
     downloadOrigins: options.origins ?? [origin],
     fetchImpl,
+    now: options.now,
     tokenProvider: async (request) => {
       credentialCalls++;
       assert.equal(request.repositoryId, 11);
@@ -556,6 +557,63 @@ for (const change of ["deleted", "expired", "digest", "updated", "binding"]) {
     );
   });
 }
+// The shadow suite's fixture clock. Its artifacts expire an hour later, at
+// 13:00Z, an instant the real clock passed long ago: a client that reads the
+// real clock instead of the injected one refuses every one of them.
+const frozen = Date.parse("2026-09-20T12:00:00Z");
+const frozenFacts = ({ url }) => {
+  if (url === runURL || url === attemptURL) return json(run(frozen));
+  if (url === artifactURL) return json(artifact(frozen));
+};
+test("expiry is read on the injected clock: live at it is accepted though the real clock is past it", async () => {
+  const f = fixture({ respond: frozenFacts, now: () => new Date(frozen) });
+  const read = await f.client.read(selector());
+  assert.equal(read.artifact.expiresAt, "2026-09-20T13:00:00Z");
+  const recheck = await f.client.recheck(selector());
+  assert.equal(recheck.artifact.expiresAt, "2026-09-20T13:00:00Z");
+  // Control: on the default clock, the real one, the same artifact is refused,
+  // so the injected clock is what admitted it above.
+  await fails(fixture({ respond: frozenFacts }).client, "artifact_expired");
+});
+test("expiry is read on the injected clock: expired at it is refused though the real clock is short of it", async () => {
+  // artifact() expires an hour after this suite loaded; this clock reads two.
+  const f = fixture({ now: () => new Date(now + 7200000) });
+  await fails(f.client, "artifact_expired");
+  await recheckFails(f.client, "artifact_expired");
+  // Control: on the real clock the same artifact is still live.
+  const live = await fixture().client.read(selector());
+  assert.equal(live.artifact.expiresAt, iso(now + 3600000));
+});
+test("expiry is read on the injected clock: expiring during the download is refused by the fresh re-read", async () => {
+  let clock = frozen;
+  const f = fixture({
+    now: () => new Date(clock),
+    respond: ({ url }) => {
+      if (url !== signedURL) return frozenFacts({ url });
+      clock = frozen + 7200000;
+      return new Response(archive);
+    },
+  });
+  await fails(f.client, "artifact_expired");
+  // Live at the first read; refused only by the re-read after the download.
+  assert.deepEqual(
+    f.calls.map((call) => call.url),
+    [runURL, attemptURL, artifactURL, zipURL, signedURL, runURL, artifactURL],
+  );
+});
+test("a clock that is not a function is refused at construction, and a broken one fails closed", async () => {
+  for (const bad of [null, 5, "now"])
+    assert.throws(() => fixture({ now: bad }), { code: "invalid_input" });
+  // Coerced to a number, null would read as the epoch and every artifact as live.
+  for (const [clock, code] of [
+    [() => null, "read_failed"],
+    [() => Date.now(), "read_failed"],
+    [() => new Date(NaN), "artifact_expired"],
+  ]) {
+    await fails(fixture({ now: clock }).client, code);
+    await recheckFails(fixture({ now: clock }).client, code);
+  }
+});
 for (const [location, code] of [
   [
     "https://artifacts.example.test.attacker.test/x?secret=signed",
