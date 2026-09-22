@@ -24,7 +24,7 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    the workflow file at `.github/workflows/merge-policy-review-dispatch.yml`
    from the template, with the job condition's repository literals for that
    repository; the entrypoint and its imports at the same commit; the tag
-   `merge-policy-review-v3` on that commit; rulesets that forbid updating or
+   `merge-policy-review-v4` on that commit; rulesets that forbid updating or
    deleting the tag and creating a same-name branch (the v2 packet procedure);
    the secret `MERGE_POLICY_REVIEW_API_KEY`. Node is pinned in the template
    and load-bearing: the entrypoint's `import.meta.main` guard needs Node
@@ -60,6 +60,14 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    `invalid_target` — "the approved producer source is never one of the commits
    under review". Any commit clears it; the producer's own documentation is a
    good one.
+7. **Upgrading an installed producer to a new tag** (Stage A moved from `v3` to
+   `v4` for the reviewer's schema fix): install the new source at one commit as
+   in step 2 — the same workflow path keeps the same `workflowId` — tag it, then
+   land another commit per step 6. Switch the producers entry's
+   `workflowRevision` to the tagged commit only then; that edit changes the
+   authority digest. Until the switch, cycles from `main` pass
+   `--workflow-ref refs/tags/merge-policy-review-v3` and keep using the old tag,
+   whose own workflow copy still runs; the driver defaults to the new ref.
 
 ## One cycle
 

@@ -14,7 +14,7 @@ import {
   reviewProducerFailure,
 } from "./merge-policy-review-producer.mjs";
 
-export const REVIEW_DISPATCH_REF = "refs/tags/merge-policy-review-v3";
+export const REVIEW_DISPATCH_REF = "refs/tags/merge-policy-review-v4";
 export const REVIEW_DISPATCH_WORKFLOW_PATH =
   ".github/workflows/merge-policy-review-dispatch.yml";
 export const REVIEW_DISPATCH_LANE = "shadow";
