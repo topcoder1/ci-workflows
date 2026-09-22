@@ -254,18 +254,22 @@ for (const cls of Object.keys(excludeRules)) {
 	// merge while the deploy hold is on (commands/babysit-prs.md,
 	// operator-authorised 2026-09-10; ci-workflows#191 proposes the same for
 	// claude-author-automerge.yml); blocked has none. dependabot-auto-merge.yml
-	// does not read this verdict at all: it arms Dependabot patch bumps (and
-	// minor ones where the caller opts in) outside the github_actions
-	// ecosystem, so a Dependabot Dockerfile bump can merge with no human
-	// (whois-api-llc/techrecon#952, risk:blocked, 2026-08-28).
+	// does not read this verdict at all: it arms Dependabot patch and minor
+	// bumps outside the github_actions ecosystem (minor unless the caller sets
+	// allow_minor: false), so a Dependabot Dockerfile bump can merge with no
+	// human (whois-api-llc/techrecon#952, a minor golang bump, risk:blocked,
+	// 2026-08-28).
 	//
-	// blocked carries the secrets family ('**/.env', '**/secrets*'),
-	// Dockerfiles and deploy/. A stray '**' in an exclusion there silently
-	// un-gates all of it, and an exclusion is exactly the kind of subtraction
-	// that is easy to get subtly wrong, where deleting a blocked: entry
-	// outright is at least visible in review. No concrete need for this has
-	// appeared; per the same reasoning as the bracket and negation bans above,
-	// strictness costs nothing today. Lift this if a real case turns up.
+	// A typical blocked: list carries the secrets family ('**/.env*',
+	// '**/secrets*'), Dockerfiles and docker-compose, CI workflows, the
+	// classifier config itself and infra/, terraform/, k8s/ — the set
+	// pr-classify.yml's sticky comment names. A stray '**' in an exclusion
+	// there silently un-gates all of it, and an exclusion is exactly the kind
+	// of subtraction that is easy to get subtly wrong, where deleting a
+	// blocked: entry outright is at least visible in review. No concrete need
+	// for this has appeared; per the same reasoning as the bracket and
+	// negation bans above, strictness costs nothing today. Lift this if a real
+	// case turns up.
 	//
 	// CORRECTION: from ci-workflows#145 (2026-08-07) until this rewrite, this
 	// comment and the message below said blocked "hard-fails the classify
@@ -275,7 +279,7 @@ for (const cls of Object.keys(excludeRules)) {
 	// manual-merge comment, and the check stays green. The second half holds
 	// only for the lanes that read this verdict (see dependabot above). The
 	// claim surfaced while choosing a tier in wxa_webcat#1607, whose final
-	// reasoning rests on Codex routing instead.
+	// reasoning rests on precedent and Codex routing instead.
 	//
 	// Choosing between blocked and sensitive for a path? Beyond the above, the
 	// difference is set by each caller — above all its pr-codex-review.yml,
@@ -288,9 +292,9 @@ for (const cls of Object.keys(excludeRules)) {
 	if (cls === 'blocked') {
 		fail(
 			`${RULES_PATH}: '${EXCLUDE_KEY}:' may not subtract from 'blocked' — it is the top class and ` +
-				`covers the secrets, Dockerfile and deploy paths, which an over-broad exclusion would ` +
-				`silently un-gate. Narrow the 'blocked:' patterns themselves if something is over-matched, ` +
-				`so the change is visible rather than subtracted.`
+				`covers the secrets, Dockerfile, workflow and infra paths, which an over-broad exclusion ` +
+				`would silently un-gate. Narrow the 'blocked:' patterns themselves if something is ` +
+				`over-matched, so the change is visible rather than subtracted.`
 		);
 	}
 	// A scalar where a list belongs is a fail-OPEN, not a syntax error: JS
