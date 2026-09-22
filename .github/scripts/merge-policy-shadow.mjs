@@ -27,7 +27,10 @@ import { pathToFileURL } from "node:url";
 
 import { extractReviewReceipt } from "./merge-policy-artifact-zip.mjs";
 import { GitHubAPI, PolicyController } from "./merge-policy-github.mjs";
-import { createGitHubArtifactClient } from "./merge-policy-github-artifact.mjs";
+import {
+  assertDownloadOrigins,
+  createGitHubArtifactClient,
+} from "./merge-policy-github-artifact.mjs";
 import {
   createIntakeReaders,
   prefetchReviewReceipt,
@@ -64,8 +67,6 @@ export const REFUSALS = Object.freeze([
 ]);
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
 const TAG_REF = /^refs\/tags\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const ORIGIN =
-  /^https:\/\/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
 export class ShadowError extends Error {
   constructor(code, detail) {
@@ -513,12 +514,13 @@ export async function runShadowCycle(deps, options) {
     logPath,
   } = options;
   requireThat(TAG_REF.test(workflowRef), "invalid_workflow_ref");
-  requireThat(
-    Array.isArray(downloadOrigins) &&
-      downloadOrigins.length > 0 &&
-      downloadOrigins.every((origin) => ORIGIN.test(origin)),
-    "invalid_download_origins",
-  );
+  // The artifact client's own rules, checked here so a bad list fails before
+  // the dispatch is paid for rather than after.
+  try {
+    assertDownloadOrigins(downloadOrigins);
+  } catch {
+    throw new ShadowError("invalid_download_origins");
+  }
   const startedAt = now();
   const entry = {
     schemaVersion: 1,

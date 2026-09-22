@@ -318,6 +318,13 @@ function fakeFetch(api, { receiptFor, report, state }) {
   // Artifact ids are fixed per cycle in this fake; each belongs to the run
   // the cycle dispatched, which is the newest run the API answered with.
   const currentRun = () => api.runs.at(-1)?.id ?? 101;
+  // The client checks expiry against the real clock
+  // (merge-policy-github-artifact.mjs: expires_at > Date.now()), so this field
+  // cannot come from the fixture's frozen clock — pinning it there made the
+  // whole suite fail from the day after that date. It is computed ONCE per
+  // fixture: read() fetches the artifact twice and compares the two, and a
+  // per-fetch value straddling a second boundary reads as a changed artifact.
+  const expiresAt = iso(Date.now() + 3600000);
   const artifact = (id) => {
     const entry = archives(currentRun()).get(id);
     return {
@@ -328,7 +335,7 @@ function fakeFetch(api, { receiptFor, report, state }) {
       expired: false,
       created_at: iso(api.clock.t - 40000),
       updated_at: iso(api.clock.t - 20000),
-      expires_at: iso(api.clock.t + 3600000),
+      expires_at: expiresAt,
       workflow_run: {
         id: currentRun(),
         repository_id: 11,
@@ -735,6 +742,7 @@ test("dispatch records are exclusive, validated and never overwritten", async (t
     () => readDispatchRecord(join(directory, "..", "missing.json")),
     /ENOENT/,
   );
+  let minute = 0;
   for (const bad of [
     { ...record, kind: "other" },
     {
@@ -747,7 +755,8 @@ test("dispatch records are exclusive, validated and never overwritten", async (t
   ]) {
     const badPath = writeDispatchRecord(directory, {
       ...bad,
-      dispatchedAt: `2026-09-20T12:0${Math.floor(Math.random() * 10)}:${String(Math.floor(Math.random() * 60)).padStart(2, "0")}Z`,
+      // Distinct by construction: random stamps collided about one run in 60.
+      dispatchedAt: `2026-09-20T13:${String(++minute).padStart(2, "0")}:00Z`,
     });
     assert.throws(
       () => readDispatchRecord(badPath),
@@ -817,6 +826,10 @@ test("cycle options are validated before any request", async (t) => {
     { downloadOrigins: [] },
     { downloadOrigins: ["http://insecure.example"] },
     { downloadOrigins: ["https://host.example/path"] },
+    // The family form is the client's; malformed ones fail here, unpaid.
+    { downloadOrigins: ["https://*.blob.core.windows.net"] },
+    { downloadOrigins: ["https://productionresultssa*blob.core.windows.net"] },
+    { downloadOrigins: ["https://productionresultssa*.blob.*.windows.net"] },
   ]) {
     await assert.rejects(
       runShadowCycle(f.deps, { ...f.cycleOptions, ...patch }),
@@ -1022,4 +1035,26 @@ test("a log that cannot be written at all leaves the cycle's entry intact with t
   assert.equal(entry.failure, null);
   assert.equal(existsSync(join(blocker, "shadow.jsonl")), false);
   assert.equal(f.api.value(ledgerPath).events.at(-1).type, "review");
+});
+
+test("the family origin the runbook documents drives a whole cycle to a recorded intake", async (t) => {
+  // SHADOW-MODE.md tells the operator to pass this exact string. The driver once
+  // refused it with its own stricter origin regex while the client accepted
+  // it, so every documented cycle would have failed before dispatch; no test
+  // drove the family form through a cycle.
+  const f = fixture(t);
+  const entry = await runShadowCycle(f.deps, {
+    ...f.cycleOptions,
+    downloadOrigins: ["https://productionresultssa*.blob.core.windows.net"],
+  });
+  assert.equal(entry.refusal, null);
+  assert.equal(entry.failure, null);
+  assert.equal(entry.intake.outcome, "recorded");
+  assert.equal(entry.verdict.decision, "pass");
+  // The fake storage host is sa12, a member of the family.
+  assert.ok(
+    f.fetch.calls.some(({ url }) =>
+      url.startsWith("https://productionresultssa12.blob.core.windows.net/"),
+    ),
+  );
 });

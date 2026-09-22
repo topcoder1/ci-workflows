@@ -40,14 +40,26 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    intake.
 4. The download origin list. Artifact archives redirect to numbered Azure
    storage hosts; the one observed on 2026-09-17 was
-   `https://productionresultssa12.blob.core.windows.net`. Pass every origin
-   seen so far with `--download-origin`. A cycle failing with
-   `untrusted_download_origin` met one not listed; the cycle never prints it
-   (the redirect target is untrusted input), so read the `Location` header
-   from `gh api -i repos/<producer>/actions/artifacts/<id>/zip`, add the
-   origin, rerun. Adding it is an intervention.
+   `https://productionresultssa*.blob.core.windows.net` — pass exactly that,
+   star included. GitHub picks one of a pool of numbered storage hosts per
+   artifact (sa3, sa12, sa14 and sa16 all appeared within five consecutive runs
+   of one workflow), so naming them one at a time does not work: the list is
+   capped at eight entries and the pool is wider. A single `*` in an origin
+   stands for one to three digits at the end of the first host label and nothing
+   else, so it widens the allowlist across that one family and no further. A
+   cycle that still fails `untrusted_download_origin` met a host outside the
+   family; the cycle never prints it (the redirect target is untrusted input),
+   so read the `Location` header from
+   `gh api -i repos/<producer>/actions/artifacts/<id>/zip`. Adding an origin is
+   an intervention.
 5. A log location per the plan: `docs/audits/merge-policy-shadow-<start-date>/`
    in techrecon, holding `shadow.jsonl` and the `dispatch/` records.
+6. **Land at least one more commit on `main` before the first cycle.** The tag is
+   cut at `main`'s head, so until `main` moves, every new pull request's base _is_
+   the producer's own source commit and the entrypoint refuses the dispatch with
+   `invalid_target` — "the approved producer source is never one of the commits
+   under review". Any commit clears it; the producer's own documentation is a
+   good one.
 
 ## One cycle
 
@@ -55,7 +67,7 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
 node .github/scripts/merge-policy-shadow.mjs cycle \
   --repo topcoder1/techrecon-merge-policy-staging --pr <N> \
   --control-repo <owner>/<control> --producer shadow \
-  --download-origin https://productionresultssa12.blob.core.windows.net \
+  --download-origin 'https://productionresultssa*.blob.core.windows.net' \
   --dispatch-dir <audit-dir>/dispatch --log <audit-dir>/shadow.jsonl
 ```
 

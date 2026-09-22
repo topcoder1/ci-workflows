@@ -122,6 +122,66 @@ function storageURL(value) {
   );
   return url;
 }
+const REGEXP_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
+const quoted = (text) => text.replace(REGEXP_METACHARACTERS, "\\$&");
+/** One allowed download origin: an exact origin, or a numbered host family.
+ *
+ * GitHub serves an artifact archive from a pool of numbered storage hosts and
+ * picks one per artifact — productionresultssa3, sa12, sa14 and sa16 were all
+ * observed within five consecutive runs of one workflow — so an exact list
+ * cannot name them. An entry may therefore carry a single "*" standing for one
+ * to three digits at the end of the first host label:
+ *
+ *   https://productionresultssa*.blob.core.windows.net
+ *
+ * The star never spans a label separator, a scheme or a path, and never stands
+ * for the whole label, so it can only ever widen the allowlist across that one
+ * numbered family — never to another host, domain or suffix. */
+function originMatcher(value) {
+  const star = typeof value === "string" ? value.indexOf("*") : -1;
+  if (star === -1) {
+    const url = storageURL(value);
+    requireThat(value === url.origin, "invalid_input");
+    return Object.freeze({
+      source: value,
+      matches: (origin) => origin === value,
+    });
+  }
+  requireThat(value.indexOf("*", star + 1) === -1, "invalid_input");
+  const prefix = value.slice(0, star);
+  const suffix = value.slice(star + 1);
+  const sample = `${prefix}0${suffix}`;
+  const url = storageURL(sample);
+  const label = prefix.slice("https://".length);
+  requireThat(
+    sample === url.origin &&
+      prefix.startsWith("https://") &&
+      // The star ends the first label: it neither replaces a whole label nor
+      // reaches across a separator into the domain beneath it.
+      label.length > 0 &&
+      !label.includes(".") &&
+      suffix.startsWith(".") &&
+      suffix.length > 1,
+    "invalid_input",
+  );
+  const pattern = new RegExp(`^${quoted(prefix)}[0-9]{1,3}${quoted(suffix)}$`);
+  return Object.freeze({
+    source: value,
+    matches: (origin) => pattern.test(origin),
+  });
+}
+/** Refuse a download-origin list the client itself would refuse, before any
+ * request is made. The one validator: callers must not keep a second copy of
+ * these rules, which is how a driver once refused the family form this client
+ * accepts. */
+export function assertDownloadOrigins(value) {
+  try {
+    originsCopy(value);
+  } catch (error) {
+    if (error instanceof ArtifactError) throw error;
+    throw new ArtifactError("invalid_input");
+  }
+}
 function originsCopy(value) {
   requireThat(
     Array.isArray(value) &&
@@ -135,21 +195,22 @@ function originsCopy(value) {
     Reflect.ownKeys(descriptors).length === value.length + 1,
     "invalid_input",
   );
-  const origins = new Set();
+  const matchers = [];
+  const sources = new Set();
   for (let index = 0; index < value.length; index++) {
     const descriptor = descriptors[index];
     requireThat(
       descriptor?.enumerable && Object.hasOwn(descriptor, "value"),
       "invalid_input",
     );
-    const url = storageURL(descriptor.value);
-    requireThat(
-      descriptor.value === url.origin && !origins.has(url.origin),
-      "invalid_input",
-    );
-    origins.add(url.origin);
+    const matcher = originMatcher(descriptor.value);
+    requireThat(!sources.has(matcher.source), "invalid_input");
+    sources.add(matcher.source);
+    matchers.push(matcher);
   }
-  return origins;
+  return Object.freeze({
+    matches: (origin) => matchers.some((matcher) => matcher.matches(origin)),
+  });
 }
 function date(value) {
   requireThat(
@@ -275,6 +336,20 @@ function same(left, right) {
     JSON.stringify(left) === JSON.stringify(right),
     "metadata_changed",
   );
+}
+/** The attempt's record against the run's, ignoring when each was last written.
+ *
+ * GitHub keeps one record for the run and another for the attempt and stamps
+ * their updated_at independently: the two can settle a second apart and stay
+ * that way permanently (observed live, run 35472012579, 2026-09-19). That field
+ * says when a record was last touched, not which execution it describes, so the
+ * attempt cannot be asked to corroborate it. Everything that does identify or
+ * authorize the run — id, attempt, repository, workflow, revision, event, path,
+ * status and conclusion — is still compared, and a later re-read of the run's
+ * own endpoint still compares the field against itself. */
+function sameExecution(left, right) {
+  const execution = ({ updatedAt, ...rest }) => rest;
+  same(execution(left), execution(right));
 }
 function deadlineScope(signal, milliseconds) {
   const controller = new AbortController();
@@ -562,7 +637,7 @@ export function createGitHubArtifactClient({
         ? await currentTagRef()
         : undefined;
       const run = runFacts(await metadata(runURL), trustedProducer, selector);
-      same(
+      sameExecution(
         runFacts(await metadata(attemptURL), trustedProducer, selector),
         run,
       );
@@ -615,7 +690,7 @@ export function createGitHubArtifactClient({
             try {
               location = storageURL(archiveResponse.headers.get("location"));
               requireThat(
-                origins.has(location.origin),
+                origins.matches(location.origin),
                 "untrusted_download_origin",
               );
             } finally {
