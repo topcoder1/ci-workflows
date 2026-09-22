@@ -468,8 +468,8 @@ async function bytes(response, maximum, scope) {
 }
 
 /** No I/O before read(). tokenProvider, fetchImpl and now must themselves be
- * trusted. now() is the caller's clock (default: the real one) and the only
- * one artifact expiry is judged on.
+ * trusted. now() returns a Date from the caller's clock (default: the real
+ * one), the only clock artifact expiry is judged on.
  * fetchImpl must follow native Node fetch's decoded-response stream contract.
  * Supported HTTP content codings are identity, gzip, deflate and br (one only).
  * Optional producer.workflowRef supports a current lightweight-tag snapshot,

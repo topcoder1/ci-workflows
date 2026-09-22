@@ -584,6 +584,23 @@ test("expiry is read on the injected clock: expired at it is refused though the 
   const live = await fixture().client.read(selector());
   assert.equal(live.artifact.expiresAt, iso(now + 3600000));
 });
+test("expiry is read on the injected clock: expiring during the download is refused by the fresh re-read", async () => {
+  let clock = frozen;
+  const f = fixture({
+    now: () => new Date(clock),
+    respond: ({ url }) => {
+      if (url !== signedURL) return frozenFacts({ url });
+      clock = frozen + 7200000;
+      return new Response(archive);
+    },
+  });
+  await fails(f.client, "artifact_expired");
+  // Live at the first read; refused only by the re-read after the download.
+  assert.deepEqual(
+    f.calls.map((call) => call.url),
+    [runURL, attemptURL, artifactURL, zipURL, signedURL, runURL, artifactURL],
+  );
+});
 test("a clock that is not a function is refused at construction, and a broken one fails closed", async () => {
   for (const bad of [null, 5, "now"])
     assert.throws(() => fixture({ now: bad }), { code: "invalid_input" });
