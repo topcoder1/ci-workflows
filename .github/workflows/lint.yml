@@ -54,9 +54,16 @@ name: Lint
 #     every existing `run:` block in the target repo. New repos rarely need
 #     to fix all of those before they can ship a single PR. Set
 #     `run_shellcheck: true` to opt in once the repo is normalized.
-#   - prettier auto-installs the target repo's deps if a package.json exists,
-#     so prettier plugins (prettier-plugin-svelte etc.) resolve correctly.
-#     Skip with `install_node_deps: false` for plain markdown-only repos.
+#   - prettier NEVER loads config or plugins the PR head can influence. On a
+#     pull_request the checked-out merge ref carries head content, and
+#     prettier's default search would EXECUTE a head prettier.config.js /
+#     .prettierrc.cjs / package.json "prettier" ref. So the check runs
+#     `--config <file>` taken from the BASE branch only (an empty {} when the
+#     base declares none — which still honors .editorconfig), installs its own
+#     prettier off-checkout, and never runs `npm ci` in the checkout. This is
+#     byte-identical to prettier-autofix.yml (drift-checked), so the check and
+#     the auto-fixer agree. `install_node_deps` is now a no-op. A base config
+#     that is JS/TS or names plugins degrades to {} + a ::warning::.
 #   - prettier runs on pull_request events ONLY. Push events (including
 #     post-merge push:main) skip prettier entirely. Rationale: prettier on
 #     push:main provides zero value (the merge already landed) and creates a
@@ -122,7 +129,13 @@ on:
         type: boolean
         default: false
       install_node_deps:
-        description: "Run `npm ci` before prettier so plugins (prettier-plugin-svelte etc.) resolve. Default true. Skipped automatically when no package.json present."
+        description: >-
+          DEPRECATED / no-op, kept so existing callers that pass it do not
+          error. The prettier check no longer installs the PR head's
+          dependencies: the head is untrusted, so prettier runs with
+          base-branch config only and loads no plugins from the head. The
+          prettier CLI is installed off-checkout with a pinned registry. This
+          input is ignored.
         required: false
         type: boolean
         default: true
@@ -300,37 +313,189 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          # SECURITY: on a pull_request event the checked-out tree (the merge
+          # ref) contains the attacker-/model-writable head content, and the
+          # steps below run prettier over it. Do not persist the token into
+          # .git/config, and fetch full history so the base branch's config is
+          # resolvable locally (fetch-depth:0 lands origin/<base> + base.sha
+          # without a credentialed re-fetch). See "Resolve base prettier config"
+          # below — this check never loads config or plugins the head can
+          # influence, mirroring prettier-autofix.yml.
+          persist-credentials: false
+          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-          # `actions/setup-node` looks for the lock file at the repo root unless
-          # `cache-dependency-path` is provided. `**/package-lock.json` matches
-          # subdir lock files (e.g. `frontend/package-lock.json`) and would
-          # cause setup-node to fail with "Dependencies lock file is not found"
-          # when the root has no lock. Restrict to root files only.
-          cache: ${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock') != '' && 'npm' || '' }}
 
-      # If the target repo has a prettier config that references plugins
-      # (e.g. prettier-plugin-svelte), prettier needs the project's
-      # node_modules to resolve them. Run `npm ci` (preferred, exact lockfile)
-      # or fall back to `npm install` if no lockfile.
-      # Only fire when a ROOT package.json exists. `**/package.json` matches
-      # subdir packages (e.g. `frontend/package.json`) and triggers npm
-      # install at the repo root where there's no package.json — which
-      # ENOENTs intermittently depending on npm version + cache state.
-      # Repos with prettier plugins have a root package.json by definition;
-      # subdir-only repos fall through to `npx --yes prettier@3` in the
-      # run step and behave identically.
-      - name: Install target repo's deps (for prettier plugins)
-        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('package.json') != '' }}
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --ignore-scripts --no-audit --no-fund
-          else
-            npm install --ignore-scripts --no-audit --no-fund
-          fi
+      # Base-only prettier config + an off-checkout prettier CLI. These two
+      # steps are BYTE-IDENTICAL to prettier-autofix.yml's (the write lane), so
+      # `prettier --check` here and `prettier --write` there resolve config the
+      # same way — otherwise autofix would "fix" a file the check still rejects.
+      # selftest/test_lint_prettier_check_untrusted_head.sh drift-checks the two
+      # copies; keep them in sync when changing either. (The "prettier-autofix:"
+      # log strings are the shared block's, deliberately unchanged so the drift
+      # check stays a byte comparison.)
+      - name: Resolve base prettier config
+        id: baseconfig
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Base commit from the event (GitHub-set, not head-controllable);
+          # verified local before use. Falls back to the base ref if absent.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         shell: bash
+        run: |
+          set -euo pipefail
+
+          config_mode="empty"
+          config_file=
+          prettier_spec=3
+          emit() {
+            {
+              echo "config_mode=${config_mode}"
+              echo "config_file=${config_file}"
+              echo "prettier_spec=${prettier_spec}"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # Default config: an empty object materialized off-checkout. Like
+          # --no-config it suppresses prettier's head-config search — no head
+          # prettier.config.js / .prettierrc.cjs / package.json "prettier" ref
+          # is loaded — but UNLIKE --no-config it still honors the repo's
+          # .editorconfig, which keeps output byte-identical to lint.yml's
+          # `prettier --check` and to prettier's pre-hardening default search.
+          # (.editorconfig is data-only INI: indent/width/eol/charset; it cannot
+          # execute code.) A usable BASE config replaces this file below.
+          dest="${RUNNER_TEMP:-$PWD}/prettier-autofix-base-config"
+          printf '%s\n' '{}' > "${dest}.empty.json"
+          config_file="${dest}.empty.json"
+
+          # Resolve the base commit. Prefer the event's base.sha (set by GitHub,
+          # not the head) — after a fetch-depth:0 checkout its object is local.
+          # Fall back to the base remote-tracking ref, then a shallow fetch.
+          # BASE_SHA can be preset (selftest) to bypass all git plumbing.
+          BASE_SHA="${BASE_SHA:-}"
+          if [ -n "$BASE_SHA" ] && ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA=""
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA="$(git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF" >/dev/null 2>&1 || true
+            BASE_SHA="$(git rev-parse --verify --quiet "FETCH_HEAD^{commit}" || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            echo "::warning::prettier-autofix: could not resolve base ref '${BASE_REF}'; formatting with prettier defaults (empty config, editorconfig honored)."
+            emit; exit 0
+          fi
+
+          show() { git show "${BASE_SHA}:$1" 2>/dev/null; }
+          have() { git cat-file -e "${BASE_SHA}:$1" 2>/dev/null; }
+
+          # Optional: pin prettier to whatever version the BASE declares, so
+          # autofix and the base's own lint check agree. Never read the head's.
+          if have package.json; then
+            v="$(show package.json | node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{
+                const p=JSON.parse(s),d={...p.dependencies,...p.devDependencies};
+                process.stdout.write(String(d.prettier||""));
+              }catch(e){}})' 2>/dev/null || true)"
+            case "$v" in
+              ""|latest|next) : ;;
+              *) if printf '%s' "$v" | grep -Eq '^[0-9A-Za-z.^~*<>=| -]+$'; then
+                   prettier_spec="$v"
+                 fi ;;
+            esac
+          fi
+
+          # A standalone root config file wins over a package.json key.
+          found=
+          for name in \
+            .prettierrc .prettierrc.json .prettierrc.json5 .prettierrc.yaml \
+            .prettierrc.yml .prettierrc.toml .prettierrc.js .prettierrc.cjs \
+            .prettierrc.mjs .prettierrc.ts .prettierrc.cts .prettierrc.mts \
+            prettier.config.js prettier.config.cjs prettier.config.mjs \
+            prettier.config.ts prettier.config.cts prettier.config.mts; do
+            if have "$name"; then found="$name"; break; fi
+          done
+
+          if [ -n "$found" ]; then
+            case "$found" in
+              *.js | *.cjs | *.mjs | *.ts | *.cts | *.mts)
+                echo "::warning::prettier-autofix: base prettier config '${found}' is executable (JS/TS); not loaded. Formatting with an empty config (editorconfig honored). Convert it to a data config (.prettierrc.json/.yaml/.toml) to have autofix honor it."
+                emit; exit 0 ;;
+              *)
+                body="$(show "$found" || true)"
+                if printf '%s' "$body" | grep -q 'plugins'; then
+                  echo "::warning::prettier-autofix: base prettier config '${found}' declares plugins; plugin code is not loaded. Formatting with an empty config (editorconfig honored)."
+                  emit; exit 0
+                fi
+                ext="${found##*.}"
+                case "$found" in .prettierrc) ext="json" ;; esac
+                config_file="${dest}.${ext}"
+                printf '%s' "$body" > "$config_file"
+                echo "prettier-autofix: using base config '${found}'."
+                config_mode="base"
+                emit; exit 0 ;;
+            esac
+          fi
+
+          # Fall back to a package.json "prettier" key (object only; a string
+          # is a module ref = executable, refused).
+          if have package.json; then
+            kind="$(show package.json | PKG_CFG_DEST="${dest}.json" node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{
+                const p=JSON.parse(s);
+                if(!("prettier" in p)){process.stdout.write("none");return;}
+                const v=p.prettier;
+                if(typeof v==="string"){process.stdout.write("string");return;}
+                const j=JSON.stringify(v);
+                if(/plugins/.test(j)){process.stdout.write("plugins");return;}
+                require("fs").writeFileSync(process.env.PKG_CFG_DEST,j);
+                process.stdout.write("object");
+              }catch(e){process.stdout.write("none")}})' 2>/dev/null || echo none)"
+            case "$kind" in
+              object)
+                config_mode="base"; config_file="${dest}.json"
+                echo "prettier-autofix: using base config from package.json \"prettier\" key." ;;
+              string)
+                echo "::warning::prettier-autofix: base package.json \"prettier\" points to a module (executable); not loaded. Formatting with an empty config (editorconfig honored)." ;;
+              plugins)
+                echo "::warning::prettier-autofix: base package.json \"prettier\" declares plugins; plugin code is not loaded. Formatting with an empty config (editorconfig honored)." ;;
+              *) : ;;
+            esac
+          fi
+
+          emit
+
+      # Install the prettier CLI OUTSIDE the checkout so the head's
+      # package.json and .npmrc are never read: pinned registry (a head .npmrc
+      # cannot redirect it), --ignore-scripts (no lifecycle code), neutralized
+      # npm user-config, and the base-pinned version. No `npm ci` in the
+      # checkout, and no head-controlled node_modules/.bin/prettier.
+      - name: Install prettier (isolated from PR head)
+        id: ptool
+        env:
+          PRETTIER_SPEC: ${{ steps.baseconfig.outputs.prettier_spec || '3' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="${RUNNER_TEMP:?RUNNER_TEMP is not set}/prettier-autofix-tool"
+          mkdir -p "$DIR"
+          # Block ~/.npmrc and the project .npmrc; the checkout is never the CWD
+          # of this install, and the registry is pinned explicitly.
+          export NPM_CONFIG_USERCONFIG=/dev/null
+          ( cd "$RUNNER_TEMP" &&
+            npm install --prefix "$DIR" --no-save --no-audit --no-fund \
+              --ignore-scripts --registry=https://registry.npmjs.org/ \
+              "prettier@${PRETTIER_SPEC:-3}" )
+          BIN="$DIR/node_modules/.bin/prettier"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::prettier-autofix: prettier install failed"; exit 1
+          fi
+          echo "prettier_bin=$BIN" >> "$GITHUB_OUTPUT"
 
       # Decide what files prettier should check. Three modes:
       #   - mode=glob   → existing behavior, run prettier --check "$GLOB"
@@ -503,33 +668,47 @@ jobs:
           MODE: ${{ steps.targets.outputs.mode }}
           GLOB: ${{ inputs.markdown_glob || '**/*.{md,yml,yaml,json}' }}
           FILES: ${{ steps.targets.outputs.files }}
-        # Use the project's prettier (with its plugins) when node_modules is
-        # populated; otherwise fall back to a one-off prettier@3 install.
+          # The base-resolved config file (base config, or an empty {}) and the
+          # isolated prettier binary from the two steps above. The head
+          # influences neither, so no head config/plugin is ever loaded.
+          CONFIG_FILE: ${{ steps.baseconfig.outputs.config_file }}
+          PRETTIER_BIN: ${{ steps.ptool.outputs.prettier_bin }}
         run: |
           set -euo pipefail
-          if [ -x node_modules/.bin/prettier ]; then
-            PRETTIER=(node_modules/.bin/prettier)
+          PRETTIER="${PRETTIER_BIN:?prettier binary not resolved}"
+          # Always --config a base-resolved file (the resolve step guarantees
+          # one — the base config, or an empty {}). --config suppresses
+          # prettier's head-config search, so a head prettier.config.js /
+          # .prettierrc.cjs / package.json "prettier" ref is never executed;
+          # a base config that named a plugin was already downgraded to {}.
+          # The --no-config arm is a defensive fallback only (unreached in
+          # normal operation). Mirrors prettier-autofix.yml's write step.
+          if [ -n "${CONFIG_FILE:-}" ]; then
+            CFG=(--config "$CONFIG_FILE")
           else
-            PRETTIER=(npx --yes prettier@3)
+            CFG=(--no-config)
           fi
+          # `--` before the targets: a head file literally named `--plugin=x`
+          # must be a filename, never a reparsed flag.
           case "$MODE" in
             none)
               echo "Skipping prettier — no targets in PR diff."
               ;;
             glob)
               echo "Checking glob: $GLOB"
-              "${PRETTIER[@]}" --check "$GLOB"
+              "$PRETTIER" "${CFG[@]}" --check -- "$GLOB"
               ;;
             files)
-              # Reconstruct the file list from the heredoc output. The
-              # trailing newline of `printf '%s\n'` leaves an empty last
-              # element after `<<<` splitting; drop empties.
-              mapfile -t FILE_LIST <<< "$FILES"
+              # bash-3.2-safe read loop (no mapfile) so the selftest exercises
+              # this on macOS too. The trailing newline of the heredoc output
+              # leaves an empty last element; drop empties.
               cleaned=()
-              for f in "${FILE_LIST[@]}"; do [ -n "$f" ] && cleaned+=("$f"); done
+              while IFS= read -r f; do
+                [ -n "$f" ] && cleaned+=("$f")
+              done <<< "$FILES"
               echo "Checking ${#cleaned[@]} PR-changed file(s):"
-              printf '  %s\n' "${cleaned[@]}"
-              "${PRETTIER[@]}" --check "${cleaned[@]}"
+              printf '  %s\n' ${cleaned[@]+"${cleaned[@]}"}
+              "$PRETTIER" "${CFG[@]}" --check -- ${cleaned[@]+"${cleaned[@]}"}
               ;;
             *)
               echo "::error::Unknown prettier target mode: '$MODE'"

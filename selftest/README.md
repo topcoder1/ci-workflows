@@ -139,6 +139,21 @@ arbitrary helper scripts; that's a different kind of repo.
   off-checkout with a pinned registry + `--ignore-scripts` + neutralized npm
   user-config, the push auth rides an inline `http.extraheader`, and the target
   list follows `--`. The canary and the credential/editorconfig guards are all
+  mutation-proven. Its sibling `test_lint_prettier_check_untrusted_head.sh`
+  carries the same hardening for `lint.yml`'s read-only `prettier --check`.
+- `test_lint_prettier_check_untrusted_head.sh` — `lint.yml`'s `prettier
+  --check` has the same head-config-execution vector as the autofix write lane
+  (the pull_request merge ref carries head content), minus the push PAT. Pins
+  that the check never executes a head `prettier.config.cjs` (extracts and runs
+  the check step against a canary; asserts the marker stays absent, that a base
+  `--config` actually applies via a `--check` exit-code differential, and that
+  the empty-`{}` default still honors `.editorconfig`), and structurally that
+  the prettier job's checkout is `persist-credentials: false` with no `token:`,
+  the prettier CLI installs off-checkout, and the target list follows `--`. Its
+  load-bearing check is a **drift guard**: the "Resolve base prettier config"
+  and "Install prettier" step bodies must be BYTE-IDENTICAL to
+  `prettier-autofix.yml`'s, so the check lane and the write lane resolve config
+  the same way (else autofix fixes a file the check rejects). All guards are
   mutation-proven.
 - `test_ruff_ruleset_warning.sh` — #139 pinned ruff's version, which stops a
   release from reddening the fleet on release day; it does not make any

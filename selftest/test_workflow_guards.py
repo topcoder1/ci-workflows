@@ -43,6 +43,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_codex_verdict_gate.sh",
     "selftest/test_comment_nonfatal_reporting.sh",
     "selftest/test_findings_reply_narrowing.sh",
+    "selftest/test_lint_prettier_check_untrusted_head.sh",
     "selftest/test_pr_files_listing.sh",
     "selftest/test_prettier_scope_failsafe.sh",
     "selftest/test_prettier_symlink_filter.sh",
