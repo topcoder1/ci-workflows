@@ -556,6 +556,31 @@ test("a clean cycle: durable record before the dispatch, one run, intake recorde
   assert.deepEqual(f.log(), [entry]);
 });
 
+test("both artifact clients judge expiry on the cycle's clock, never the real one", async (t) => {
+  const f = fixture(t);
+  // Both artifacts expire an hour past the fixture clock, an instant the real
+  // clock passed long ago: on the real clock each reads as expired.
+  const pinned = new Set();
+  const fetchImpl = f.deps.fetchImpl;
+  f.deps.fetchImpl = async (url, init) => {
+    const response = await fetchImpl(url, init);
+    const id = url.match(/\/actions\/artifacts\/(\d+)$/)?.[1];
+    if (!id) return response;
+    pinned.add(Number(id));
+    const raw = await response.json();
+    return new Response(
+      JSON.stringify({ ...raw, expires_at: "2026-09-20T13:00:00Z" }),
+      { status: 200 },
+    );
+  };
+  const entry = await f.cycle();
+  assert.equal(entry.startedAt, "2026-09-20T12:00:00Z");
+  assert.deepEqual([...pinned].sort(), [301, 302]);
+  assert.equal(entry.failure, null);
+  assert.equal(entry.intake.outcome, "recorded");
+  assert.equal(entry.provider.costUsd, 0.1407);
+});
+
 test("findings hold the verdict, and a second cycle is not refused by the lock a completed one leaves", async (t) => {
   const f = fixture(t, {
     receipt: (api, runId) =>

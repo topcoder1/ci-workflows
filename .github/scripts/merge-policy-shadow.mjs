@@ -332,13 +332,15 @@ export function locateArtifact({ api, record, runId, name }) {
 }
 
 /** The artifact client for one producer, credentialed by the owner's gh
- * identity at call time; the token never leaves the provider closure. */
+ * identity at call time; the token never leaves the provider closure. It
+ * judges artifact expiry on the cycle's clock, now. */
 export function artifactClient({
   producer,
   artifactName = producer.artifactName,
   downloadOrigins,
   ghToken,
   fetchImpl,
+  now,
 }) {
   return createGitHubArtifactClient({
     producer: {
@@ -352,6 +354,7 @@ export function artifactClient({
     },
     downloadOrigins,
     fetchImpl,
+    now,
     tokenProvider: async () => ghToken(),
   });
 }
@@ -633,6 +636,7 @@ export async function runShadowCycle(deps, options) {
       downloadOrigins,
       ghToken,
       fetchImpl,
+      now,
     });
     try {
       entry.intake = await timed("intake", async () =>
@@ -652,6 +656,7 @@ export async function runShadowCycle(deps, options) {
           downloadOrigins,
           ghToken,
           fetchImpl,
+          now,
         }),
       }),
     );

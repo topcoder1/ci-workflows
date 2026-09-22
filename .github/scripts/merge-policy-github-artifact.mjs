@@ -287,7 +287,7 @@ function tagRefFacts(raw, producer) {
   );
   return Object.freeze({ ref: raw.ref, sha: raw.object.sha });
 }
-function artifactFacts(raw, producer, selector, run) {
+function artifactFacts(raw, producer, selector, run, now) {
   requireThat(
     raw?.id === selector.artifactId &&
       raw.name === producer.artifactName &&
@@ -298,7 +298,7 @@ function artifactFacts(raw, producer, selector, run) {
     "artifact_binding_mismatch",
   );
   requireThat(
-    raw.expired === false && Date.parse(date(raw.expires_at)) > Date.now(),
+    raw.expired === false && Date.parse(date(raw.expires_at)) > now().getTime(),
     "artifact_expired",
   );
   requireThat(
@@ -467,7 +467,9 @@ async function bytes(response, maximum, scope) {
   }
 }
 
-/** No I/O before read(). tokenProvider and fetchImpl must themselves be trusted.
+/** No I/O before read(). tokenProvider, fetchImpl and now must themselves be
+ * trusted. now() is the caller's clock (default: the real one) and the only
+ * one artifact expiry is judged on.
  * fetchImpl must follow native Node fetch's decoded-response stream contract.
  * Supported HTTP content codings are identity, gzip, deflate and br (one only).
  * Optional producer.workflowRef supports a current lightweight-tag snapshot,
@@ -548,6 +550,7 @@ export function createGitHubArtifactClient({
   tokenProvider,
   downloadOrigins,
   fetchImpl = globalThis.fetch,
+  now = () => new Date(),
 }) {
   let trustedProducer;
   let origins;
@@ -555,7 +558,9 @@ export function createGitHubArtifactClient({
     trustedProducer = producerCopy(producer);
     origins = originsCopy(downloadOrigins);
     requireThat(
-      typeof tokenProvider === "function" && typeof fetchImpl === "function",
+      typeof tokenProvider === "function" &&
+        typeof fetchImpl === "function" &&
+        typeof now === "function",
       "invalid_input",
     );
   } catch (error) {
@@ -646,6 +651,7 @@ export function createGitHubArtifactClient({
         trustedProducer,
         selector,
         run,
+        now,
       );
       return await body({
         selector,
@@ -732,6 +738,7 @@ export function createGitHubArtifactClient({
               trustedProducer,
               selector,
               run,
+              now,
             ),
             artifact,
           );
