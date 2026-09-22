@@ -76,7 +76,30 @@ arbitrary helper scripts; that's a different kind of repo.
   grew that PR's reviewed diff from 6 files to 8. Pins: default base is free
   (no API calls), another open PR's head refuses unconditionally, other
   non-default bases need the opt-in label, and every unreadable input
-  refuses.
+  refuses. Its "every pre-arm rejection disarms" scan now ends at the arm
+  command rather than at a comment quoting it — the old anchor read 47 lines
+  of comments and no rejection path — with a line-count floor and planted
+  bare-exit negative controls on both sides of the attribution-gate helper.
+- `test_automerge_pat_attribution_gate.sh` — neither arming reusable may
+  arm unless the caller's `automerge_pat` arrived AND is a user credential
+  (`GET /user` answers `type: User`). GitHub deletes a merged head branch
+  (`delete_branch_on_merge`) only for a USER-attributed merge; after a
+  GITHUB_TOKEN arm the merge is github-actions[bot]'s, the branch survives,
+  and a later push to it never reaches main (wxa-graph#553). Measured
+  2026-09-18: 0/97 bot-attributed fleet merges auto-deleted vs 1746/1746
+  user-attributed; a scratch-repo repeat matched (4/4 vs 5/5). Runs both
+  extracted arm steps against a stub that models the PR's arm state
+  (re-arming keeps the ORIGINAL enabler, as measured) and answers `pr view`
+  / `api user` by running the SHIPPED `--jq` filters over gh-shaped JSON.
+  Pins: no PAT or a non-user credential refuses (claude-author publishes
+  `automerge:refused-no-pat`); a bot's existing arm is replaced and a user's
+  is never touched; the enabler is read back after the arm; the slow probe
+  precedes every live-state read; the safe-paths arm is head-bound;
+  Dependabot's own PRs keep the old path by exact login match. Negative
+  controls neutralize each refusal and the bot-arm removal, and misspell the
+  enabler path (a typo that would be silent in production); structural pins
+  hold one arm call site per workflow and keep `automerge_pat`
+  `required: false`.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

@@ -49,17 +49,20 @@ on:
     secrets:
       automerge_pat:
         description: >-
-          Optional fine-grained PAT (or GitHub App token) used to enable
-          auto-merge. When set, the resulting merge commit is attributed
-          to the PAT user and triggers downstream push-on-main workflows
-          (e.g. deploy). When unset, the workflow falls back to the
-          built-in GITHUB_TOKEN — auto-merge still works, but the merge
-          is attributed to app/github-actions and GitHub silently
-          suppresses downstream workflow runs (the GITHUB_TOKEN
-          loop-prevention rule). Mirrors the pattern in
-          claude-author-automerge.yml. Required scopes for a fine-grained
-          PAT: repo contents r/w, pull-requests r/w. Wire via
-          `secrets: inherit` in the caller, or pass explicitly.
+          Fine-grained USER PAT used to enable auto-merge, so the merge
+          is attributed to the PAT user. Without it, or when it is not a
+          user credential (GET /user must answer type=User), this workflow
+          does not arm (Dependabot PRs excepted): a GITHUB_TOKEN arm merges as
+          github-actions[bot], and GitHub then skips the repo's automatic
+          head-branch deletion (the merged branch survives and a later
+          push to it never reaches main — wxa-graph#553) and suppresses
+          every push-on-main workflow. Use a USER PAT, not an App token:
+          GITHUB_TOKEN is itself an App installation token (measured), and
+          other Apps' merges are reported to keep the branch too (untested
+          here). Same contract as
+          claude-author-automerge.yml. Required scopes - repo contents r/w,
+          pull-requests r/w. Pass it EXPLICITLY; `secrets: inherit` passes
+          nothing to a reusable owned by a different account.
         required: false
 
 # Serialize per PR. Without this, a run that classified an OLDER, docs-only
@@ -692,19 +695,91 @@ jobs:
           steps.classify.outputs.all_safe == '1' &&
           steps.classifier_hold.outputs.hold == '0'
         env:
-          # Prefer the caller-supplied PAT so the merge commit triggers
-          # downstream `push:` workflows (deploy, CI). Fall back to the
-          # workflow-issued GITHUB_TOKEN when no PAT is wired — auto-merge
-          # still works but downstream workflows are silenced. See the
-          # `automerge_pat` secret docstring above for the full rationale.
+          # The caller's PAT, so the merge is user-attributed: GitHub then
+          # deletes the head branch and push-on-main workflows run. The
+          # github.token fallback only serves the head read and a Dependabot
+          # PR's arm; the attribution gate in the script refuses every other
+          # arm without the PAT. See the `automerge_pat` secret docstring.
           GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           METHOD: ${{ inputs.merge_method }}
           USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
+          # The PR's author login — the one field no PR contents can set, so
+          # only Dependabot's own PRs can take the exception below.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+          # Attribution gate (2026-09-18) — the same gate, for the same
+          # measured reason, as the arm step in claude-author-automerge.yml:
+          # after a GITHUB_TOKEN arm GitHub merges as github-actions[bot],
+          # skips the automatic head-branch deletion, and a later push to
+          # the surviving branch never reaches main. Declines to arm (exit
+          # 0; a user's arm — a human's or a PAT-wired sibling's — is never
+          # revoked, and a bot's arm is removed below). Not a failing
+          # step: this check must never block a click-merge, and a red run
+          # here would carry no more information than the annotation.
+          # Dependabot's own PRs keep the old behavior — their runs never
+          # receive Actions secrets, and Dependabot deletes its branch after
+          # the merge (wxa-mcp-server's docs/package.json bumps take this
+          # path). A present secret must also BE a user credential: an App
+          # installation token arms as its bot, and GET /user answers only
+          # for a user (installation tokens get a 403).
+          refuse_unattributed_arm() {
+            msg="$1 Arming here would make GitHub merge this PR as a bot, which skips the automatic head-branch deletion (a later push to the surviving branch never reaches main) and silences push-on-main workflows. Not arming. Fix the caller: pass the repo's AUTOMERGE_PAT secret — a USER PAT — explicitly as automerge_pat; secrets: inherit passes nothing to a reusable owned by another account. Or click-merge."
+            echo "::error::$msg"
+            echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          }
+          # Disable auto-merge and VERIFY it is off, 3 attempts — the same
+          # shape as the revoke step above. Nothing after this step retries a
+          # failed disable, so a single attempt is not fail-closed.
+          remove_arm() {
+            local after="UNKNOWN"
+            for _ in 1 2 3; do
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              after=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+              [ "$after" = "OFF" ] && return 0
+              sleep 3
+            done
+            echo "::error::could not verify the bot's arm is off (state '$after' after 3 attempts) — failing closed."
+            return 1
+          }
+          # The GET /user probe runs FIRST, before the head read below (Codex
+          # round 3): its retries and backoff take seconds, and that time must
+          # not sit between the head read and the arm. Only the answer is
+          # recorded here; the decision comes after the head read.
+          arm_as=""
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ] && [ "$USING_PAT" = "1" ]; then
+            for _ in 1 2 3; do
+              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
+                break
+              fi
+              arm_as=""
+              sleep 2
+            done
+          fi
+          # A BOT's arm already on a non-Dependabot PR merges as that bot
+          # whatever this run does (re-arming keeps the original enabler —
+          # measured), so remove it and let the arm below or the refusal take
+          # over (Codex round 5). A user's arm is never touched; an unreadable
+          # arm state leaves things as they are. Done before the head read so
+          # it adds no time between that read and the arm. Residual race,
+          # accepted (Codex round 6): a user arm placed between the read and
+          # the disable is revoked too (GitHub's disable takes no expected
+          # enabler); the cost is a PR left unarmed until its next event or a
+          # click, against a bot-attributed merge that strands later pushes.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            armed_by=$(gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+              2>/dev/null) || armed_by="unknown"
+            if [ "$armed_by" = "bot" ]; then
+              echo "::notice::a bot armed this PR — its merge would skip the head-branch deletion, so removing that arm."
+              remove_arm || exit 1
+            fi
+          fi
           # Arm only the head this run actually classified. `gh pr merge
           # --auto` acts on the PR's CURRENT head, so a run that classified
           # an older docs-only revision would otherwise arm a newer revision
@@ -717,10 +792,55 @@ jobs:
             echo "::notice::head is '${now:-<unreadable>}' but this run classified '${HEAD_SHA}' — not arming; the current head's own run owns that decision."
             exit 0
           fi
+          # The attribution decision — no network call before the arm.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            if [ "$USING_PAT" != "1" ]; then
+              refuse_unattributed_arm "No automerge_pat reached this workflow."
+            fi
+            if [ -z "$arm_as" ]; then
+              refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
+            fi
+            echo "Arming as $arm_as (user credential)."
+          fi
           echo "Safe-paths-only diff — enabling auto-merge ($METHOD)."
           if [ "$USING_PAT" = "1" ]; then
-            echo "Auth: caller-supplied automerge_pat — downstream workflows WILL trigger on merge."
+            echo "Auth: caller-supplied automerge_pat — the merge is attributed to the PAT user, so GitHub deletes the head branch and push-on-main workflows run."
           else
-            echo "::warning::Auth: GITHUB_TOKEN fallback — downstream push workflows (e.g. deploy) will be SILENCED on merge. Wire secrets.automerge_pat in the caller to fix."
+            echo "::notice::Auth: GITHUB_TOKEN for a Dependabot PR — Dependabot-triggered runs never receive Actions secrets, and Dependabot deletes its own branch after the merge."
           fi
-          gh pr merge --auto --"$METHOD" "$PR_URL"
+          # Bound to the classified head (Codex round 3): --match-head-commit
+          # makes GitHub reject the arm atomically if the head moved after the
+          # read above, closing that window instead of only narrowing it —
+          # the same binding claude-author-automerge.yml uses.
+          if ! gh pr merge --auto --"$METHOD" --match-head-commit "$HEAD_SHA" "$PR_URL"; then
+            now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
+            if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+              echo "::notice::head moved (${HEAD_SHA} → ${now}) between the head read and the arm — not arming; the newer head's own run owns that decision."
+              exit 0
+            fi
+            echo "::error::enable auto-merge failed and the head still matches ${HEAD_SHA} — investigate."
+            exit 1
+          fi
+          # Read the enabler back: re-arming an already-armed PR keeps the
+          # ORIGINAL enabler, so an unreadable bot-arm read above (or a bot
+          # arming in between) would still leave a bot's arm. Remove it and
+          # fail closed; an answer unreadable after 3 attempts fails closed
+          # too. "none" is an immediate merge made with the user's
+          # credential. Dependabot's own arm is a bot's by design.
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            post=""
+            for _ in 1 2 3; do
+              if post=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+                2>/dev/null); then
+                break
+              fi
+              post=""
+              sleep 2
+            done
+            if [ "$post" = "bot" ] || [ -z "$post" ]; then
+              echo "::error::after arming, auto-merge is enabled by '${post:-<unreadable>}' rather than the PAT user — the PR would merge as a bot. Removing the arm; failing closed."
+              remove_arm || true
+              exit 1
+            fi
+          fi

@@ -127,16 +127,50 @@ fi
 # bare exits in the rejection paths.
 # Drain the input after the arm marker: an early awk exit can SIGPIPE echo
 # under pipefail, making this structural check fail without an assertion.
-prearm=$(echo "$enable_block" \
-  | awk '/gh pr merge --auto/{armed=1} !armed {print}' \
-  | awk '/disarm_then_exit\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf')
+#
+# The region ends at the arm COMMAND, never at a comment that mentions it.
+# Anchoring on any mention stopped the scan at a comment near the top of the
+# step, so this pin read 47 lines of header comments and not one rejection
+# path, and passed vacuously (found 2026-09-18). The line-count floor and the
+# negative control below keep it honest.
+#
+# One named exception is stripped alongside disarm_then_exit:
+# refuse_unattributed_arm, the attribution gate, which deliberately does NOT
+# disarm (any arm already on the PR is user-attributed — see its comment in
+# the workflow). selftest/test_automerge_pat_attribution_gate.sh pins that it
+# never calls --disable-auto.
+prearm_of() {
+  awk '!/^[[:space:]]*#/ && /gh pr merge --auto/{armed=1} !armed {print}' \
+    | awk '/(disarm_then_exit|refuse_unattributed_arm)\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf'
+}
+prearm=$(prearm_of <<< "$enable_block")
+prearm_lines=$(printf '%s\n' "$prearm" | wc -l | tr -d ' ')
 if grep -q 'disarm_then_exit()' <<< "$enable_block" \
+  && [ "$prearm_lines" -gt 100 ] \
   && ! grep -qE '^ *exit [01]$' <<< "$prearm"; then
-  echo "✓ every pre-arm rejection disarms an existing arm (no bare exit-without-disarm)"
+  echo "✓ every pre-arm rejection disarms an existing arm (no bare exit-without-disarm; $prearm_lines lines scanned)"
 else
-  echo "✗ a pre-arm rejection exits without disarming — an arm placed by an earlier run survives the rejection"
+  echo "✗ a pre-arm rejection exits without disarming, or the scan covered only $prearm_lines lines — an arm placed by an earlier run survives the rejection"
   failed=1
 fi
+# Negative controls: the same scan must catch a bare exit planted in a real
+# rejection path, both BEFORE the refuse_unattributed_arm helper and AFTER
+# it (between the attribution gate and the arm). The second plant is what
+# catches a helper-strip that swallows everything up to the arm command,
+# which the line floor alone would not.
+plant_after() { # anchor-regex → the enable block with a bare `exit 0` after the first match
+  awk -v pat="$1" '{print} $0 ~ pat && !done {print "            exit 0"; done=1}' <<< "$enable_block"
+}
+for anchor in 'could not re-read the base ref before arming' 'did not return a User after 3 attempts'; do
+  mutant=$(plant_after "$anchor")
+  if [ "$(grep -cE '^ *exit 0$' <<< "$mutant")" -gt "$(grep -cE '^ *exit 0$' <<< "$enable_block")" ] \
+    && grep -qE '^ *exit [01]$' <<< "$(prearm_of <<< "$mutant")"; then
+    echo "✓ negative control: a bare exit planted after /$anchor/ is caught"
+  else
+    echo "✗ negative control: the pre-arm scan missed a bare exit planted after /$anchor/ — the pin above is vacuous there"
+    failed=1
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 0b. Extract the base-gate step's run block — the shipped bash.
