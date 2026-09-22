@@ -584,6 +584,19 @@ test("expiry is read on the injected clock: expired at it is refused though the 
   const live = await fixture().client.read(selector());
   assert.equal(live.artifact.expiresAt, iso(now + 3600000));
 });
+test("a clock that is not a function is refused at construction, and a broken one fails closed", async () => {
+  for (const bad of [null, 5, "now"])
+    assert.throws(() => fixture({ now: bad }), { code: "invalid_input" });
+  // Coerced to a number, null would read as the epoch and every artifact as live.
+  for (const [clock, code] of [
+    [() => null, "read_failed"],
+    [() => Date.now(), "read_failed"],
+    [() => new Date(NaN), "artifact_expired"],
+  ]) {
+    await fails(fixture({ now: clock }).client, code);
+    await recheckFails(fixture({ now: clock }).client, code);
+  }
+});
 for (const [location, code] of [
   [
     "https://artifacts.example.test.attacker.test/x?secret=signed",
