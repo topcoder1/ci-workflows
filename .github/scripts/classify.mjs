@@ -292,9 +292,9 @@ for (const cls of Object.keys(excludeRules)) {
 	if (cls === 'blocked') {
 		fail(
 			`${RULES_PATH}: '${EXCLUDE_KEY}:' may not subtract from 'blocked' — it is the top class and ` +
-				`covers the secrets, Dockerfile, workflow and infra paths, which an over-broad exclusion ` +
-				`would silently un-gate. Narrow the 'blocked:' patterns themselves if something is ` +
-				`over-matched, so the change is visible rather than subtracted.`
+				`typically covers the secrets, Dockerfile, workflow and infra paths, which an over-broad ` +
+				`exclusion would silently un-gate. Narrow the 'blocked:' patterns themselves if something ` +
+				`is over-matched, so the change is visible rather than subtracted.`
 		);
 	}
 	// A scalar where a list belongs is a fail-OPEN, not a syntax error: JS
