@@ -39,6 +39,36 @@ name: Prettier Autofix
 #     automerge_pat deliberately lacks workflow scope (fleet policy), so
 #     GitHub rejects any push containing them.
 #   - PRs already cleanly formatted: skipped (no commit pushed).
+#
+# Untrusted-head hardening (defense in depth — the head is attacker- or
+# model-writable, and this workflow runs on `pull_request` the moment the PR
+# opens, draft or not, with a PAT in reach):
+#   - Prettier NEVER loads config or plugin CODE that the PR head can influence.
+#     It always runs `--config <file>` where <file> is materialized off-checkout
+#     into $RUNNER_TEMP: the BASE branch's config (`git show <base>:<config>`)
+#     when it declares one, else an empty `{}`. `--config` suppresses prettier's
+#     upward config search, so a head prettier.config.js / .prettierrc.cjs /
+#     package.json "prettier" ref is never executed. The empty-`{}` default is
+#     chosen over `--no-config` precisely because `--config` still honors the
+#     repo's `.editorconfig` (data-only INI — no code execution), keeping output
+#     byte-identical to lint.yml's `prettier --check` and to prettier's
+#     pre-hardening default search. A base config that is itself JS/TS, or that
+#     names plugins, degrades to the empty `{}` + a ::warning:: — autofix loads
+#     no config or plugin JS from head OR base.
+#   - The prettier CLI is installed OUTSIDE the checkout (in $RUNNER_TEMP) with
+#     a pinned --registry, --ignore-scripts, and a neutralized npm user-config,
+#     so the head's package.json and .npmrc can neither run install scripts nor
+#     redirect the registry the prettier package resolves from. No `npm ci`
+#     ever runs in the checkout. (Mirrors lint.yml's "install from $RUNNER_TEMP,
+#     not the checkout" idiom and its checkout-cwd guard.)
+#   - Checkout uses `persist-credentials: false`; the PAT is supplied only to
+#     the single push via an inline http.extraheader, never written to
+#     .git/config where head-reachable code could read it.
+#   - The target list is passed after `--`, so a head file literally named
+#     `--plugin=x` cannot be reparsed as a prettier flag.
+#   Pinned by selftest/test_prettier_untrusted_head_config.sh. Note: this
+#   hardens prettier-autofix.yml only; lint.yml's read-only `prettier --check`
+#   still loads head config (no PAT there, lower severity) — tracked separately.
 
 on:
   workflow_call:
@@ -56,7 +86,14 @@ on:
         type: string
         default: "**/*.{md,yml,yaml,json}"
       install_node_deps:
-        description: "Run `npm ci` before prettier so plugins (prettier-plugin-svelte etc.) resolve. Default true. Skipped automatically when no package.json present."
+        description: >-
+          DEPRECATED / no-op, kept so existing callers that pass it do not
+          error. Autofix no longer installs the PR head's dependencies: the
+          head is untrusted, so prettier runs with base-branch config only and
+          loads no plugins from the head. Prettier plugins declared in a
+          BASE-branch config are also not loaded (a ::warning:: is emitted).
+          The prettier CLI itself is installed off-checkout with a pinned
+          registry. This input is ignored.
         required: false
         type: boolean
         default: true
@@ -102,37 +139,188 @@ jobs:
       # Needed to call `gh api .../pulls/N/files` for the changed-files set.
       pull-requests: read
     steps:
-      - name: Checkout PR head with PAT
+      - name: Checkout PR head
         uses: actions/checkout@v7
         with:
           # Check out the PR's head ref (not the merge commit) so our push
           # writes back to the same branch the PR is tracking.
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
-          # PAT is critical: pushes via GITHUB_TOKEN don't retrigger
-          # pull_request events. See header comment.
-          token: ${{ secrets.automerge_pat }}
+          # SECURITY: do NOT persist any token into .git/config. The head is
+          # attacker-writable and everything below runs over it. The default
+          # GITHUB_TOKEN (dropped after checkout by persist-credentials: false)
+          # is enough to fetch this same repo — forks are skipped by the job
+          # `if:`, so head repo == this repo. The push step supplies the PAT
+          # for its one invocation via an inline http.extraheader instead.
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-          # Cache only when a root lockfile exists (mirrors lint.yml — see
-          # rationale there about avoiding subdir lockfile false positives).
-          cache: ${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock') != '' && 'npm' || '' }}
 
-      # Only fire when a ROOT package.json exists — same reasoning as in
-      # lint.yml. `**/package.json` matched subdir packages and triggered
-      # npm install at the repo root where it ENOENT'd intermittently.
-      - name: Install target repo's deps (for prettier plugins)
-        if: ${{ format('{0}', inputs.install_node_deps) != 'false' && hashFiles('package.json') != '' }}
+      # Decide the prettier config from the BASE branch alone. Never load a
+      # config or plugin the PR head can influence. See the "Untrusted-head
+      # hardening" block in the header.
+      - name: Resolve base prettier config
+        id: baseconfig
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Base commit from the event (GitHub-set, not head-controllable);
+          # verified local before use. Falls back to the base ref if absent.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         shell: bash
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci --ignore-scripts --no-audit --no-fund
-          else
-            npm install --ignore-scripts --no-audit --no-fund
+          set -euo pipefail
+
+          config_mode="empty"
+          config_file=
+          prettier_spec=3
+          emit() {
+            {
+              echo "config_mode=${config_mode}"
+              echo "config_file=${config_file}"
+              echo "prettier_spec=${prettier_spec}"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # Default config: an empty object materialized off-checkout. Like
+          # --no-config it suppresses prettier's head-config search — no head
+          # prettier.config.js / .prettierrc.cjs / package.json "prettier" ref
+          # is loaded — but UNLIKE --no-config it still honors the repo's
+          # .editorconfig, which keeps output byte-identical to lint.yml's
+          # `prettier --check` and to prettier's pre-hardening default search.
+          # (.editorconfig is data-only INI: indent/width/eol/charset; it cannot
+          # execute code.) A usable BASE config replaces this file below.
+          dest="${RUNNER_TEMP:-$PWD}/prettier-autofix-base-config"
+          printf '%s\n' '{}' > "${dest}.empty.json"
+          config_file="${dest}.empty.json"
+
+          # Resolve the base commit. Prefer the event's base.sha (set by GitHub,
+          # not the head) — after a fetch-depth:0 checkout its object is local.
+          # Fall back to the base remote-tracking ref, then a shallow fetch.
+          # BASE_SHA can be preset (selftest) to bypass all git plumbing.
+          BASE_SHA="${BASE_SHA:-}"
+          if [ -n "$BASE_SHA" ] && ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA=""
           fi
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA="$(git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF" >/dev/null 2>&1 || true
+            BASE_SHA="$(git rev-parse --verify --quiet "FETCH_HEAD^{commit}" || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            echo "::warning::prettier-autofix: could not resolve base ref '${BASE_REF}'; formatting with prettier defaults (empty config, editorconfig honored)."
+            emit; exit 0
+          fi
+
+          show() { git show "${BASE_SHA}:$1" 2>/dev/null; }
+          have() { git cat-file -e "${BASE_SHA}:$1" 2>/dev/null; }
+
+          # Optional: pin prettier to whatever version the BASE declares, so
+          # autofix and the base's own lint check agree. Never read the head's.
+          if have package.json; then
+            v="$(show package.json | node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{
+                const p=JSON.parse(s),d={...p.dependencies,...p.devDependencies};
+                process.stdout.write(String(d.prettier||""));
+              }catch(e){}})' 2>/dev/null || true)"
+            case "$v" in
+              ""|latest|next) : ;;
+              *) if printf '%s' "$v" | grep -Eq '^[0-9A-Za-z.^~*<>=| -]+$'; then
+                   prettier_spec="$v"
+                 fi ;;
+            esac
+          fi
+
+          # A standalone root config file wins over a package.json key.
+          found=
+          for name in \
+            .prettierrc .prettierrc.json .prettierrc.json5 .prettierrc.yaml \
+            .prettierrc.yml .prettierrc.toml .prettierrc.js .prettierrc.cjs \
+            .prettierrc.mjs .prettierrc.ts .prettierrc.cts .prettierrc.mts \
+            prettier.config.js prettier.config.cjs prettier.config.mjs \
+            prettier.config.ts prettier.config.cts prettier.config.mts; do
+            if have "$name"; then found="$name"; break; fi
+          done
+
+          if [ -n "$found" ]; then
+            case "$found" in
+              *.js | *.cjs | *.mjs | *.ts | *.cts | *.mts)
+                echo "::warning::prettier-autofix: base prettier config '${found}' is executable (JS/TS); not loaded. Formatting with an empty config (editorconfig honored). Convert it to a data config (.prettierrc.json/.yaml/.toml) to have autofix honor it."
+                emit; exit 0 ;;
+              *)
+                body="$(show "$found" || true)"
+                if printf '%s' "$body" | grep -q 'plugins'; then
+                  echo "::warning::prettier-autofix: base prettier config '${found}' declares plugins; plugin code is not loaded. Formatting with an empty config (editorconfig honored)."
+                  emit; exit 0
+                fi
+                ext="${found##*.}"
+                case "$found" in .prettierrc) ext="json" ;; esac
+                config_file="${dest}.${ext}"
+                printf '%s' "$body" > "$config_file"
+                echo "prettier-autofix: using base config '${found}'."
+                config_mode="base"
+                emit; exit 0 ;;
+            esac
+          fi
+
+          # Fall back to a package.json "prettier" key (object only; a string
+          # is a module ref = executable, refused).
+          if have package.json; then
+            kind="$(show package.json | PKG_CFG_DEST="${dest}.json" node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{
+                const p=JSON.parse(s);
+                if(!("prettier" in p)){process.stdout.write("none");return;}
+                const v=p.prettier;
+                if(typeof v==="string"){process.stdout.write("string");return;}
+                const j=JSON.stringify(v);
+                if(/plugins/.test(j)){process.stdout.write("plugins");return;}
+                require("fs").writeFileSync(process.env.PKG_CFG_DEST,j);
+                process.stdout.write("object");
+              }catch(e){process.stdout.write("none")}})' 2>/dev/null || echo none)"
+            case "$kind" in
+              object)
+                config_mode="base"; config_file="${dest}.json"
+                echo "prettier-autofix: using base config from package.json \"prettier\" key." ;;
+              string)
+                echo "::warning::prettier-autofix: base package.json \"prettier\" points to a module (executable); not loaded. Formatting with an empty config (editorconfig honored)." ;;
+              plugins)
+                echo "::warning::prettier-autofix: base package.json \"prettier\" declares plugins; plugin code is not loaded. Formatting with an empty config (editorconfig honored)." ;;
+              *) : ;;
+            esac
+          fi
+
+          emit
+
+      # Install the prettier CLI OUTSIDE the checkout so the head's
+      # package.json and .npmrc are never read: pinned registry (a head .npmrc
+      # cannot redirect it), --ignore-scripts (no lifecycle code), neutralized
+      # npm user-config, and the base-pinned version. No `npm ci` in the
+      # checkout, and no head-controlled node_modules/.bin/prettier.
+      - name: Install prettier (isolated from PR head)
+        id: ptool
+        env:
+          PRETTIER_SPEC: ${{ steps.baseconfig.outputs.prettier_spec || '3' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="${RUNNER_TEMP:?RUNNER_TEMP is not set}/prettier-autofix-tool"
+          mkdir -p "$DIR"
+          # Block ~/.npmrc and the project .npmrc; the checkout is never the CWD
+          # of this install, and the registry is pinned explicitly.
+          export NPM_CONFIG_USERCONFIG=/dev/null
+          ( cd "$RUNNER_TEMP" &&
+            npm install --prefix "$DIR" --no-save --no-audit --no-fund \
+              --ignore-scripts --registry=https://registry.npmjs.org/ \
+              "prettier@${PRETTIER_SPEC:-3}" )
+          BIN="$DIR/node_modules/.bin/prettier"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::prettier-autofix: prettier install failed"; exit 1
+          fi
+          echo "prettier_bin=$BIN" >> "$GITHUB_OUTPUT"
 
       # Same target-resolution logic as lint.yml's "Resolve prettier targets"
       # — kept duplicated rather than factored into a composite action so
@@ -280,29 +468,46 @@ jobs:
           MODE: ${{ steps.targets.outputs.mode }}
           GLOB: ${{ inputs.markdown_glob || '**/*.{md,yml,yaml,json}' }}
           FILES: ${{ steps.targets.outputs.files }}
+          # The base-resolved config file (base config, or an empty {}) and the
+          # isolated binary from the two steps above. The head influences none.
+          CONFIG_FILE: ${{ steps.baseconfig.outputs.config_file }}
+          PRETTIER_BIN: ${{ steps.ptool.outputs.prettier_bin }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -x node_modules/.bin/prettier ]; then
-            PRETTIER=(node_modules/.bin/prettier)
+          PRETTIER="${PRETTIER_BIN:?prettier binary not resolved}"
+          # Always --config a base-resolved file (the resolve step guarantees
+          # one — the base config, or an empty {}). --config suppresses
+          # prettier's head-config search, so a head prettier.config.js /
+          # .prettierrc.cjs / package.json "prettier" ref is never executed;
+          # a base config that named a plugin was already downgraded to {}.
+          # The --no-config arm is a defensive fallback only (unreached in
+          # normal operation) — it too suppresses the head search.
+          if [ -n "${CONFIG_FILE:-}" ]; then
+            CFG=(--config "$CONFIG_FILE")
           else
-            PRETTIER=(npx --yes prettier@3)
+            CFG=(--no-config)
           fi
+          # `--` before the targets: a head file literally named `--plugin=x`
+          # must be a filename, never a reparsed flag.
           case "$MODE" in
             none)
               echo "Skipping prettier — no targets in PR diff."
               ;;
             glob)
               echo "Writing glob: $GLOB"
-              "${PRETTIER[@]}" --write "$GLOB"
+              "$PRETTIER" "${CFG[@]}" --write -- "$GLOB"
               ;;
             files)
-              mapfile -t FILE_LIST <<< "$FILES"
+              # bash-3.2-safe read loop (no mapfile) so the selftest exercises
+              # this on macOS too.
               cleaned=()
-              for f in "${FILE_LIST[@]}"; do [ -n "$f" ] && cleaned+=("$f"); done
+              while IFS= read -r f; do
+                [ -n "$f" ] && cleaned+=("$f")
+              done <<< "$FILES"
               echo "Writing ${#cleaned[@]} PR-changed file(s):"
-              printf '  %s\n' "${cleaned[@]}"
-              "${PRETTIER[@]}" --write "${cleaned[@]}"
+              printf '  %s\n' ${cleaned[@]+"${cleaned[@]}"}
+              "$PRETTIER" "${CFG[@]}" --write -- ${cleaned[@]+"${cleaned[@]}"}
               ;;
             *)
               echo "::error::Unknown prettier target mode: '$MODE'"
@@ -316,6 +521,14 @@ jobs:
           # would otherwise be parsed as a nested YAML mapping.
           COMMIT_MESSAGE: "${{ inputs.commit_message || 'style: prettier auto-fix' }}"
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # The PAT is materialized ONLY in this step, and only onto the single
+          # push command's http.extraheader — never persisted to .git/config
+          # (checkout ran with persist-credentials: false). Pushes via
+          # GITHUB_TOKEN don't retrigger pull_request events, so the lint check
+          # would stay red; the PAT push is what turns it green. See header.
+          AUTOMERGE_PAT: ${{ secrets.automerge_pat }}
+        # NOTE: no `set -x` anywhere in this step — the extraheader carries a
+        # credential and must not be echoed to the run log.
         shell: bash
         run: |
           set -euo pipefail
@@ -342,4 +555,14 @@ jobs:
           git add -A
           git commit -m "$COMMIT_MESSAGE" \
                      -m "Auto-applied by topcoder1/ci-workflows prettier-autofix.yml. Co-Authored-By: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          git push origin "HEAD:${HEAD_REF}"
+          if [ -z "${AUTOMERGE_PAT:-}" ]; then
+            echo "::error::prettier-autofix: automerge_pat secret is empty — cannot push (a GITHUB_TOKEN push would not retrigger the lint check)."
+            exit 1
+          fi
+          # Supply the PAT for this one push via an inline http.extraheader
+          # (git does not echo `-c` values), so nothing is written to
+          # .git/config where the just-run, head-controlled prettier could
+          # have read it.
+          AUTH_B64="$(printf 'x-access-token:%s' "$AUTOMERGE_PAT" | base64 | tr -d '\n')"
+          git -c "http.extraheader=Authorization: Basic ${AUTH_B64}" \
+            push origin "HEAD:${HEAD_REF}"

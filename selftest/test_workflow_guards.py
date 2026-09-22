@@ -46,6 +46,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_pr_files_listing.sh",
     "selftest/test_prettier_scope_failsafe.sh",
     "selftest/test_prettier_symlink_filter.sh",
+    "selftest/test_prettier_untrusted_head_config.sh",
     "selftest/test_regression_convention_bullet_cap.sh",
     "selftest/test_ruff_format_gate.sh",
     "selftest/test_ruff_ruleset_warning.sh",
