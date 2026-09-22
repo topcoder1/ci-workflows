@@ -38,14 +38,23 @@ Runs `prettier --write` on PR-changed markdown and pushes the fix back to the br
 
 **Inputs:**
 
-- `markdown_glob` (string, default `**/*.md`) — keep in sync with `lint.yml`'s same input
-- `install_node_deps` (bool, default `true`) — run `npm ci` first so prettier plugins (e.g. `prettier-plugin-svelte`) resolve
+- `markdown_glob` (string, default `**/*.{md,yml,yaml,json}`) — keep in sync with `lint.yml`'s same input
+- `install_node_deps` (bool, default `true`) — **DEPRECATED / no-op** (kept so existing callers don't error). Autofix no longer installs the PR head's dependencies — see the hardening note below.
 - `changed_only` (bool, default `true`) — write only PR-touched files; mirrors `lint.yml`'s `prettier_changed_only`
 - `commit_message` (string, default `style: prettier auto-fix`)
 
 **Required secret:** `automerge_pat` — fine-grained PAT (or classic with `repo` scope). Same secret name and required scopes as `claude-author-automerge.yml`, so a repo that already has auto-merge wired needs no extra provisioning. Why a PAT: pushes by the default `GITHUB_TOKEN` do not retrigger downstream `pull_request` workflows, so the lint check would stay red against the previous SHA. A PAT push triggers `lint.yml` on the new commit and the check turns green.
 
 **Skipped automatically on:** fork PRs (cross-repo push impossible), closed PRs, PRs touching zero markdown.
+
+**Untrusted-head hardening (defense in depth).** This workflow checks out the PR **head** — attacker- or model-writable — with the push PAT in reach, and fires the moment the PR opens (draft or not). Prettier's default behavior loads config and plugins as **code** (`prettier.config.js`, `.prettierrc.cjs`, a `package.json` `"prettier"` module ref, and any plugin they name), so an unhardened run executes head-authored Node on the runner. The central lane closes this so callers don't have to:
+
+- **Config comes from the BASE branch only.** Prettier always runs `--config <file>` where `<file>` is materialized off-checkout into `$RUNNER_TEMP`: the base branch's config (`git show <base>:<config>`) when it declares one, else an empty `{}`. `--config` suppresses prettier's head-config search, so a head `prettier.config.js` / `.prettierrc.cjs` / `package.json "prettier"` ref is never executed. The empty-`{}` default is used instead of `--no-config` because `--config` still honors the repo's `.editorconfig` (data-only INI — no code execution), keeping output byte-identical to `lint.yml`'s `prettier --check` and to prettier's pre-hardening default search. A base config that is itself JS/TS, or that names plugins, degrades to the empty `{}` with a `::warning::` — **no config or plugin JS is loaded, from head or base.** (Consequence: a base config's per-file `overrides` globs, resolved relative to the materialized copy in `$RUNNER_TEMP`, do not apply, and prettier plugins declared even in a base config are not loaded. No current fleet repo keeps a base prettier config; add one as a data file — `.prettierrc.json`/`.yaml`/`.toml` — to have autofix honor it, and prefer plain options over plugins.)
+- **The prettier CLI is installed outside the checkout** (`$RUNNER_TEMP`) with a pinned `--registry`, `--ignore-scripts`, and a neutralized npm user-config, so the head's `.npmrc` cannot redirect the registry and the head's `package.json` cannot run install scripts. There is no `npm ci` in the checkout.
+- **`persist-credentials: false`** on checkout; the PAT is supplied only to the single `git push` via an inline `http.extraheader`, never written to `.git/config`.
+- The changed-file list is passed after `--`.
+
+Pinned by `selftest/test_prettier_untrusted_head_config.sh`. `lint.yml`'s read-only `prettier --check` still loads head config (no PAT there, lower severity) and is tracked separately.
 
 ### `openapi-types-drift.yml`
 

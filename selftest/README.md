@@ -121,6 +121,25 @@ arbitrary helper scripts; that's a different kind of repo.
   scope, so such pushes are always rejected — wxa-secrets#27). Extracts
   and executes the shipped bash; drift-checks the listing block between
   the two workflows.
+- `test_prettier_untrusted_head_config.sh` — prettier-autofix.yml checks out
+  the attacker-/model-writable PR head with the push PAT in reach, and
+  prettier's default search LOADS config and plugins as code
+  (`prettier.config.js`, `.prettierrc.cjs`, a `package.json` `"prettier"` ref).
+  Pins that the hardened workflow never executes head-reachable code: the write
+  step is extracted and run against a canary `prettier.config.cjs` (its marker
+  must stay absent) under an empty `--config` and under a base `--config`, plus
+  an editorconfig-parity case (the empty-`{}` default must still honor
+  `.editorconfig`, unlike `--no-config`); the base-config resolver is run in
+  fixture repos and must materialize the BASE bytes (and degrade JS / plugin /
+  `package.json`-string configs to the empty `{}` with a warning); and
+  structurally the checkout is `persist-credentials: false` **and passes no
+  `token:`** (the guard reads the comment-stripped checkout step, so a flip to
+  `true` or a revert to the old `token:` form both fail — not the raw-file grep
+  that the repo's own lesson warns against), the prettier CLI installs
+  off-checkout with a pinned registry + `--ignore-scripts` + neutralized npm
+  user-config, the push auth rides an inline `http.extraheader`, and the target
+  list follows `--`. The canary and the credential/editorconfig guards are all
+  mutation-proven.
 - `test_ruff_ruleset_warning.sh` — #139 pinned ruff's version, which stops a
   release from reddening the fleet on release day; it does not make any
   repo's rule set explicit. A repo with no `select` still inherits ruff's
