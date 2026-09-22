@@ -64,10 +64,18 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    `v4` for the reviewer's schema fix): install the new source at one commit as
    in step 2 — the same workflow path keeps the same `workflowId` — tag it, then
    land another commit per step 6. Switch the producers entry's
-   `workflowRevision` to the tagged commit only then; that edit changes the
-   authority digest. Until the switch, cycles from `main` pass
+   `workflowRevision` to the tagged commit only then, and only between cycles:
+   preflight shows no `PRODUCER_BUSY` or `LOCK_HELD` and no driver is running,
+   because intake re-reads the live entry and would refuse an in-flight cycle's
+   receipt. The switch changes the authority digest, so receipts recorded under
+   the old tag stop counting and open pull requests need a fresh cycle. Until
+   the switch, cycles from `main` pass
    `--workflow-ref refs/tags/merge-policy-review-v3` and keep using the old tag,
-   whose own workflow copy still runs; the driver defaults to the new ref.
+   whose own workflow copy still runs; the driver defaults to the new ref. A
+   tag that does not match the entry's `workflowRevision`, either way, still
+   runs a paid review and then ends `RUN_NOT_FOUND`, with the orphaned run
+   answering `PRODUCER_BUSY` until it finishes. After the switch, `v3` joins
+   `v1`/`v2`: never dispatch it again.
 
 ## One cycle
 

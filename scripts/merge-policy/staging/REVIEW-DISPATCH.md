@@ -45,7 +45,7 @@ The inactive workflow template is `review-dispatch.workflow.yml`. It pins checko
 - `merge-policy-review-comparison.mjs`
 - `merge-policy-anthropic-review.mjs`
 
-Each packet follows the v2 procedure: a reviewed shared-source commit, the resulting candidate commit and tree, a complete material manifest, a new immutable tag (`merge-policy-review-v4` for this source; `v3` carried the reviewer before its output schema named the finding-key pattern and the changed paths) under creation, immutability and branch-reservation protections (or one pattern-based set for `merge-policy-review-*`, an owner decision in the plan), verified native workflow identity, the secret route, and a durable dispatch record before every request. Unlike the probe, this workflow may be dispatched more than once, once per review; each dispatch is its own recorded operation, and a rerun of an existing run is refused by attempt 1 everywhere.
+Each packet follows the v2 procedure: a reviewed shared-source commit, the resulting candidate commit and tree, a complete material manifest, a new immutable tag (`merge-policy-review-v4` for this source; `v3` carried the reviewer before its output schema carried the finding-key pattern) under creation, immutability and branch-reservation protections (one pattern-based set for `merge-policy-review-v*`, the owner's choice, which already covers each new tag), verified native workflow identity, the secret route, and a durable dispatch record before every request. Unlike the probe, this workflow may be dispatched more than once, once per review; each dispatch is its own recorded operation, and a rerun of an existing run is refused by attempt 1 everywhere.
 
 ## Local validation
 

@@ -915,25 +915,44 @@ test("accepts the long-but-bounded titles and reasons the live model produces (2
   assert.equal(accepted.review.findings[0].title.length, 1024);
 });
 
-test("the request schema carries the validator's key and path restrictions (staging run 35685570724)", async () => {
+test("the request schema carries the validator's key pattern; paths stay validator-only (staging run 35685570724)", async () => {
   // Structured outputs guarantee the schema, not the validator. Staging run
   // 35685570724 received an HTTP 200 review whose finding the validator refused
-  // as invalid_finding: the schema declared key and path as bare strings.
+  // as invalid_finding; the schema declared the key as a bare string.
   let sent;
   await client(async (url, init) => {
     sent = JSON.parse(init.body);
     return response();
   }).review(fixture());
-  const item = sent.output_config.format.schema.properties.findings.items;
-  // Hardcoded, never read back from the module, so a widened or narrowed
-  // restriction fails here.
-  assert.deepEqual(item.properties.key, {
-    type: "string",
-    pattern: "^[a-z][a-z0-9_-]{0,63}$",
-  });
-  assert.deepEqual(item.properties.path, {
-    type: "string",
-    enum: ["src/check.mjs", "src/new.mjs"],
+  // The whole schema, hardcoded and never read back from the module: the
+  // provider answers HTTP 400 to keywords it cannot compile (minLength,
+  // maxLength, additionalProperties other than false), and any widening here
+  // reopens the gap this test closes.
+  assert.deepEqual(sent.output_config.format.schema, {
+    type: "object",
+    additionalProperties: false,
+    required: ["complete", "outcome", "findingCount", "summary", "findings"],
+    properties: {
+      complete: { type: "boolean" },
+      outcome: { type: "string", enum: ["clean", "findings"] },
+      findingCount: { type: "integer" },
+      summary: { type: "string" },
+      findings: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["key", "title", "priority", "path", "reason"],
+          properties: {
+            key: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,63}$" },
+            title: { type: "string" },
+            priority: { type: "integer", enum: [0, 1, 2, 3] },
+            path: { type: "string" },
+            reason: { type: "string" },
+          },
+        },
+      },
+    },
   });
   const report = (values) => ({
     complete: true,
@@ -942,7 +961,10 @@ test("the request schema carries the validator's key and path restrictions (stag
     summary: "Issues",
     findings: [{ ...finding, ...values }],
   });
-  const grammar = new RegExp(item.properties.key.pattern);
+  const grammar = new RegExp(
+    sent.output_config.format.schema.properties.findings.items.properties.key
+      .pattern,
+  );
   for (const [key, accepted] of [
     ["zero-limit", true],
     ["z", true],
@@ -956,6 +978,7 @@ test("the request schema carries the validator's key and path restrictions (stag
     ["-off", false],
     ["zero.limit", false],
     ["zero limit", false],
+    ["zero\nlimit", false],
     ["z\u00e9ro", false],
     ["", false],
   ]) {
@@ -966,8 +989,6 @@ test("the request schema carries the validator's key and path restrictions (stag
     if (accepted) assert.equal((await review).review.findings[0].key, key);
     else await rejects(review, "invalid_finding");
   }
-  // The provider does not guarantee enum capitalization, so exact membership
-  // stays enforced by the validator.
   for (const [path, accepted] of [
     ["src/check.mjs", true],
     ["src/new.mjs", true],
@@ -976,7 +997,6 @@ test("the request schema carries the validator's key and path restrictions (stag
     ["src/Check.mjs", false],
     ["SRC/check.mjs", false],
   ]) {
-    assert.equal(item.properties.path.enum.includes(path), accepted, path);
     const review = client(async () =>
       response(envelope(report({ path }))),
     ).review(fixture());
@@ -985,40 +1005,35 @@ test("the request schema carries the validator's key and path restrictions (stag
   }
 });
 
-test("the path enum is each request's own changed files, deletions included", async () => {
-  const input = fixture([
-    {
-      path: "lib/a.mjs",
-      status: "M",
-      before: blob("export const a = 1;\n"),
-      after: blob("export const a = 2;\n"),
-    },
-    {
-      path: "lib/z.mjs",
-      status: "D",
-      before: blob("export const z = 1;\n"),
-      after: null,
-    },
-  ]);
-  let sent;
-  await client(async (url, init) => {
-    sent = JSON.parse(init.body);
-    return response();
-  }).review(input);
-  assert.deepEqual(
-    sent.output_config.format.schema.properties.findings.items.properties.path
-      .enum,
-    ["lib/a.mjs", "lib/z.mjs"],
-  );
-  const deleted = {
-    complete: true,
-    outcome: "findings",
-    findingCount: 1,
-    summary: "Issues",
-    findings: [{ ...finding, path: "lib/z.mjs" }],
-  };
-  const result = await client(async () => response(envelope(deleted))).review(
-    input,
-  );
-  assert.equal(result.review.findings[0].path, "lib/z.mjs");
+test("no comparison data reaches the output schema", async () => {
+  // Author-chosen file names stay in the untrusted user message: the provider
+  // renders the schema into its own format prompt, and a per-request path enum
+  // failed compilation (HTTP 400) above about 4-8K characters.
+  const schemas = [];
+  for (const input of [
+    fixture(),
+    fixture([
+      {
+        path: "lib/a.mjs",
+        status: "M",
+        before: blob("export const a = 1;\n"),
+        after: blob("export const a = 2;\n"),
+      },
+      {
+        path: "lib/z.mjs",
+        status: "D",
+        before: blob("export const z = 1;\n"),
+        after: null,
+      },
+    ]),
+  ]) {
+    await client(async (url, init) => {
+      schemas.push(JSON.parse(init.body).output_config.format.schema);
+      return response();
+    }).review(input);
+  }
+  assert.deepEqual(schemas[0], schemas[1]);
+  const text = JSON.stringify(schemas);
+  for (const path of ["src/check.mjs", "src/new.mjs", "lib/a.mjs", "lib/z.mjs"])
+    assert.ok(!text.includes(path), path);
 });
