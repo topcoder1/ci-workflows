@@ -142,7 +142,7 @@ arbitrary helper scripts; that's a different kind of repo.
   mutation-proven. Its sibling `test_lint_prettier_check_untrusted_head.sh`
   carries the same hardening for `lint.yml`'s read-only `prettier --check`.
 - `test_lint_prettier_check_untrusted_head.sh` — `lint.yml`'s `prettier
-  --check` has the same head-config-execution vector as the autofix write lane
+--check` has the same head-config-execution vector as the autofix write lane
   (the pull_request merge ref carries head content), minus the push PAT. Pins
   that the check never executes a head `prettier.config.cjs` (extracts and runs
   the check step against a canary; asserts the marker stays absent, that a base
