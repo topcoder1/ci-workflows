@@ -146,12 +146,13 @@ try {
 // repos the token can see. Controls: whois-api-llc/whoisxmlapi-samples a 404
 // "Not Found" non-carrier; a bogus ref a "No commit found" bad ref, which is
 // never read as an absence; topcoder1/ci-workflows a carrier. There are 46
-// carriers (45 live, 1 archived), and 268 rules files — every default branch
-// plus the head, test-merge and non-default base of all 188 open PRs. They hold
-// 14,029 entries with no parser warning, no empty, padded, '#'-leading or
-// non-string entry, and no '!' outside a comment. All 268 exit 0 with both
-// guards, and every verdict is unchanged. In the same pass, synthetic tag,
-// empty and non-string files flipped from 0 to 1, and a clean one stayed at 0.
+// carriers (45 live, 1 archived), and 266 rules files — every default branch
+// plus the head, test-merge and non-default base of all 187 open PRs. They hold
+// 13,901 entries with no warning (while parsing or converting), no empty,
+// padded, '#'-leading or non-string entry, and no '!' outside a comment. All
+// 266 exit 0 with both guards, and every verdict is unchanged. In the same
+// pass, synthetic tag, empty, non-string and collection-key files flipped from
+// 0 to 1, and a clean one stayed at 0.
 if (yamlWarnings.length > 0) {
 	fail(
 		`${RULES_PATH}: the YAML parser warned — ` +
