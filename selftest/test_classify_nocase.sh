@@ -174,14 +174,9 @@ sensitive:
 YAML
 expect_fail_closed "segment extglob negation under sensitive: fails closed" "negation"
 
-# ...but negation in a NON-folded class is not this guard's business: those
-# classes are still matched case-sensitively, so the invariant can't break
-# there. Guarding them too would be scope creep beyond the fold.
-cat > "$tmp/repo/.github/risk-paths.yml" <<'YAML'
-blocked: []
-trivial:
-  - '!src/**'
-YAML
-expect "docs/x.md" trivial "negation in a non-folded class is left alone"
+# Negation in the NON-folded classes fails closed too, but for a reason that
+# has nothing to do with the fold: there it is a fail-open on its own (one '!'
+# entry claims every other ungated file). Pinned in
+# test_classify_negation_guard.sh.
 
 exit "$failed"
