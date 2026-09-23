@@ -238,10 +238,16 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // file without the entry, not against the entry the author wrote: the list
 // exists to force review of the paths it names, and negation exempts exactly
 // the named one, the same intent argument the bracket pass above makes for a
-// dead entry. An independent review on whois-api-llc/wxa_webcat#1612
-// (2026-09-23) measured '!scripts/la1_deploy_ssh_setup.sh' passing this script
-// with exit 0 and that path's small diffs skipping Codex. Fleet audit before
-// extending the ban, same day, exit-code-gated with the same controls:
+// dead entry. A deliberate segment extglob ('src/!(generated)/**') is where
+// #227 is right: it forces exactly what it means and cannot fail open. It is
+// rejected anyway, as the bracket pass rejects an intentional '*.[jt]s': no
+// check can tell it from an accident, and the fleet uses none. Its rewrite is
+// 'src/**', which over-forces in the safe direction, not a list of
+// subdirectories, which leaves each new one to the cost gate. An independent
+// review on whois-api-llc/wxa_webcat#1612 (2026-09-23) measured
+// '!scripts/la1_deploy_ssh_setup.sh' passing this script with exit 0 and that
+// path's small diffs skipping Codex. Fleet audit before extending the ban,
+// same day, exit-code-gated with the same controls:
 // 142 non-archived repos, 45 carriers, and 247 rules files (every default
 // branch plus the head, test-merge and non-default base of all 176 open PRs).
 // Three carry always_review (topcoder1/ipgeo_core, whois-api-llc/techrecon,
@@ -286,8 +292,10 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 								`The named path is the one path the entry does not force: small and ` +
 								`docs/tests-only diffs to it alone skip Codex, while a diff to any other path ` +
 								`is forced into review; a '!(…)' extglob does the same within its segment. ` +
-								`List the paths that must always be reviewed positively — '${cls}' has no ` +
-								`'${EXCLUDE_KEY}:' to subtract paths with.`
+								`List the paths that must always be reviewed positively ('${cls}' has no ` +
+								`'${EXCLUDE_KEY}:'): prefer a broader glob such as 'src/**', which over-forces ` +
+								`in the safe direction, to a list of subdirectories, which leaves each new ` +
+								`one to the size and docs/tests skips.`
 						: `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
 								`negation inverts the match. A leading '!' matches every path EXCEPT the one ` +
 								`it names, and classify() takes the first class that matches, so one such ` +
