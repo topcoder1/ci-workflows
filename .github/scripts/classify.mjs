@@ -191,27 +191,64 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	}
 }
 
-// Glob negation is incompatible with the case-fold applied to the gating
-// classes, and breaks its one invariant. '!' inverts the match, so folding
-// case REMOVES gating rather than adding it: minimatch('FOO', '!foo') is true
-// (gated) but false under {nocase:true} (ungated) — a downgrade. Segment
-// extglobs have the same shape: 'src/!(*.md)' matches 'src/A.MD' today and
-// stops matching once case is folded. Fail closed rather than quietly violate
-// the invariant classify() documents. Zero of the 45 repos carrying a
-// risk-paths.yml use negation in a gating class (fleet audit 2026-07-14), so
-// — as with the bracket guard above — strictness costs nothing today and
-// stops the footgun from ever being introduced. (Codex round-2 P2 on the
-// change that introduced the fold.)
-for (const cls of NOCASE_CLASSES) {
+// Glob negation fails closed in EVERY pattern class, for a different reason in
+// each half of PATTERN_CLASSES.
+//
+// In the gating classes it is incompatible with the case-fold, and breaks its
+// one invariant. '!' inverts the match, so folding case REMOVES gating rather
+// than adding it: minimatch('FOO', '!foo') is true (gated) but false under
+// {nocase:true} (ungated) — a downgrade. Segment extglobs have the same shape:
+// 'src/!(*.md)' matches 'src/A.MD' today and stops matching once case is
+// folded. Fail closed rather than quietly violate the invariant classify()
+// documents. Zero of the 45 repos carrying a risk-paths.yml used negation in a
+// gating class (fleet audit 2026-07-14). (Codex round-2 P2 on the change that
+// introduced the fold.)
+//
+// In the safe classes it is a fail-OPEN on its own, fold or no fold. A negated
+// entry matches every path EXCEPT the one it names, and classify() returns the
+// first class with a match — so one gitignore-style line,
+//
+//     safe_test: ['tests/**', '!tests/fixtures/**']
+//
+// classifies every file that is not blocked or sensitive as safe_test: all of
+// the repo's `standard` code becomes auto-merge eligible, and so does every
+// file a future PR adds. A '!(…)' extglob is the same complement scoped to one
+// segment ('!(tests)/**' at the root is the whole repo again). Paths come back
+// OUT of a class through exclude:, which subtracts only what it names. Found by
+// an independent code review during topcoder1/webcrawl#579 (2026-09-22), and
+// verified against the vendored bundle: minimatch(
+// 'src/webcrawl/aws_pipeline/crawl_lock.py', '!no_such_file', {dot: true,
+// matchBase: false}) is true. Fleet audit before extending the ban, same day,
+// exit-code-gated over all 148 repos the token can see (controls:
+// whois-api-llc/whoisxmlapi-samples a 404 non-carrier, topcoder1/ci-workflows a
+// carrier): 45 carriers, and 267 rules files — every default branch plus the
+// merge ref, head and non-default base of all 188 open PRs — hold 13,940
+// patterns, none negated in any class. All 267 still exit 0 with this guard.
+//
+// So — as with the bracket guard above — strictness costs nothing today and
+// stops the footgun from ever being introduced. selftest/test_classify_nocase.sh
+// (case 10) pins the gating half, selftest/test_classify_negation_guard.sh the
+// safe half.
+for (const cls of PATTERN_CLASSES) {
 	for (const p of rules[cls] || []) {
 		if (typeof p === 'string' && (p.trimStart().startsWith('!') || p.includes('!('))) {
 			fail(
-				`${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
-					`'${cls}' is matched case-insensitively so that a lowercase pattern still ` +
-					`catches real-world case variants, and negation inverts that: folding case ` +
-					`REMOVES gating instead of adding it (minimatch('FOO','!foo') is true, but ` +
-					`false with nocase). Express the rule positively — list the paths you want ` +
-					`gated rather than the ones you don't. Context: wxa-jake-ai#877.`
+				NOCASE_CLASSES.has(cls)
+					? `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
+							`'${cls}' is matched case-insensitively so that a lowercase pattern still ` +
+							`catches real-world case variants, and negation inverts that: folding case ` +
+							`REMOVES gating instead of adding it (minimatch('FOO','!foo') is true, but ` +
+							`false with nocase). Express the rule positively — list the paths you want ` +
+							`gated rather than the ones you don't. Context: wxa-jake-ai#877.`
+					: `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
+							`negation inverts the match. A leading '!' matches every path EXCEPT the one ` +
+							`it names, and classify() takes the first class that matches, so one such ` +
+							`entry reclassifies every ungated file (anything blocked: and sensitive: don't ` +
+							`catch) into an auto-merge-eligible tier instead of the strict 'standard' ` +
+							`fallback — including every file a future PR adds; a '!(…)' extglob does the ` +
+							`same within its segment. List the paths you want in '${cls}' positively; to ` +
+							`carve some back out, use "${EXCLUDE_KEY}:\\n  ${cls}:\\n    - '…'", which ` +
+							`subtracts only what it names.`
 			);
 		}
 	}
