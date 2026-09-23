@@ -233,10 +233,15 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // review on every path EXCEPT the one it names: small and docs/tests-only diffs
 // to that path alone skip Codex, while every other diff is pushed into review.
 // always_review has no exclude:, so there is no subtraction to rewrite it into.
-// The shape and bracket passes above covered this list; the ban did not until
-// an independent review on whois-api-llc/wxa_webcat#1612 (2026-09-23) measured
-// '!scripts/la1_deploy_ssh_setup.sh' passing this script with exit 0. Fleet
-// audit before extending it, same day, exit-code-gated with the same controls:
+// ci-workflows#227 left this list out on purpose: a match only ever ADDS a
+// Codex run, so negation can widen review but never narrow it. True against a
+// file without the entry, not against the entry the author wrote: the list
+// exists to force review of the paths it names, and negation exempts exactly
+// the named one, the same intent argument the bracket pass above makes for a
+// dead entry. An independent review on whois-api-llc/wxa_webcat#1612
+// (2026-09-23) measured '!scripts/la1_deploy_ssh_setup.sh' passing this script
+// with exit 0 and that path's small diffs skipping Codex. Fleet audit before
+// extending the ban, same day, exit-code-gated with the same controls:
 // 142 non-archived repos, 45 carriers, and 247 rules files (every default
 // branch plus the head, test-merge and non-default base of all 176 open PRs).
 // Three carry always_review (topcoder1/ipgeo_core, whois-api-llc/techrecon,
