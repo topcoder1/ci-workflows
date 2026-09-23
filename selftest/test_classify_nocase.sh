@@ -175,7 +175,8 @@ YAML
 expect_fail_closed "segment extglob negation under sensitive: fails closed" "negation"
 
 # Negation in the NON-folded classes fails closed too, but for a reason that
-# has nothing to do with the fold: there it is a fail-open on its own (one
-# '!' entry claims every ungated file). Pinned in test_classify_negation_guard.sh.
+# has nothing to do with the fold: there it is a fail-open on its own (one '!'
+# entry claims every other ungated file). Pinned in
+# test_classify_negation_guard.sh.
 
 exit "$failed"
