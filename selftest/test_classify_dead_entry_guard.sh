@@ -279,6 +279,15 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   place "$where" '[a, b]'
   expect_fail_closed "'- [a, b]' under $where: fails closed as a list" \
     "(under '$where:') is a list, not a string" "$consequence"
+  # An alias to its own anchor is a legal YAML cycle, and JSON.stringify throws
+  # on one: the message must still come from fail(), not a stack trace. (Codex
+  # review round 3 of this change.)
+  place "$where" '&x [*x]'
+  expect_fail_closed "'- &x [*x]' (a recursive list) under $where: fails closed as a list" \
+    "(under '$where:') is a list, not a string" "$consequence"
+  place "$where" '&y {k: *y}'
+  expect_fail_closed "'- &y {k: *y}' (a recursive mapping) under $where: fails closed as a mapping" \
+    "(under '$where:') is a mapping, not a string" "$consequence"
 done
 
 # 6. Strings no changed path can match fail closed in every location. Changed
