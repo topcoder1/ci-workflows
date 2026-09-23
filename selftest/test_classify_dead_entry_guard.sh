@@ -247,30 +247,38 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   done
 done
 
-# 5. Non-string entries fail closed in every location, each named by its kind.
-#    A bare '-' and a '#' after it (a comment, not a pattern) are both null.
+# 5. Non-string entries fail closed in every location, each named by its kind
+#    and by what it does THERE: an exclusion is skipped and exempts nothing,
+#    while minimatch throws on it in a class list (this script) or in
+#    always_review (codex-gate.mjs). A bare '-' and a '#' after it (a comment,
+#    not a pattern) are both null.
 for where in sensitive safe_test exclude.sensitive always_review; do
+  case "$where" in
+    exclude.*) consequence="it silently exempts nothing" ;;
+    always_review) consequence="codex-gate.mjs fails the Codex job" ;;
+    *) consequence="this script crashes" ;;
+  esac
   place "$where" ''
   expect_fail_closed "a bare '-' under $where: fails closed as null" \
-    "(under '$where:') is null, not a string"
+    "(under '$where:') is null, not a string" "$consequence"
   place "$where" '#scripts/deploy.sh'
   expect_fail_closed "'- #scripts/deploy.sh' (a comment) under $where: fails closed as null" \
-    "(under '$where:') is null, not a string"
+    "(under '$where:') is null, not a string" "$consequence"
   place "$where" '~'
   expect_fail_closed "'- ~' under $where: fails closed as null" \
-    "(under '$where:') is null, not a string"
+    "(under '$where:') is null, not a string" "$consequence"
   place "$where" '42'
   expect_fail_closed "'- 42' under $where: fails closed as a number" \
-    "(under '$where:') is a number, not a string"
+    "(under '$where:') is a number, not a string" "$consequence"
   place "$where" 'true'
   expect_fail_closed "'- true' under $where: fails closed as a boolean" \
-    "(under '$where:') is a boolean, not a string"
+    "(under '$where:') is a boolean, not a string" "$consequence"
   place "$where" 'key: value'
   expect_fail_closed "'- key: value' under $where: fails closed as a mapping" \
-    "(under '$where:') is a mapping, not a string"
+    "(under '$where:') is a mapping, not a string" "$consequence"
   place "$where" '[a, b]'
   expect_fail_closed "'- [a, b]' under $where: fails closed as a list" \
-    "(under '$where:') is a list, not a string"
+    "(under '$where:') is a list, not a string" "$consequence"
 done
 
 # 6. Strings no changed path can match fail closed in every location. Changed
