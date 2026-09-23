@@ -40,9 +40,9 @@ import { readFileSync } from 'node:fs';
 // would otherwise hard-fail on a file its older YAML never fetched. Anything
 // other than a missing file (a corrupt or truncated bundle) is re-thrown rather
 // than papered over: this gate fails closed.
-let parse, minimatch;
+let parseDocument, minimatch;
 try {
-	({ parse, minimatch } = await import('./classifier-deps.mjs'));
+	({ parseDocument, minimatch } = await import('./classifier-deps.mjs'));
 } catch (e) {
 	if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
 	process.stderr.write(
@@ -50,7 +50,7 @@ try {
 			'node_modules. Verdicts are unaffected, but the workflow running this is out of ' +
 			'date: it should fetch classifier-deps.mjs alongside classify.mjs.\n'
 	);
-	({ parse } = await import('yaml'));
+	({ parseDocument } = await import('yaml'));
 	({ minimatch } = await import('minimatch'));
 }
 
@@ -95,11 +95,48 @@ function fail(msg) {
 	process.exit(1);
 }
 
-let rules;
+let rules, yamlWarnings;
 try {
-	rules = parse(readFileSync(RULES_PATH, 'utf8'));
+	const doc = parseDocument(readFileSync(RULES_PATH, 'utf8'));
+	// parse() threw the first error; this keeps that path, and its message,
+	// exactly as it was. What parseDocument() adds is the warnings, which
+	// parse() only printed — see the guard below.
+	if (doc.errors.length > 0) throw doc.errors[0];
+	yamlWarnings = doc.warnings;
+	rules = doc.toJS();
 } catch (e) {
 	fail(`failed to read ${RULES_PATH}: ${e.message}`);
+}
+
+// Every YAML parser WARNING fails closed, not only errors. A warning is yaml
+// carrying on with its best guess, and a guess in a rules file can be a rule
+// that silently does nothing. The motivating case: an UNQUOTED entry that
+// starts with '!' is a YAML tag, not text. '- !scripts/la1_deploy_ssh_setup.sh'
+// and '- !secrets/**' name tags the parser cannot resolve, so it warns
+// (TAG_RESOLVE_FAILED), drops the tag and keeps an EMPTY string — and the
+// negation pass below looks for a '!' that is no longer there. Under
+// blocked:/sensitive: that gate disappears; under always_review: codex-gate.mjs
+// stops forcing a review of the path, so a 5-line diff to it skips Codex; and
+// this script exits 0 throughout, the warning lost in the job log. Quoting
+// fixes it, and a quoted '!x' is glob negation, which that pass rejects with
+// its own reason. Tag spellings that resolve to '' WITHOUT a warning ('- !',
+// '- !!str') are caught by the entry pass further down.
+//
+// ci-workflows#227 named this out of scope ("Rejecting empty patterns or YAML
+// warnings would be a separate hardening"); the independent review of
+// ci-workflows#228 raised it again. selftest/test_classify_dead_entry_guard.sh
+// pins it in every location.
+if (yamlWarnings.length > 0) {
+	fail(
+		`${RULES_PATH}: the YAML parser warned — ` +
+			yamlWarnings.map((w) => `${w.message.split('\n')[0].replace(/:$/, '')} (${w.code})`).join('; ') +
+			`. A warning is not an error to the parser, which carries on with its best guess, so it ` +
+			`fails closed here. The usual cause is an unquoted entry that starts with '!' ` +
+			`('- !scripts/deploy.sh', '- !secrets/**'): YAML reads it as a TAG, not text, drops the ` +
+			`tag it cannot resolve and keeps an EMPTY pattern, so the gate, exclusion or forced Codex ` +
+			`review that line names silently disappears while this script exits 0. Quote every ` +
+			`pattern ("- '…'"); a quoted leading '!' is glob negation, which is rejected on its own.`
+	);
 }
 
 // A scalar where a list belongs is a fail-OPEN, and a silent one. JS iterates
@@ -157,6 +194,53 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	}
 }
 
+// Every entry must be a string with something in it: in every class, in
+// always_review, and — through the same checkEntry() — in every exclude: list
+// below. The passes after this one test strings only and skip anything else,
+// so before this pass two kinds of entry went unchecked:
+//
+// An empty or whitespace-only string matches no path. It reads like a rule and
+// gates nothing. YAML makes one without a warning from a bare '- !' (its
+// non-specific tag) or '- !!str', so the warning guard above cannot see these.
+//
+// A non-string entry — '- 42', 'true', 'null', '~', a bare '-', 'key: value',
+// '[…]' — is skipped outright by the passes below and by isExcluded(), so in
+// exclude: it silently exempts nothing. In a class list or always_review it
+// makes minimatch throw ('invalid pattern'), but only for a changed file that
+// reaches it: classify() and codex-gate.mjs both stop at a file's first match.
+// So the same line crashes one PR's classification and is silently skipped on
+// the next, and in always_review it fails the Codex job instead of naming
+// itself. Rejecting it here, on every PR, makes it loud in the right place.
+//
+// Fail closed on both, in the style of the other passes: a rules entry nobody
+// can match is a gate that is not there.
+function checkEntry(p, where) {
+	if (typeof p !== 'string') {
+		const kind =
+			p === null ? 'null' : Array.isArray(p) ? 'a list' : typeof p === 'object' ? 'a mapping' : `a ${typeof p}`;
+		fail(
+			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is ${kind}, not a string — ` +
+				`YAML reads an unquoted number, true/false, null, '~' or a bare '-' as that type, and ` +
+				`'key: value' or '[…]' as a collection. minimatch throws on anything but a string, so ` +
+				`depending on which files a PR touches the line either crashes this script (or ` +
+				`codex-gate.mjs, for 'always_review:') or is skipped and silently matches nothing. ` +
+				`Quote the pattern ("- '…'") or delete the line.`
+		);
+	}
+	if (p.trim() === '') {
+		fail(
+			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is empty or whitespace-only — ` +
+				`an empty pattern matches no path, and a whitespace-only one only a path made of that ` +
+				`whitespace, so the line gates nothing while reading as if it did. A bare '- !' or ` +
+				`'- !!str' parses this way too: YAML reads the '!' as a tag, not text. Write the path ` +
+				`you meant, quoted ("- '…'"), or delete the line.`
+		);
+	}
+}
+for (const cls of [...PATTERN_CLASSES, 'always_review']) {
+	for (const p of rules[cls] || []) checkEntry(p, cls);
+}
+
 // A '[' in a pattern is a minimatch character class, never a literal
 // bracket — a SvelteKit-style 'src/routes/[id]/+page.ts' entry silently
 // matches nothing, and GitHub CODEOWNERS drops bracket lines entirely, so
@@ -171,9 +255,13 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 //
 // 'always_review' is validated here too even though this script never
 // matches against it: codex-gate.mjs consumes it with the same minimatch
-// semantics but is deliberately permissive on config errors, so this
-// fail-closed pass is the only place a dead always_review entry gets
-// caught before it silently skips a required Codex review.
+// semantics. That gate tolerates an unparseable file or a non-list value
+// (either reads as no always_review at all) and applies any string it is
+// given without a word, so this script's fail-closed passes are the only
+// place a dead always_review entry gets caught before it silently skips a
+// required Codex review. The gate throws only on a non-string entry, which
+// fails the Codex job rather than naming the line; the entry pass above names
+// it here.
 for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	for (const p of rules[cls] || []) {
 		if (typeof p === 'string' && (p.includes('[') || p.includes(']'))) {
@@ -405,7 +493,7 @@ for (const cls of Object.keys(excludeRules)) {
 		);
 	}
 	for (const p of patterns || []) {
-		if (typeof p !== 'string') continue;
+		checkEntry(p, `${EXCLUDE_KEY}.${cls}`);
 		if (p.includes('[') || p.includes(']')) {
 			fail(
 				`${RULES_PATH}: pattern '${p}' (under '${EXCLUDE_KEY}.${cls}:') contains a bracket — ` +

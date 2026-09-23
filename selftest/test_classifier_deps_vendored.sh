@@ -82,13 +82,24 @@ fi
 echo
 echo "2. the vendored deps actually RUN (not just import)"
 
-# The regression this file exists for. Call both exports for real: a bundle
+# The regression this file exists for. Call every export for real: a bundle
 # whose require shim throws imports cleanly and only fails on use.
 cat > "$tmp/exercise.mjs" <<'EOF'
-import { parse, minimatch } from './classifier-deps.mjs';
+import { parse, parseDocument, minimatch } from './classifier-deps.mjs';
 const rules = parse("blocked:\n  - '**/.env*'\n  - '**/secrets*'\nsafe_test:\n  - 'tests/**'\n");
 if (!Array.isArray(rules.blocked) || rules.blocked.length !== 2) {
   console.error('parse() returned unexpected shape: ' + JSON.stringify(rules));
+  process.exit(1);
+}
+// classify.mjs parses with parseDocument() so that it can fail closed on a
+// parser WARNING: an unquoted '- !x' entry is a tag yaml cannot resolve, which
+// parse() only warns about while keeping an empty string
+// (test_classify_dead_entry_guard.sh). Pin that the warning is still reported.
+const doc = parseDocument("always_review:\n  - !scripts/x.sh\n");
+const codes = doc.warnings.map((w) => w.code).join(',');
+const value = JSON.stringify(doc.toJS());
+if (codes !== 'TAG_RESOLVE_FAILED' || doc.errors.length !== 0 || value !== '{"always_review":[""]}') {
+  console.error(`parseDocument() gave warnings [${codes}], ${doc.errors.length} error(s), value ${value}`);
   process.exit(1);
 }
 // Exercise the option sets classify.mjs actually uses, including nocase.
@@ -110,7 +121,7 @@ console.log('OK');
 EOF
 cp "$DEPS" "$tmp/classifier-deps.mjs"
 if out=$(cd "$tmp" && node exercise.mjs 2>&1) && [ "$out" = "OK" ]; then
-	ok "parse() and minimatch() both execute and return correct results"
+	ok "parse(), parseDocument() and minimatch() all execute and return correct results"
 else
 	bad "vendored deps failed when CALLED: $(printf '%s' "$out" | tr '\n' '|')"
 fi
