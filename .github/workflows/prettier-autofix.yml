@@ -66,9 +66,11 @@ name: Prettier Autofix
 #     .git/config where head-reachable code could read it.
 #   - The target list is passed after `--`, so a head file literally named
 #     `--plugin=x` cannot be reparsed as a prettier flag.
-#   Pinned by selftest/test_prettier_untrusted_head_config.sh. Note: this
-#   hardens prettier-autofix.yml only; lint.yml's read-only `prettier --check`
-#   still loads head config (no PAT there, lower severity) — tracked separately.
+#   Pinned by selftest/test_prettier_untrusted_head_config.sh. lint.yml's
+#   read-only `prettier --check` carries the same hardening (its resolve +
+#   isolated-install steps are byte-identical to these, drift-checked by
+#   selftest/test_lint_prettier_check_untrusted_head.sh), so the check lane and
+#   this write lane resolve config identically.
 
 on:
   workflow_call:
