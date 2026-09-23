@@ -435,7 +435,8 @@ test("native context mismatches refuse before filesystem access", async (t) => {
     "the consumed v2 ref": {
       ref: "refs/tags/merge-policy-review-execution-v2",
     },
-    "a branch ref": { ref: "refs/heads/merge-policy-review-v3" },
+    "the superseded v3 ref": { ref: "refs/tags/merge-policy-review-v3" },
+    "a branch ref": { ref: "refs/heads/merge-policy-review-v4" },
     "the probe's workflow path": {
       workflowRef: `${REPOSITORY}/.github/workflows/merge-policy-selftest.yml@${REVIEW_DISPATCH_REF}`,
     },
@@ -650,7 +651,7 @@ test("the inactive workflow template pins the entrypoint's ref, path, inputs and
   // Literal on purpose: the constant and the template are separate artifacts,
   // and a test that only compared them to each other would pass a bump that
   // landed in neither.
-  const expected = "refs/tags/merge-policy-review-v3";
+  const expected = "refs/tags/merge-policy-review-v4";
   assert.equal(REVIEW_DISPATCH_REF, expected);
   assert.equal(
     REVIEW_DISPATCH_WORKFLOW_PATH,
@@ -695,7 +696,9 @@ test("the inactive workflow template pins the entrypoint's ref, path, inputs and
     "the secret is named once as the env key and once as its source",
   );
   assert.equal(template.split("permissions:\n  contents: read\n").length, 2);
-  // Negative control: consumed probe refs must not survive in the template.
+  // Negative control: consumed probe refs and the superseded v3 producer ref
+  // must not survive in the template.
   assert.doesNotMatch(template, /merge-policy-review-execution-v[12]/);
+  assert.doesNotMatch(template, /merge-policy-review-v3/);
   assert.doesNotMatch(template, /merge-policy-selftest\.yml/);
 });
