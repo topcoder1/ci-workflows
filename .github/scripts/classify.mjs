@@ -40,9 +40,9 @@ import { readFileSync } from 'node:fs';
 // would otherwise hard-fail on a file its older YAML never fetched. Anything
 // other than a missing file (a corrupt or truncated bundle) is re-thrown rather
 // than papered over: this gate fails closed.
-let parseDocument, minimatch;
+let parseDocument, isAlias, isMap, isScalar, isSeq, minimatch;
 try {
-	({ parseDocument, minimatch } = await import('./classifier-deps.mjs'));
+	({ parseDocument, isAlias, isMap, isScalar, isSeq, minimatch } = await import('./classifier-deps.mjs'));
 } catch (e) {
 	if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
 	process.stderr.write(
@@ -50,7 +50,7 @@ try {
 			'node_modules. Verdicts are unaffected, but the workflow running this is out of ' +
 			'date: it should fetch classifier-deps.mjs alongside classify.mjs.\n'
 	);
-	({ parseDocument } = await import('yaml'));
+	({ parseDocument, isAlias, isMap, isScalar, isSeq } = await import('yaml'));
 	({ minimatch } = await import('minimatch'));
 }
 
@@ -95,9 +95,13 @@ function fail(msg) {
 	process.exit(1);
 }
 
-let rules, yamlWarnings;
+// The source text and the parsed document stay in reach after parsing: the
+// wrapped-pattern guard below reads each entry's SOURCE, which the value alone
+// cannot show.
+let rules, yamlWarnings, source, doc;
 try {
-	const doc = parseDocument(readFileSync(RULES_PATH, 'utf8'));
+	source = readFileSync(RULES_PATH, 'utf8');
+	doc = parseDocument(source);
 	// parse() threw the first error; this keeps that path, and its message,
 	// exactly as it was. What parseDocument() adds is the warnings, which
 	// parse() only printed — see the guard below.
@@ -170,6 +174,67 @@ if (yamlWarnings.length > 0) {
 	);
 }
 
+// The top level must be a PLAIN mapping, or every gate disappears at once and
+// this script still exits 0: each class is read as rules[cls], which is
+// undefined on a list, on a scalar, and on the JS Set and Map that yaml builds —
+// without a warning — for a top-level '!!set' or '!!omap'. The realistic shape
+// is a file whose keys were all written as list items,
+//
+//     - blocked:
+//         - '**/.env*'
+//
+// which YAML reads as ONE list of one-key mappings, so every PR classifies
+// 'standard'. An empty or comment-only file (null) crashed on rules[cls] with a
+// TypeError instead: closed, but naming nothing.
+if (rules === null || rules === undefined) {
+	fail(
+		`${RULES_PATH}: holds no rules — it is empty, holds only comments, or is null — so no class ` +
+			`would gate anything. Write the class lists at the top level ("blocked:\\n  - '…'").`
+	);
+}
+if (typeof rules !== 'object' || Object.getPrototypeOf(rules) !== Object.prototype) {
+	const kind = Array.isArray(rules)
+		? 'a list'
+		: typeof rules === 'object'
+			? `a ${rules.constructor?.name ?? 'non-plain object'}`
+			: `a ${typeof rules}`;
+	fail(
+		`${RULES_PATH}: the top level must be a mapping of class name → pattern list ` +
+			`("blocked:\\n  - '…'"), got ${kind}. Every class is read from that mapping, so any other ` +
+			`shape silently drops every gate while this script exits 0. A key written as a list item ` +
+			`('- blocked:') makes the whole file one list: start each key at the beginning of its line.`
+	);
+}
+
+// Every top-level key must be one a tool reads. A key nothing reads is
+// ignored, so a misspelt class ('sensitve:', 'SENSITIVE:', 'blocked_paths:') is
+// a gate that does not exist while this script exits 0. The allowlist is
+// STRICT by choice (2026-09-23). The alternative, rejecting only keys within
+// two edits of a known one, lets 'SENSITIVE:' (nine edits away) and
+// 'blocked_paths:' (six) through. It holds the eight keys this script reads
+// plus sensitive_deploy_gated, a mapping that dotclaude's /babysit-prs tooling
+// reads (bb-pr-deploy-gated-derive.mjs) and this script ignores. The cost is
+// coupling, taken on purpose: a tool that starts reading a NEW key from this
+// file must add it here first. Until it does, the PR that adds the key to a
+// repo fails its own classify check (pr-classify.yml reads the PR's
+// test-merge), and once merged, both auto-merge lanes stop arming in that repo
+// (they read the base branch's rules). exclude: already refuses a class name it
+// does not know, for the same reason.
+const KNOWN_KEYS = [...PATTERN_CLASSES, 'always_review', EXCLUDE_KEY, 'sensitive_deploy_gated'];
+const unknownKeys = Object.keys(rules).filter((k) => !KNOWN_KEYS.includes(k));
+if (unknownKeys.length > 0) {
+	fail(
+		`${RULES_PATH}: unknown top-level key${unknownKeys.length > 1 ? 's' : ''} ` +
+			`${unknownKeys.map((k) => JSON.stringify(k)).join(', ')} — no tool reads a key it does not ` +
+			`know, so a misspelt class is a gate that does not exist while this script exits 0. Keys ` +
+			`are case-sensitive; valid keys are ${KNOWN_KEYS.join(', ')}.` +
+			(unknownKeys.includes('standard')
+				? ` 'standard' is not a key: it is the fallback for any path no class matches, and takes no list.`
+				: '') +
+			` A tool that reads a new key must add it to classify.mjs first.`
+	);
+}
+
 // A scalar where a list belongs is a fail-OPEN, and a silent one. JS iterates
 // a string per-character, so `sensitive: 'cmd/**'` becomes the patterns
 // 'c','m','d','/','*','*' — none of which trips the bracket or negation guards
@@ -222,6 +287,72 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 				`pattern and '${cls}' silently stops matching anything — an UN-gating fail-open, ` +
 				`not a syntax error. Write each pattern on its own "- '…'" line.`
 		);
+	}
+}
+
+// A pattern wrapped over lines is ONE pattern, not a list. YAML folds a line
+// break inside a plain or quoted scalar, and between the lines of a '>' block,
+// into a space, so
+//
+//     sensitive:
+//       - cmd/**
+//         internal/**
+//
+// is the single pattern 'cmd/** internal/**', which matches neither path, and
+// this script exits 0. A flow list missing a comma ('[go.sum' then
+// 'package-lock.json]' on the next line) folds the same way. The value cannot
+// be told apart from a real interior space ('docs/My Notes/**'), which is why
+// the entry pass below cannot catch it: this guard reads the SOURCE of every
+// entry in the locations that pass covers — every class, always_review and
+// every exclude: list, through aliases — and rejects a plain or quoted entry
+// whose text spans lines, and a '>' block of more than one content line. Two
+// spellings fold nothing and stay legal: a double-quoted line ending in an
+// escaped '\', which joins the lines with nothing between them, and a
+// one-line '>' or '|' block. A '|' block of several lines keeps its line
+// breaks, which the entry pass rejects.
+const deref = (n) => (isAlias(n) ? n.resolve(doc) : n);
+function isWrapped(n) {
+	const text = source.slice(n.range[0], n.range[1]);
+	if (n.type === 'PLAIN' || n.type === 'QUOTE_SINGLE') return /[\r\n]/.test(text);
+	if (n.type === 'QUOTE_DOUBLE') {
+		// A '\' escapes the character after it, so a line break is joined only
+		// when an odd run of backslashes precedes it; '\\' is a literal '\'.
+		for (let i = 0; i < text.length; i++) {
+			if (text[i] === '\\') i += text.startsWith('\r\n', i + 1) ? 2 : 1;
+			else if (text[i] === '\r' || text[i] === '\n') return true;
+		}
+		return false;
+	}
+	if (n.type === 'BLOCK_FOLDED') {
+		// The first line is the '>' header; the rest is the content.
+		return text.split(/\r\n|\r|\n/).slice(1).filter((l) => l.trim() !== '').length > 1;
+	}
+	return false;
+}
+const entryLists = [...PATTERN_CLASSES, 'always_review'].map((cls) => [cls, doc.get(cls, true)]);
+const excludeNode = deref(doc.get(EXCLUDE_KEY, true));
+if (isMap(excludeNode)) {
+	for (const { key, value } of excludeNode.items) {
+		const k = deref(key);
+		entryLists.push([`${EXCLUDE_KEY}.${isScalar(k) ? k.value : k}`, value]);
+	}
+}
+for (const [where, list] of entryLists) {
+	const seq = deref(list);
+	if (!isSeq(seq)) continue; // absent, empty, or a shape the list guards name
+	for (const item of seq.items) {
+		const n = deref(item);
+		if (isScalar(n) && isWrapped(n)) {
+			fail(
+				`${RULES_PATH}: entry ${JSON.stringify(n.value)} (under '${where}:') is wrapped over ` +
+					`several lines — YAML joins the lines of a plain or quoted scalar, or of a '>' block, ` +
+					`into ONE pattern (a single line break becomes a space), not the list it looks like, ` +
+					`so it matches none of the paths its lines name. Give each pattern its own "- '…'" ` +
+					`line; in a '[…]' flow list, separate the entries with commas. To break one long ` +
+					`pattern, end the line inside double quotes with '\\', which joins the lines with ` +
+					`nothing between them.`
+			);
+		}
 	}
 }
 
@@ -325,6 +456,36 @@ function checkEntry(p, where) {
 				`If the path was commented out, delete the line; to match a path that really starts ` +
 				`with '#', escape it ('\\#…').`
 		);
+	}
+	// Changed paths are the repo-relative paths of FILES, so none ends with '/'
+	// or starts with '/' or './' — and minimatch keeps a leading '.' segment,
+	// so './infra/**' is no alias of 'infra/**'. Each shape is a habit carried
+	// in from CODEOWNERS or .gitignore, where 'infra/' means everything under
+	// infra/ and a leading '/' anchors a pattern to the repo root; here every
+	// pattern is already anchored there. Brace alternatives are checked too,
+	// since '{infra/,terraform/}' spells the same dead entry twice.
+	for (const s of [p, ...minimatch.braceExpand(p)]) {
+		const shape = s.endsWith('/')
+			? "ends with '/'"
+			: s.startsWith('./')
+				? "starts with './'"
+				: s.startsWith('/')
+					? "starts with '/'"
+					: '';
+		if (shape) {
+			fail(
+				`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') ${shape}` +
+					(s === p ? '' : ` (brace alternative ${JSON.stringify(s)})`) +
+					` — changed paths are the repo-relative paths of files, so none ends with '/' or ` +
+					`starts with '/' or './', and the entry matches no changed path. ` +
+					(s.endsWith('/')
+						? `In CODEOWNERS and .gitignore 'infra/' means everything under infra/; here that is 'infra/**'.`
+						: s.startsWith('./')
+							? `Drop the './': every pattern here is already relative to the repo root.`
+							: `Drop the leading '/': in CODEOWNERS and .gitignore it anchors a pattern to the ` +
+								`repo root, and every pattern here is already anchored there.`)
+			);
+		}
 	}
 }
 for (const cls of [...PATTERN_CLASSES, 'always_review']) {

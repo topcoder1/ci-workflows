@@ -85,7 +85,7 @@ echo "2. the vendored deps actually RUN (not just import)"
 # The regression this file exists for. Call every export for real: a bundle
 # whose require shim throws imports cleanly and only fails on use.
 cat > "$tmp/exercise.mjs" <<'EOF'
-import { parse, parseDocument, minimatch } from './classifier-deps.mjs';
+import { parse, parseDocument, isAlias, isMap, isScalar, isSeq, minimatch } from './classifier-deps.mjs';
 const rules = parse("blocked:\n  - '**/.env*'\n  - '**/secrets*'\nsafe_test:\n  - 'tests/**'\n");
 if (!Array.isArray(rules.blocked) || rules.blocked.length !== 2) {
   console.error('parse() returned unexpected shape: ' + JSON.stringify(rules));
@@ -100,6 +100,19 @@ const codes = doc.warnings.map((w) => w.code).join(',');
 const value = JSON.stringify(doc.toJS());
 if (codes !== 'TAG_RESOLVE_FAILED' || doc.errors.length !== 0 || value !== '{"always_review":[""]}') {
   console.error(`parseDocument() gave warnings [${codes}], ${doc.errors.length} error(s), value ${value}`);
+  process.exit(1);
+}
+// classify.mjs walks the parsed document with these four predicates to read a
+// pattern's SOURCE, which is how it rejects a pattern wrapped over lines
+// (test_classify_rules_shape_guard.sh). Each must answer true on its own node
+// type and false on another's, and an alias must still resolve.
+const walked = parseDocument("sensitive: &s\n  - 'cmd/**'\nalways_review: *s\n");
+const seq = walked.get('sensitive', true);
+const alias = walked.get('always_review', true);
+const got = [isMap(walked.contents), isSeq(seq), isScalar(seq.items[0]), isAlias(alias),
+  isSeq(alias.resolve(walked)), isMap(seq), isSeq(walked.contents), isScalar(seq), isAlias(seq)].join(',');
+if (got !== 'true,true,true,true,true,false,false,false,false') {
+  console.error(`the node predicates answered ${got}`);
   process.exit(1);
 }
 // Exercise the option sets classify.mjs actually uses, including nocase.
@@ -121,7 +134,7 @@ console.log('OK');
 EOF
 cp "$DEPS" "$tmp/classifier-deps.mjs"
 if out=$(cd "$tmp" && node exercise.mjs 2>&1) && [ "$out" = "OK" ]; then
-	ok "parse(), parseDocument() and minimatch() all execute and return correct results"
+	ok "parse(), parseDocument(), the node predicates and minimatch() all execute and return correct results"
 else
 	bad "vendored deps failed when CALLED: $(printf '%s' "$out" | tr '\n' '|')"
 fi

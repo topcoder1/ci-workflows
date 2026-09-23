@@ -52,6 +52,24 @@ arbitrary helper scripts; that's a different kind of repo.
   (a minimatch comment) or not a string, in every class, `exclude:` list and
   `always_review`. Positive controls: a quoted `'!x'` still gets the negation
   guard's own message, and ordinary entries still load.
+- `test_classify_rules_shape_guard.sh` — `classify.mjs` fails closed on the
+  `risk-paths.yml` shapes that silently drop a gate while it exits 0. A top
+  level that is not a plain mapping (`- blocked: […]` makes the whole file one
+  list; a `!!set` or `!!omap` becomes a JS Set or Map) drops every gate at
+  once, and an empty or comment-only file crashed with a TypeError instead of
+  a message. An unknown top-level key (`sensitve:`, `SENSITIVE:`,
+  `blocked_paths:`) is a gate that does not exist: keys are held to a strict
+  allowlist of the nine the fleet uses (the eight `classify.mjs` reads, plus
+  `sensitive_deploy_gated`, which dotclaude's `/babysit-prs` tooling reads). An
+  entry that ends with `/` (`infra/`, a CODEOWNERS habit) or starts with `./`
+  or `/` matches no changed path, in any brace alternative too. A pattern
+  wrapped over lines (`- cmd/**` with `internal/**` indented on the next line,
+  a two-line `>-` block, a flow list missing a comma) is ONE pattern with a
+  space in it; since the value cannot be told from a real interior space, the
+  guard reads each entry's source through yaml's node predicates, which the
+  vendored bundle now exports. Positive controls: all nine keys together, and
+  every spelling that folds nothing (an escaped `\` line join, a one-line `>-`
+  block, a flow list across lines with its comma), in LF and CRLF files.
 - `test_classifier_deps_vendored.sh` — the classifier's deps are a committed,
   version-pinned esbuild bundle (`.github/scripts/classifier-deps.mjs`) instead
   of a run-time `npm install`. The install used to run inside the caller's
