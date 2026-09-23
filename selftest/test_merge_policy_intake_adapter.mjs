@@ -306,6 +306,26 @@ test("the readers admit the receipt through the real intake, with one fresh rech
   }
 });
 
+test("the adapter hands the intake's 10 s deadline to the live recheck (staging run 35810541667)", async () => {
+  // Without it the client falls back to its own 2 s default, which the live
+  // recheck (five sequential requests, 1.2-1.8 s) outruns in production.
+  const f = fixture();
+  const seen = [];
+  const client = Object.freeze({
+    read: (...args) => f.client.read(...args),
+    recheck: (selector, options) => {
+      seen.push({
+        deadlineMs: options?.deadlineMs,
+        signal: options?.signal instanceof AbortSignal,
+      });
+      return f.client.recheck(selector, options);
+    },
+  });
+  const readers = createIntakeReaders({ client, prefetch: await prefetch(f) });
+  await prepareReviewIntake(intakeInputs(readers));
+  assert.deepEqual(seen, [{ deadlineMs: 10000, signal: true }]);
+});
+
 test("the intake's read deadline fits the artifact client's own maximum (staging run 35810541667)", () => {
   // Hardcoded, never derived: the live re-read took up to 1,769 ms against the
   // old 2,000 ms, and the client refuses a deadline above its own maximum as

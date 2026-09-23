@@ -17,8 +17,8 @@ export const INTAKE_LIMITS = Object.freeze({
   ledgerEvents: 4096,
   // Per reader call. The adapter's second metadata read is a live re-read of
   // five sequential GitHub requests, measured at 1,190-1,769 ms; 2 s failed
-  // intakes (staging run 35810541667). The artifact client caps any deadline
-  // at its own 10 s maximum.
+  // intakes (staging run 35810541667). The artifact client refuses any
+  // deadline above its own 10 s maximum (invalid_input).
   readDeadlineMs: 10_000,
 });
 const SHA = /^[a-f0-9]{40}$/;

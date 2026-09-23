@@ -906,7 +906,10 @@ test("a stalled reader times out and receives cancellation without returning a c
     signal = options.signal;
     return new Promise(() => {});
   };
+  const started = performance.now();
   await fails(input, "adapter_timeout");
+  // The timer is the deadline readers are told (10 s), not a shorter one.
+  assert.ok(performance.now() - started >= 9_900);
   assert.equal(signal.aborted, true);
 });
 test("a second metadata read slower than 2 s still completes (staging run 35810541667)", async () => {
