@@ -20,13 +20,14 @@
 #    a changed file that gets that far down the list, and codex-gate.mjs throws
 #    on it in always_review:, failing the Codex job instead of naming the line.
 #    Both now fail closed in every class, in exclude: and in always_review
-#    (cases 4-5). So do two strings no changed path can match (case 6): one
-#    with leading or trailing whitespace — a '|' or '>' block scalar keeps a
-#    trailing newline — and one that starts with '#', which minimatch reads as
-#    a comment. The second is where the non-string message's own advice would
-#    otherwise lead: quoting a '- #scripts/deploy.sh' line (null) as written
-#    gives '#scripts/deploy.sh'. Both found by the independent review of this
-#    change.
+#    (cases 4-5). So do three kinds of string no changed path can match (case
+#    6): one with leading or trailing whitespace — a '|' or '>' block scalar
+#    keeps a trailing newline — one with a line break inside, which is what a
+#    block scalar of several lines becomes, and one that starts with '#', which
+#    minimatch reads as a comment. The last is where the non-string message's
+#    own advice would otherwise lead: quoting a '- #scripts/deploy.sh' line
+#    (null) as written gives '#scripts/deploy.sh'. Found by the independent
+#    review and by Codex round 5 of this change.
 #
 # Cases 7-8 are the positive controls: a QUOTED '!x' is a real string and must
 # still reach the negation guard with that guard's own reason, and ordinary
@@ -308,7 +309,20 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   place "$where" "'#scripts/deploy.sh'"
   expect_fail_closed "quoted '#scripts/deploy.sh' under $where: fails closed as a minimatch comment" \
     "(under '$where:') starts with '#'" "matches no changed path"
+  # A line break INSIDE a pattern can never match either: changed paths
+  # arrive one per line. (Codex review round 5 of this change.)
+  place "$where" '"cmd/**\nsrc/**"'
+  expect_fail_closed "- \"cmd/**\\nsrc/**\" under $where: fails closed on the line break" \
+    "(under '$where:') contains a line break" "matches no changed path"
 done
+# A '|-' block holding two lines is ONE pattern with a line break inside,
+# not a list of two.
+{
+  printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - |-"
+  printf '%s\n' "    cmd/**" "    internal/**"
+} > "$tmp/repo/.github/risk-paths.yml"
+expect_fail_closed "a two-line '|-' block scalar fails closed on the line break" \
+  "(under 'sensitive:') contains a line break" "matches no changed path"
 # The block scalars themselves, which take a second line.
 for style in '|' '>'; do
   {
