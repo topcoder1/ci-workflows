@@ -110,7 +110,8 @@ try {
 	// channel for warnings, so collect what it emits during the (synchronous)
 	// conversion and fail on that too. (Codex review round 2 of this guard.)
 	const emitWarning = process.emitWarning;
-	process.emitWarning = (w) => yamlWarnings.push(typeof w === 'string' ? { message: w, code: 'while converting' } : w);
+	process.emitWarning = (w) =>
+		yamlWarnings.push(typeof w === 'string' ? { message: w, code: 'while converting' } : w);
 	try {
 		rules = doc.toJS();
 	} finally {
@@ -123,11 +124,12 @@ try {
 // Every WARNING yaml reports fails closed, not only errors — the ones it
 // collects in doc.warnings while parsing and the one it emits while converting
 // (above). A warning is yaml carrying on with its best guess, and a guess in a
-// rules file can be a rule that silently does nothing. The motivating case: an UNQUOTED entry that
-// starts with '!' is a YAML tag, not text. '- !scripts/la1_deploy_ssh_setup.sh'
-// and '- !secrets/**' name tags the parser cannot resolve, so it warns
-// (TAG_RESOLVE_FAILED), drops the tag and keeps an EMPTY string — and the
-// negation pass below looks for a '!' that is no longer there. Under
+// rules file can be a rule that silently does nothing. The motivating case:
+// an UNQUOTED entry that starts with '!' is a YAML tag, not text.
+// '- !scripts/la1_deploy_ssh_setup.sh' and '- !secrets/**' name tags the
+// parser cannot resolve, so it warns (TAG_RESOLVE_FAILED), drops the tag and
+// keeps an EMPTY string — and the negation pass below looks for a '!' that is
+// no longer there. Under
 // blocked:/sensitive: that gate disappears; under always_review: codex-gate.mjs
 // stops forcing a review of the path, so a 5-line diff to it skips Codex; and
 // this script exits 0 throughout, the warning lost in the job log. Quoting
@@ -225,9 +227,10 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // exclude: list below. The passes after this one test strings only and skip
 // anything else, so before this pass these entries went unchecked:
 //
-// An empty or whitespace-only string matches no path. It reads like a rule and
-// gates nothing. YAML makes one without a warning from a bare '- !' (its
-// non-specific tag) or '- !!str', so the warning guard above cannot see these.
+// An empty or whitespace-only string matches no changed path. It reads like a
+// rule and does nothing. YAML makes one without a warning from a bare '- !'
+// (its non-specific tag) or '- !!str', so the warning guard above cannot see
+// these.
 //
 // A non-string entry — '- 42', 'true', 'null', '~', a bare '-', 'key: value',
 // '[…]' — is skipped outright by the passes below and by isExcluded(), so in
@@ -260,34 +263,39 @@ function checkEntry(p, where) {
 				(where.startsWith(`${EXCLUDE_KEY}.`)
 					? `An exclusion that is not a string is skipped, so it silently exempts nothing. `
 					: `minimatch throws on anything but a string, so on a PR with a changed file that ` +
-						`reaches the entry ${where === 'always_review' ? 'codex-gate.mjs fails the Codex job' : 'this script crashes'}, ` +
-						`and on every other PR the line silently matches nothing. `) +
+						`reaches the entry ` +
+						(where === 'always_review' ? 'codex-gate.mjs fails the Codex job' : 'this script crashes') +
+						`, and on every other PR the line silently matches nothing. `) +
 				`Quote the path you meant ("- '…'") or delete the line.`
 		);
 	}
+	// The three string checks below say "matches no changed path", not "gates
+	// nothing": in exclude: a dead entry exempts nothing, which leaves its paths
+	// gated, and in a safe class they fall back to the stricter 'standard'.
 	if (p.trim() === '') {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is empty or whitespace-only — ` +
-				`an empty pattern matches no path, and a whitespace-only one only a path made of that ` +
-				`whitespace, so the line gates nothing while reading as if it did. A bare '- !' or ` +
-				`'- !!str' parses this way too: YAML reads the '!' as a tag, not text. Write the path ` +
-				`you meant, quoted ("- '…'"), or delete the line.`
+				`changed paths are trimmed before they are matched and empty ones dropped, so it ` +
+				`matches no changed path while reading like a rule. A bare '- !' or '- !!str' parses ` +
+				`this way too: YAML reads the '!' as a tag, not text. Write the path you meant, quoted ` +
+				`("- '…'"), or delete the line.`
 		);
 	}
 	if (p !== p.trim()) {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') has leading or trailing whitespace — ` +
-				`changed paths are trimmed before they are matched, so no path starts or ends with ` +
-				`whitespace and the line gates nothing. A '|' or '>' block scalar keeps a trailing ` +
-				`newline this way. Write the pattern on one quoted line with nothing around it ("- '…'").`
+				`changed paths are trimmed before they are matched, so none starts or ends with ` +
+				`whitespace and the entry matches no changed path. A '|' or '>' block scalar keeps a ` +
+				`trailing newline this way. Write the pattern on one quoted line with nothing around ` +
+				`it ("- '…'").`
 		);
 	}
 	if (p.startsWith('#')) {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') starts with '#' — minimatch ` +
-				`reads a pattern that starts with '#' as a comment and never matches it, so the line ` +
-				`gates nothing. If the path was commented out, delete the line; to match a path that ` +
-				`really starts with '#', escape it ('\\#…').`
+				`reads a pattern that starts with '#' as a comment, so it matches no changed path. ` +
+				`If the path was commented out, delete the line; to match a path that really starts ` +
+				`with '#', escape it ('\\#…').`
 		);
 	}
 }
