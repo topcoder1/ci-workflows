@@ -243,13 +243,16 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // the next, and in always_review it fails the Codex job instead of naming
 // itself. Rejecting it here, on every PR, makes it loud in the right place.
 //
-// Two strings can never match either (found by the independent review of this
-// guard). Changed paths are trimmed before matching (see changedFiles below and
-// codex-gate.mjs), so a pattern with leading or trailing whitespace matches
-// nothing — and a '|' or '>' block scalar keeps a trailing newline. And
-// minimatch reads a pattern that starts with '#' as a comment, which matches
-// nothing: a quoted '#…' is exactly what an author gets by quoting a
-// '- #scripts/x.sh' line as written, which YAML read as a comment (null).
+// Three kinds of string can never match either (found by the independent
+// review and Codex round 5 of this guard). Changed paths are read one per line
+// and trimmed before matching (see changedFiles below and codex-gate.mjs), so a
+// pattern with leading or trailing whitespace matches nothing — a '|' or '>'
+// block scalar keeps a trailing newline — and neither does one with a line
+// break inside, which is what a block scalar of several lines becomes: ONE
+// pattern, not a list. And minimatch reads a pattern that starts with '#' as a
+// comment, which matches nothing: a quoted '#…' is exactly what an author gets
+// by quoting a '- #scripts/x.sh' line as written, which YAML read as a comment
+// (null).
 //
 // Fail closed on all of them, in the style of the other passes: a rules entry
 // nobody can match is a gate that is not there. The fleet audit is recorded
@@ -280,7 +283,7 @@ function checkEntry(p, where) {
 				`Quote the path you meant ("- '…'") or delete the line.`
 		);
 	}
-	// The three string checks below say "matches no changed path", not "gates
+	// The four string checks below say "matches no changed path", not "gates
 	// nothing": in exclude: a dead entry exempts nothing, which leaves its paths
 	// gated, and in a safe class its paths fall through to the next class that
 	// matches them, or to 'standard' when none does.
@@ -300,6 +303,14 @@ function checkEntry(p, where) {
 				`whitespace and the entry matches no changed path. A '|' or '>' block scalar keeps a ` +
 				`trailing newline this way. Write the pattern on one quoted line with nothing around ` +
 				`it ("- '…'").`
+		);
+	}
+	if (p.includes('\n')) {
+		fail(
+			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') contains a line break — ` +
+				`changed paths arrive one per line, so none contains one and the entry matches no ` +
+				`changed path. A '|' or '>' block scalar with several lines is ONE pattern, not a ` +
+				`list: give each pattern its own "- '…'" line.`
 		);
 	}
 	if (p.startsWith('#')) {
