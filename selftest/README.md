@@ -194,6 +194,21 @@ arbitrary helper scripts; that's a different kind of repo.
   Background: the 2026-09-04 `@openai/codex@latest` bump silently flipped
   the bundled default to gpt-6-astra, which then reported zero regressions
   in 88 fleet reviews against a 16% baseline on gpt-5.6-sol.
+- `test_codex_cli_install.py` — executes `codex-review.yml`'s shipped
+  "Install Codex CLI" bash against stubbed `npm`/`codex`/`sleep`:
+  `codex --version`, never npm's exit code, decides success; a platform
+  binary the registry lists late is retried up to 4 times, waiting
+  60/120/240/300 s (doubling, capped at the 300 s packument max-age), with
+  `--prefer-online` (within max-age the npm stub replays its cached
+  packument without it, as npm 10.9.8 measurably does); a binary that never
+  lands fails the step closed with an `::error::`. Negative controls: the
+  pre-fix one-liner plus verify/retry/cache-bypass/backoff/cap/fail-closed
+  mutations.
+  Background: on 2026-09-22 (PT) attaxion_dev#374's Codex job installed
+  0.156.1 257 s after its linux-x64 binary was published, from a packument
+  that did not list it yet; npm skipped the optional dependency silently
+  ("added 1 package") and the next step died on
+  `Missing optional dependency @openai/codex-linux-x64`.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.
