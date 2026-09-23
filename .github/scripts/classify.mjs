@@ -106,9 +106,10 @@ try {
 	// One warning never reaches doc.warnings: yaml raises it while converting
 	// the document, when a mapping key is itself a collection ('[blocked]: …')
 	// and gets stringified — to '[ blocked ]', silently dropping the class it
-	// named. yaml reports it only through process.emitWarning, its documented
-	// channel for warnings, so collect what it emits during the (synchronous)
-	// conversion and fail on that too. (Codex review round 2 of this guard.)
+	// named. yaml reports it only through process.emitWarning — the channel its
+	// logger (log.ts) uses, which yaml's own tests exercise — so collect what it
+	// emits during the (synchronous) conversion and fail on that too. (Codex
+	// review round 2 of this guard.)
 	const emitWarning = process.emitWarning;
 	process.emitWarning = (w) =>
 		yamlWarnings.push(typeof w === 'string' ? { message: w, code: 'while converting' } : w);
@@ -281,7 +282,8 @@ function checkEntry(p, where) {
 	}
 	// The three string checks below say "matches no changed path", not "gates
 	// nothing": in exclude: a dead entry exempts nothing, which leaves its paths
-	// gated, and in a safe class they fall back to the stricter 'standard'.
+	// gated, and in a safe class its paths fall through to the next class that
+	// matches them, or to 'standard' when none does.
 	if (p.trim() === '') {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is empty or whitespace-only — ` +
