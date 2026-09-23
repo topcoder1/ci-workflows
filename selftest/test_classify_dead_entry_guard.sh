@@ -225,13 +225,16 @@ expect_fail_closed "an unsupported '%YAML 1.3' directive fails closed" \
 # review round 2 of this change.
 printf '%s\n' "[blocked]: ['**/.env*']" "sensitive:" "  - 'cmd/**'" > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "a flow-list key '[blocked]:' fails closed on the conversion warning" \
-  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)"
+  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)" \
+  "write the plain key"
 printf '%s\n' "? [sensitive]" ": - 'cmd/**'" > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "an explicit '? [sensitive]' key fails closed on the conversion warning" \
-  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)"
+  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)" \
+  "write the plain key"
 printf '%s\n' "sensitive:" "  - 'cmd/**'" "exclude:" "  [sensitive]:" "    - 'cmd/**/*_test.go'" > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "a collection key inside exclude: fails closed on the conversion warning" \
-  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)"
+  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)" \
+  "write the plain key"
 printf '%s\n' "blocked:" "  - 'a/**'" "blocked:" "  - 'b/**'" > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "a duplicate key (a parser ERROR) still fails closed through 'failed to read'" \
   "failed to read .github/risk-paths.yml" "Map keys must be unique"
@@ -243,7 +246,7 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   for raw in "''" "' '" '"\t"' '"\u00a0"' '!' '!!str'; do
     place "$where" "$raw"
     expect_fail_closed "- $raw under $where: fails closed as empty" \
-      "(under '$where:') is empty or whitespace-only"
+      "(under '$where:') is empty or whitespace-only" "matches no changed path"
   done
 done
 
@@ -300,11 +303,11 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   for raw in "' scripts/deploy.sh'" "'scripts/deploy.sh '" '"scripts/deploy.sh\n"'; do
     place "$where" "$raw"
     expect_fail_closed "- $raw under $where: fails closed as padded" \
-      "(under '$where:') has leading or trailing whitespace"
+      "(under '$where:') has leading or trailing whitespace" "matches no changed path"
   done
   place "$where" "'#scripts/deploy.sh'"
   expect_fail_closed "quoted '#scripts/deploy.sh' under $where: fails closed as a minimatch comment" \
-    "(under '$where:') starts with '#'"
+    "(under '$where:') starts with '#'" "matches no changed path"
 done
 # The block scalars themselves, which take a second line.
 for style in '|' '>'; do
