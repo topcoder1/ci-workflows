@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { createGitHubArtifactClient } from "../.github/scripts/merge-policy-github-artifact.mjs";
+import {
+  GITHUB_ARTIFACT_LIMITS,
+  createGitHubArtifactClient,
+} from "../.github/scripts/merge-policy-github-artifact.mjs";
 import {
   createIntakeReaders,
   dispatchTarget,
@@ -301,6 +304,17 @@ test("the readers admit the receipt through the real intake, with one fresh rech
     assert.equal(init.method, "GET");
     assert.equal(init.redirect, "manual");
   }
+});
+
+test("the intake's read deadline fits the artifact client's own maximum (staging run 35810541667)", () => {
+  // Hardcoded, never derived: the live re-read took up to 1,769 ms against the
+  // old 2,000 ms, and the client refuses a deadline above its own maximum as
+  // invalid_input, which would stop the second metadata read before it starts.
+  assert.equal(INTAKE_LIMITS.readDeadlineMs, 10000);
+  assert.equal(GITHUB_ARTIFACT_LIMITS.maximumDeadlineMs, 10000);
+  assert.ok(
+    INTAKE_LIMITS.readDeadlineMs <= GITHUB_ARTIFACT_LIMITS.maximumDeadlineMs,
+  );
 });
 
 test("the second metadata read runs under the intake's deadline and refuses moved facts", async () => {

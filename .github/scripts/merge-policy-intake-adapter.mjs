@@ -2,14 +2,15 @@
 // prepareReviewIntake() consumes, for one shadow cycle at a time.
 //
 // The intake asks for metadata, then the artifact, then metadata again, each
-// within INTAKE_LIMITS.readDeadlineMs (2 s). A real artifact read is about nine
-// sequential HTTPS requests plus a download, so it cannot answer inside that
-// deadline. The adapter therefore reads the artifact ONCE, up front, under the
-// client's own 10 s deadline (prefetchReviewReceipt), and answers the first two
-// reader calls from that result. The second metadata call does not repeat the
-// answer: it runs client.recheck(), one fresh authenticated pass over the run,
-// its attempt and the artifact, and fails if any fact moved (TRUSTED-INTAKE.md
-// "The second read must freshly verify the run's current latest attempt").
+// within INTAKE_LIMITS.readDeadlineMs (10 s). A real artifact read is about
+// nine sequential HTTPS requests plus a download, so the adapter reads the
+// artifact ONCE, up front, under the client's own 10 s deadline
+// (prefetchReviewReceipt), and answers the first two reader calls from that
+// result. The second metadata call does not repeat the answer: it runs
+// client.recheck(), one fresh authenticated pass over the run, its attempt and
+// the artifact (five requests, 1.2-1.8 s live), and fails if any fact moved
+// (TRUSTED-INTAKE.md "The second read must freshly verify the run's current
+// latest attempt").
 //
 // metadata.target comes from the dispatcher's own durable dispatch record and
 // from nothing else. The receipt's target is data; the intake compares the two
