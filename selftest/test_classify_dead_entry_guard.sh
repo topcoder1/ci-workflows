@@ -9,8 +9,10 @@
 #    for a '!' that is no longer there, and the entry matches nothing: under
 #    blocked:/sensitive: that gate disappears, and under always_review:
 #    codex-gate.mjs stops forcing a review of that path, so a 5-line diff to it
-#    skips Codex. Every warning the parser reports now fails closed, not only
-#    errors (cases 1-3).
+#    skips Codex. Every warning yaml reports now fails closed, not only errors
+#    — including the one it raises only while converting the document, for a
+#    collection used as a mapping key ('[blocked]:'), which silently drops the
+#    class that key named (cases 1-3).
 #
 # 2. An empty or whitespace-only string matches no changed file, and a
 #    non-string entry ('- 42', a bare '-', '- key: value') is skipped by every
@@ -160,20 +162,24 @@ place() {
 #    uses: the hazards exist. yaml's parse() turns an unquoted '!' entry into an
 #    EMPTY string and only warns, minimatch matches that empty pattern against
 #    no real path, minimatch throws on a non-string, and it matches neither a
-#    pattern that starts with '#' (a comment) nor a padded one. If a future
-#    bundle changed any of these, this case says so and the guard's rationale
-#    needs a second look. (parse() prints its warning on stderr, discarded.)
+#    pattern that starts with '#' (a comment) nor a padded one. A collection
+#    used as a mapping key warns only on conversion, never in doc.warnings,
+#    which is why classify.mjs also collects what yaml emits while converting.
+#    If a future bundle changed any of these, this case says so and the
+#    guard's rationale needs a second look. (parse() prints its warning on
+#    stderr, discarded here.)
 premise=$(cd "$tmp" && node --input-type=module -e "
-import { parse, minimatch } from './classifier-deps.mjs';
+import { parse, parseDocument, minimatch } from './classifier-deps.mjs';
 const opts = { dot: true, matchBase: false };
 const out = [JSON.stringify(parse('always_review:\n  - !scripts/la1_deploy_ssh_setup.sh\n'))];
 out.push(minimatch('scripts/la1_deploy_ssh_setup.sh', '', opts));
 try { minimatch('src/app.py', 42, opts); out.push('no throw'); } catch (e) { out.push(e.message); }
 out.push(minimatch('#notes/x.md', '#notes/**', opts));
 out.push(minimatch('scripts/deploy.sh', 'scripts/deploy.sh ', opts));
+out.push(parseDocument('[blocked]: [a]\n').warnings.length);
 console.log(out.join(' | '));
 " 2>/dev/null)
-want='{"always_review":[""]} | false | invalid pattern | false | false'
+want='{"always_review":[""]} | false | invalid pattern | false | false | 0'
 if [ "$premise" = "$want" ]; then
   echo "✓ premise: an unquoted '!' entry parses to '', which matches nothing; a non-string makes minimatch throw; '#…' and padded patterns match nothing"
 else
@@ -213,6 +219,19 @@ expect_fail_closed "an unknown '%FOO' directive (a warning, not a tag) fails clo
 printf '%s\n' "%YAML 1.3" "---" "blocked:" "  - '**/.env*'" > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "an unsupported '%YAML 1.3' directive fails closed" \
   "the YAML parser warned" "Unsupported YAML version 1.3" "(BAD_DIRECTIVE)"
+# A mapping KEY that is a collection never reaches doc.warnings: yaml warns
+# only while converting the document, when it stringifies '[blocked]' to
+# '[ blocked ]' and so silently drops the gate that key named. Found by Codex
+# review round 2 of this change.
+printf '%s\n' "[blocked]: ['**/.env*']" "sensitive:" "  - 'cmd/**'" > "$tmp/repo/.github/risk-paths.yml"
+expect_fail_closed "a flow-list key '[blocked]:' fails closed on the conversion warning" \
+  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)"
+printf '%s\n' "? [sensitive]" ": - 'cmd/**'" > "$tmp/repo/.github/risk-paths.yml"
+expect_fail_closed "an explicit '? [sensitive]' key fails closed on the conversion warning" \
+  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)"
+printf '%s\n' "sensitive:" "  - 'cmd/**'" "exclude:" "  [sensitive]:" "    - 'cmd/**/*_test.go'" > "$tmp/repo/.github/risk-paths.yml"
+expect_fail_closed "a collection key inside exclude: fails closed on the conversion warning" \
+  "the YAML parser warned" "Keys with collection values will be stringified" "(while converting)"
 printf '%s\n' "blocked:" "  - 'a/**'" "blocked:" "  - 'b/**'" > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "a duplicate key (a parser ERROR) still fails closed through 'failed to read'" \
   "failed to read .github/risk-paths.yml" "Map keys must be unique"

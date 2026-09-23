@@ -102,14 +102,27 @@ try {
 	// exactly as it was. What parseDocument() adds is the warnings, which
 	// parse() only printed — see the guard below.
 	if (doc.errors.length > 0) throw doc.errors[0];
-	yamlWarnings = doc.warnings;
-	rules = doc.toJS();
+	yamlWarnings = [...doc.warnings];
+	// One warning never reaches doc.warnings: yaml raises it while converting
+	// the document, when a mapping key is itself a collection ('[blocked]: …')
+	// and gets stringified — to '[ blocked ]', silently dropping the class it
+	// named. yaml reports it only through process.emitWarning, its documented
+	// channel for warnings, so collect what it emits during the (synchronous)
+	// conversion and fail on that too. (Codex review round 2 of this guard.)
+	const emitWarning = process.emitWarning;
+	process.emitWarning = (w) => yamlWarnings.push(typeof w === 'string' ? { message: w, code: 'while converting' } : w);
+	try {
+		rules = doc.toJS();
+	} finally {
+		process.emitWarning = emitWarning;
+	}
 } catch (e) {
 	fail(`failed to read ${RULES_PATH}: ${e.message}`);
 }
 
-// Every WARNING the YAML parser reports (doc.warnings) fails closed, not only
-// errors. A warning is yaml carrying on with its best guess, and a guess in a
+// Every WARNING yaml reports fails closed, not only errors — the ones it
+// collects in doc.warnings while parsing and the one it emits while converting
+// (above). A warning is yaml carrying on with its best guess, and a guess in a
 // rules file can be a rule that silently does nothing. The motivating case: an UNQUOTED entry that
 // starts with '!' is a YAML tag, not text. '- !scripts/la1_deploy_ssh_setup.sh'
 // and '- !secrets/**' name tags the parser cannot resolve, so it warns
@@ -146,7 +159,9 @@ if (yamlWarnings.length > 0) {
 			`('- !scripts/deploy.sh', '- !secrets/**'): YAML reads it as a TAG, not text, drops the ` +
 			`tag it cannot resolve and keeps an EMPTY pattern, so the gate, exclusion or forced Codex ` +
 			`review that line names silently disappears while this script exits 0. Quote every ` +
-			`pattern ("- '…'"); a quoted leading '!' is glob negation, which is rejected on its own.`
+			`pattern ("- '…'"); a quoted leading '!' is glob negation, which is rejected on its own. ` +
+			`A key written as a list or mapping ('[blocked]:') is turned into a string ('[ blocked ]') ` +
+			`the same silent way, dropping the class it named: write the plain key ('blocked:').`
 	);
 }
 

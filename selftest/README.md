@@ -45,10 +45,10 @@ arbitrary helper scripts; that's a different kind of repo.
   An unquoted `- !scripts/deploy.sh` is a YAML tag, not text: the parser only
   warns and keeps an empty string, which the negation guard never sees, so the
   gate (or, under `always_review`, the forced Codex review) silently
-  disappears and the classifier still exits 0. Every warning the parser
-  reports now fails closed, and so does an entry that is empty,
-  whitespace-only, padded (a `|` block scalar keeps a trailing newline),
-  `#`-leading (a minimatch comment) or not a string, in every class,
+  disappears and the classifier still exits 0. Every warning yaml reports,
+  while parsing or converting, now fails closed, and so does an entry that is
+  empty, whitespace-only, padded (a `|` block scalar keeps a trailing
+  newline), `#`-leading (a minimatch comment) or not a string, in every class,
   `exclude:` list and `always_review`. Positive controls: a quoted `'!x'`
   still gets the negation guard's own message, and ordinary entries still
   load.
