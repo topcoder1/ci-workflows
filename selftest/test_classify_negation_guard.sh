@@ -21,6 +21,12 @@
 # SYNTHESIZES an extglob negation ('{!,@}(tests)/**' -> '!(tests)/**'), in any
 # class and in exclude: alike.
 #
+# Case 9 covers always_review, which the ban skipped until 2026-09-23 although
+# the list-shape and bracket passes already validated it: codex-gate.mjs forces
+# a Codex review on any match, so a negated entry exempts the one path it names
+# from that forced review. test_codex_gate_priority.sh pins the rule order that
+# gives always_review its force in the first place.
+#
 # The class list and every expected verdict below are HARDCODED, never read
 # back from classify.mjs: a test that derives its expectations from the
 # artifact under test cannot catch that artifact narrowing.
@@ -250,5 +256,35 @@ exclude:
 expect_class safe_test "rewrite: tests/unit/test_app.py is still safe_test" tests/unit/test_app.py
 expect_class standard "rewrite: tests/fixtures/data.json falls back to standard" tests/fixtures/data.json
 expect_class standard "rewrite: src/app.py stays standard" src/app.py
+
+# 9. always_review. classify.mjs never matches it, but validates it for
+#    codex-gate.mjs, which forces a Codex review when ANY changed file matches
+#    ANY entry and is permissive on config errors by design. A negated entry
+#    forces review on every path EXCEPT the one it names, so that path's small
+#    and docs/tests-only diffs skip Codex. The finding (independent review on
+#    whois-api-llc/wxa_webcat#1612, 2026-09-23) measured exactly this entry
+#    passing classify.mjs with exit 0. Every spelling the other guard sites
+#    reject is rejected here too.
+for pattern in '!scripts/la1_deploy_ssh_setup.sh' 'scripts/!(la1_deploy_ssh_setup.sh)' '{!,@}(scripts)/**'; do
+  rules "blocked: []
+always_review:
+  - '$pattern'
+"
+  expect_fail_closed "negation '$pattern' under always_review: fails closed" \
+    "uses glob negation" "(under 'always_review:')" "skip Codex"
+  expect_err_lacks "case-insensitively" "...and always_review: is not given the case-fold reason"
+  expect_err_lacks "auto-merge-eligible tier" "...and always_review: is not given the safe-class reason"
+done
+
+# 10. POSITIVE CONTROL. The same entry without the '!' loads, so case 9 fails
+#     because of the negation alone. always_review is never a classify.mjs
+#     class, so the named path falls back to standard. A literal mid-pattern
+#     '!' stays legal here as everywhere else.
+rules "blocked: []
+always_review:
+  - 'scripts/la1_deploy_ssh_setup.sh'
+  - 'docs/wow!/**'
+"
+expect_class standard "control: a plain always_review entry loads and exits 0" scripts/la1_deploy_ssh_setup.sh
 
 exit "$failed"
