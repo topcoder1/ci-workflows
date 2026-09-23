@@ -17,6 +17,10 @@
 # topcoder1/webcrawl#579 (2026-09-22). The fleet audit taken before the ban was
 # extended is recorded on the guard itself in classify.mjs.
 #
+# Case 5 covers a spelling the raw-string check could not see: brace expansion
+# SYNTHESIZES an extglob negation ('{!,@}(tests)/**' -> '!(tests)/**'), in any
+# class and in exclude: alike.
+#
 # The class list and every expected verdict below are HARDCODED, never read
 # back from classify.mjs: a test that derives its expectations from the
 # artifact under test cannot catch that artifact narrowing.
@@ -95,12 +99,13 @@ console.log([
   minimatch('src/app.py', '!tests/fixtures/**', o),
   minimatch('tests/fixtures/data.json', '!tests/fixtures/**', o),
   minimatch('src/deploy.sh', 'src/!(*.md)', o),
+  minimatch('src/app.py', '{!,@}(tests)/**', o),
 ].join(' '));
 " < /dev/null)
-if [ "$premise" = "true true false true" ]; then
+if [ "$premise" = "true true false true true" ]; then
   echo "✓ premise: a negated pattern matches every path except the one it names"
 else
-  echo "✗ premise: expected 'true true false true' from the vendored minimatch, got '$premise'"
+  echo "✗ premise: expected 'true true false true true' from the vendored minimatch, got '$premise'"
   failed=1
 fi
 
@@ -153,7 +158,37 @@ $cls:
     "uses glob negation" "(under '$cls:')" "auto-merge-eligible tier"
 done
 
-# 5. The gating classes keep THEIR reason — the case-fold downgrade pinned in
+# 5. Brace expansion can SYNTHESIZE an extglob negation the raw pattern never
+#    spells: minimatch expands '{!,@}(tests)/**' to '!(tests)/**' plus
+#    '@(tests)/**', which together match every path. Neither a leading '!' nor
+#    the substring '!(' appears in the raw pattern, so a raw-string check
+#    passed it (Codex round 1 on this change). The guard must read minimatch's
+#    own expansion, at every call site: safe class, gating class, exclusion.
+rules "blocked: []
+safe_test:
+  - '{!,@}(tests)/**'
+"
+expect_fail_closed "brace-synthesized '!(…)' under safe_test: fails closed" \
+  "uses glob negation" "(under 'safe_test:')" "auto-merge-eligible tier"
+
+rules "blocked: []
+sensitive:
+  - 'src/{!,x}(*.md)'
+"
+expect_fail_closed "brace-synthesized '!(…)' under sensitive: fails closed" \
+  "uses glob negation" "(under 'sensitive:')" "case-insensitively"
+
+rules "blocked: []
+sensitive:
+  - 'cmd/svc/**'
+exclude:
+  sensitive:
+    - 'cmd/svc/{!,@}(*_test.go)'
+"
+expect_fail_closed "brace-synthesized '!(…)' in an exclusion fails closed" \
+  "uses glob negation" "(under 'exclude.sensitive:')"
+
+# 6. The gating classes keep THEIR reason — the case-fold downgrade pinned in
 #    test_classify_nocase.sh case 10. Extending the ban must not blur the two
 #    messages: an author told the wrong reason fixes the wrong thing.
 rules "blocked:
@@ -162,7 +197,7 @@ rules "blocked:
 expect_fail_closed "negation under blocked: still cites the case-fold reason" \
   "uses glob negation" "(under 'blocked:')" "case-insensitively"
 
-# 6. POSITIVE CONTROL for the ban's precision. minimatch negates only on a
+# 7. POSITIVE CONTROL for the ban's precision. minimatch negates only on a
 #    leading '!' or a '!(' extglob; a '!' anywhere else is a literal character,
 #    so it must keep loading. The ban is on negation, not on the character.
 rules "blocked: []
@@ -171,7 +206,14 @@ trivial:
 "
 expect_class trivial "control: a literal mid-pattern '!' still loads and matches" "docs/wow!/notes.md"
 
-# 7. The rewrite the error message recommends does what the '!' line meant:
+# ...and reading the brace expansion must not reject ordinary braces.
+rules "blocked: []
+safe_test:
+  - '{tests,spec}/**'
+"
+expect_class safe_test "control: an ordinary brace pattern still loads and matches" spec/test_app.py
+
+# 8. The rewrite the error message recommends does what the '!' line meant:
 #    exclude: subtracts only the paths it names, so fixtures fall back to
 #    standard while the rest of tests/ stays safe_test and src/ stays standard.
 rules "blocked: []

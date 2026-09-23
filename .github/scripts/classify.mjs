@@ -223,15 +223,30 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // whois-api-llc/whoisxmlapi-samples a 404 non-carrier, topcoder1/ci-workflows a
 // carrier): 45 carriers, and 267 rules files — every default branch plus the
 // merge ref, head and non-default base of all 188 open PRs — hold 13,940
-// patterns, none negated in any class. All 267 still exit 0 with this guard.
+// patterns and not one '!' outside a comment, so nothing is negated in any
+// class by any spelling. All 267 still exit 0 with this guard.
+//
+// Every guard site — both halves here and the exclude: guard below — tests a
+// pattern with usesNegation(), which reads minimatch's own brace expansion as
+// well as the raw string, because braces can assemble an extglob negation the
+// raw pattern never spells: '{!,@}(tests)/**' has neither a leading '!' nor
+// '!(', yet minimatch expands it to '!(tests)/**' + '@(tests)/**', which
+// together match every path (Codex round 1 on the change that extended this
+// guard). Expansion can move a '!' or '(' but never mint one (ranges take only
+// letter or number endpoints), so the raw pattern bounds what it can build. A
+// leading '!' that appears only after expansion is literal to minimatch, which
+// settles negation before it expands braces; flagging it is merely strict.
 //
 // So — as with the bracket guard above — strictness costs nothing today and
 // stops the footgun from ever being introduced. selftest/test_classify_nocase.sh
-// (case 10) pins the gating half, selftest/test_classify_negation_guard.sh the
-// safe half.
+// (case 10) pins the gating half; selftest/test_classify_negation_guard.sh pins
+// the safe half and the brace-built spellings at every guard site.
+function usesNegation(p) {
+	return [p, ...minimatch.braceExpand(p)].some((s) => s.trimStart().startsWith('!') || s.includes('!('));
+}
 for (const cls of PATTERN_CLASSES) {
 	for (const p of rules[cls] || []) {
-		if (typeof p === 'string' && (p.trimStart().startsWith('!') || p.includes('!('))) {
+		if (typeof p === 'string' && usesNegation(p)) {
 			fail(
 				NOCASE_CLASSES.has(cls)
 					? `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
@@ -358,7 +373,7 @@ for (const cls of Object.keys(excludeRules)) {
 					`enumerate. Same rule as the gating classes.`
 			);
 		}
-		if (p.trimStart().startsWith('!') || p.includes('!(')) {
+		if (usesNegation(p)) {
 			fail(
 				`${RULES_PATH}: pattern '${p}' (under '${EXCLUDE_KEY}.${cls}:') uses glob negation — ` +
 					`an exclusion is already a subtraction, so negating it inverts the rule into ` +
