@@ -259,12 +259,12 @@ expect_class standard "rewrite: src/app.py stays standard" src/app.py
 
 # 9. always_review. classify.mjs never matches it, but validates it for
 #    codex-gate.mjs, which forces a Codex review when ANY changed file matches
-#    ANY entry and is permissive on config errors by design. A negated entry
-#    forces review on every path EXCEPT the one it names, so that path's small
-#    and docs/tests-only diffs skip Codex. The finding (independent review on
-#    whois-api-llc/wxa_webcat#1612, 2026-09-23) measured exactly this entry
-#    passing classify.mjs with exit 0. Every spelling the other guard sites
-#    reject is rejected here too.
+#    ANY entry and applies a negated entry as the valid glob it is. A negated
+#    entry forces review on every path EXCEPT the one it names, so that
+#    path's small and docs/tests-only diffs skip Codex. The finding
+#    (independent review on whois-api-llc/wxa_webcat#1612, 2026-09-23)
+#    measured exactly this entry passing classify.mjs with exit 0. Every
+#    spelling the other guard sites reject is rejected here too.
 for pattern in '!scripts/la1_deploy_ssh_setup.sh' 'scripts/!(la1_deploy_ssh_setup.sh)' '{!,@}(scripts)/**'; do
   rules "blocked: []
 always_review:

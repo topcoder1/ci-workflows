@@ -228,8 +228,8 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 //
 // In always_review it inverts the list's one job. This script never matches
 // always_review, but codex-gate.mjs forces a Codex review whenever ANY changed
-// file matches ANY entry, and is permissive on config errors by design (see the
-// bracket pass above), so a negated entry is caught here or nowhere. It forces
+// file matches ANY entry, and to minimatch a negated entry is a valid glob, so
+// the gate applies it without a word: it is caught here or nowhere. It forces
 // review on every path EXCEPT the one it names: small and docs/tests-only diffs
 // to that path alone skip Codex, while every other diff is pushed into review.
 // always_review has no exclude:, so there is no subtraction to rewrite it into.

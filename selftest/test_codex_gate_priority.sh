@@ -39,15 +39,17 @@ failed=0
 # expect_gate <want> <description> <diff lines> <file...> — <want> is the
 # should_run value the gate writes to GITHUB_OUTPUT, which is what
 # codex-review.yml's `steps.gate.outputs.should_run` consumes. SIZE_THRESHOLD
-# is passed exactly as that workflow passes it.
+# is passed exactly as that workflow passes it. GITHUB_STEP_SUMMARY is
+# redirected too: under Actions the pytest step's own summary file is
+# inherited, and every case would append a fake "Codex cost gate" block to it.
 expect_gate() {
   local want="$1" desc="$2" lines="$3" rc got
   shift 3
   : > "$tmp/ghout"
   set +e
   (cd "$tmp/repo" && CHANGED_FILES="$(printf '%s\n' "$@")" DIFF_LINES="$lines" \
-    SIZE_THRESHOLD=30 GITHUB_OUTPUT="$tmp/ghout" node .github/scripts/codex-gate.mjs) \
-    > "$tmp/out" 2>&1 < /dev/null
+    SIZE_THRESHOLD=30 GITHUB_OUTPUT="$tmp/ghout" GITHUB_STEP_SUMMARY="$tmp/summary" \
+    node .github/scripts/codex-gate.mjs) > "$tmp/out" 2>&1 < /dev/null
   rc=$?
   set -e
   got=$(sed -n 's/^should_run=//p' "$tmp/ghout")
