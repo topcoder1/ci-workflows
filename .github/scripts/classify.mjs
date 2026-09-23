@@ -250,13 +250,14 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // pattern with leading or trailing whitespace matches nothing — a '|' or '>'
 // block scalar keeps a trailing newline — and neither does one with a line
 // break inside, which is what a '|' block of several lines or a "\n" escape
-// becomes: ONE pattern, not a list. (NOT caught: a '>' block, or a plain or
-// quoted scalar wrapped over lines, folds its lines into spaces, and no value
-// check can tell that space from a real one like 'docs/My Notes/**'; catching
-// it means reading the source, not the value.) And minimatch reads a pattern
-// that starts with '#' as a comment, which matches nothing: a quoted '#…' is
-// exactly what an author gets by quoting a '- #scripts/x.sh' line as written,
-// which YAML read as a comment (null).
+// becomes: ONE pattern, not a list. (NOT caught: a '>-' block, or a plain or
+// quoted scalar wrapped over lines, folds its lines into spaces and keeps no
+// newline — a '>' or '>+' block keeps one, which the padded check catches —
+// and no value check can tell that space from a real one like
+// 'docs/My Notes/**'; catching it means reading the source, not the value.)
+// And minimatch reads a pattern that starts with '#' as a comment, which
+// matches nothing: a quoted '#…' is exactly what an author gets by quoting a
+// '- #scripts/x.sh' line as written, which YAML read as a comment (null).
 //
 // Fail closed on all of them, in the style of the other passes: a rules entry
 // nobody can match is a gate that is not there. The fleet audit is recorded
