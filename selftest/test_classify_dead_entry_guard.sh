@@ -23,7 +23,9 @@
 #    (cases 4-5). So do three kinds of string no changed path can match (case
 #    6): one with leading or trailing whitespace — a '|' or '>' block scalar
 #    keeps a trailing newline — one with a line break inside, which is what a
-#    block scalar of several lines becomes, and one that starts with '#', which
+#    '|' block of several lines or a "\n" escape becomes (a '>' block or a
+#    scalar wrapped over lines folds into spaces instead, and is NOT caught),
+#    and one that starts with '#', which
 #    minimatch reads as a comment. The last is where the non-string message's
 #    own advice would otherwise lead: quoting a '- #scripts/deploy.sh' line
 #    (null) as written gives '#scripts/deploy.sh'. Found by the independent

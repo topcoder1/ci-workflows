@@ -130,13 +130,13 @@ try {
 // '- !scripts/la1_deploy_ssh_setup.sh' and '- !secrets/**' name tags the
 // parser cannot resolve, so it warns (TAG_RESOLVE_FAILED), drops the tag and
 // keeps an EMPTY string — and the negation pass below looks for a '!' that is
-// no longer there. Under
-// blocked:/sensitive: that gate disappears; under always_review: codex-gate.mjs
-// stops forcing a review of the path, so a 5-line diff to it skips Codex; and
-// this script exits 0 throughout, the warning lost in the job log. Quoting
-// fixes it, and a quoted '!x' is glob negation, which that pass rejects with
-// its own reason. Tag spellings that resolve to '' WITHOUT a warning ('- !',
-// '- !!str') are caught by the entry pass further down.
+// no longer there. Under blocked:/sensitive: that gate disappears; under
+// always_review: codex-gate.mjs stops forcing a review of the path, so a
+// 5-line diff to it skips Codex; and this script exits 0 throughout, the
+// warning lost in the job log. Quoting fixes it, and a quoted '!x' is glob
+// negation, which that pass rejects with its own reason. Tag spellings that
+// resolve to '' WITHOUT a warning ('- !', '- !!str') are caught by the entry
+// pass further down.
 //
 // ci-workflows#227 named this out of scope ("Rejecting empty patterns or YAML
 // warnings would be a separate hardening"); the independent review of
@@ -144,16 +144,17 @@ try {
 // pins it, and the entry pass below, in every location.
 //
 // Fleet audit before adding both, 2026-09-23, exit-code-gated over all 148
-// repos the token can see. Controls: whois-api-llc/whoisxmlapi-samples a 404
-// "Not Found" non-carrier; a bogus ref a "No commit found" bad ref, which is
-// never read as an absence; topcoder1/ci-workflows a carrier. There are 46
-// carriers (45 live, 1 archived), and 266 rules files — every default branch
-// plus the head, test-merge and non-default base of all 187 open PRs. They hold
-// 13,901 entries with no warning (while parsing or converting), no empty,
-// padded, '#'-leading or non-string entry, and no '!' outside a comment. All
-// 266 exit 0 with both guards, and every verdict is unchanged. In the same
-// pass, synthetic tag, empty, non-string and collection-key files flipped from
-// 0 to 1, and a clean one stayed at 0.
+// repos the token can see, and re-run on the final guard. Controls:
+// whois-api-llc/whoisxmlapi-samples a 404 "Not Found" non-carrier; a bogus ref
+// a "No commit found" bad ref, which is never read as an absence;
+// topcoder1/ci-workflows a carrier. There are 46 carriers (45 live, 1
+// archived), and 266 rules files — every default branch plus the head,
+// test-merge and non-default base of all 187 open PRs. They hold 13,901
+// entries with no warning (while parsing or converting), no empty, padded,
+// multi-line, '#'-leading or non-string entry, and no '!' outside a comment.
+// All 266 exit 0 with both guards, and every verdict is unchanged. In the same
+// pass, synthetic tag, empty, non-string, collection-key and multi-line files
+// flipped from 0 to 1, and a clean one stayed at 0.
 if (yamlWarnings.length > 0) {
 	fail(
 		`${RULES_PATH}: the YAML parser warned — ` +
@@ -248,11 +249,14 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // and trimmed before matching (see changedFiles below and codex-gate.mjs), so a
 // pattern with leading or trailing whitespace matches nothing — a '|' or '>'
 // block scalar keeps a trailing newline — and neither does one with a line
-// break inside, which is what a block scalar of several lines becomes: ONE
-// pattern, not a list. And minimatch reads a pattern that starts with '#' as a
-// comment, which matches nothing: a quoted '#…' is exactly what an author gets
-// by quoting a '- #scripts/x.sh' line as written, which YAML read as a comment
-// (null).
+// break inside, which is what a '|' block of several lines or a "\n" escape
+// becomes: ONE pattern, not a list. (NOT caught: a '>' block, or a plain or
+// quoted scalar wrapped over lines, folds its lines into spaces, and no value
+// check can tell that space from a real one like 'docs/My Notes/**'; catching
+// it means reading the source, not the value.) And minimatch reads a pattern
+// that starts with '#' as a comment, which matches nothing: a quoted '#…' is
+// exactly what an author gets by quoting a '- #scripts/x.sh' line as written,
+// which YAML read as a comment (null).
 //
 // Fail closed on all of them, in the style of the other passes: a rules entry
 // nobody can match is a gate that is not there. The fleet audit is recorded
@@ -309,7 +313,7 @@ function checkEntry(p, where) {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') contains a line break — ` +
 				`changed paths arrive one per line, so none contains one and the entry matches no ` +
-				`changed path. A '|' or '>' block scalar with several lines is ONE pattern, not a ` +
+				`changed path. A '|' block scalar of several lines is ONE pattern, not a ` +
 				`list: give each pattern its own "- '…'" line.`
 		);
 	}
