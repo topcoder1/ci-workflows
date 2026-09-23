@@ -40,6 +40,15 @@ arbitrary helper scripts; that's a different kind of repo.
   it would demote an unmatched path from the strict `standard` fallback into
   an auto-merge-eligible class (a PR adding `Tests/release.py` under
   `safe_test: ['tests/**']`).
+- `test_classify_dead_entry_guard.sh` — `classify.mjs` fails closed on a
+  `risk-paths.yml` entry that parses to nothing a glob can use. An unquoted
+  `- !scripts/deploy.sh` is a YAML tag, not text: the parser only warns and
+  keeps an empty string, which the negation guard never sees, so the gate (or,
+  under `always_review`, the forced Codex review) silently disappears and the
+  classifier still exits 0. Every parser warning now fails closed, and so does
+  any empty, whitespace-only or non-string entry, in every class, `exclude:`
+  list and `always_review`. Positive controls: a quoted `'!x'` still gets the
+  negation guard's own message, and ordinary entries still load.
 - `test_classifier_deps_vendored.sh` — the classifier's deps are a committed,
   version-pinned esbuild bundle (`.github/scripts/classifier-deps.mjs`) instead
   of a run-time `npm install`. The install used to run inside the caller's
@@ -48,7 +57,7 @@ arbitrary helper scripts; that's a different kind of repo.
   7m03s / 5m20s across three consecutive runs, the slowest of which wedged a PR
   by blowing the auto-merge gate's poll budget). Pins that the bundle is not
   stale, that every consumer workflow fetches it, and that no run-time
-  yaml/minimatch install has crept back. Its central case CALLS both exports
+  yaml/minimatch install has crept back. Its central case CALLS every export
   rather than merely importing them: yaml's exports map has no `import`
   condition, so esbuild bundles its CommonJS build, whose `require('process')`
   becomes a shim that throws — the first bundle built here imported cleanly and
