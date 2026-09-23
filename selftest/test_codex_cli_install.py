@@ -1,8 +1,8 @@
 """Guard: codex-review.yml must prove the Codex CLI runs before it reviews.
 
-2026-09-23, attaxion_dev#374 (run 35811980905, attempt 1): the install step
-ran `npm install -g @openai/codex@latest` 257 s after 0.156.1's linux-x64
-binary was published. The native binary is a per-platform OPTIONAL
+2026-09-22 (PT), attaxion_dev#374 (run 35811980905, attempt 1): the install
+step ran `npm install -g @openai/codex@latest` 257 s after 0.156.1's
+linux-x64 binary was published. The native binary is a per-platform OPTIONAL
 dependency (`@openai/codex-linux-x64` = `npm:@openai/codex@0.156.1-linux-x64`)
 and the packument npm read did not list it yet; the registry serves
 packuments with `cache-control: public, max-age=300`. npm skips an optional
@@ -14,14 +14,17 @@ The step's SHIPPED bash is extracted and executed against stubbed `npm`,
 `codex` and `sleep` (the test_codex_model_pin.py pattern). The npm stub
 models what the runner's npm 10.9.8 did against a local registry serving a
 stale packument: the binary installs only once the registry lists it, and a
-packument npm already cached is re-read only under `--prefer-online` - a
-plain retry printed "changed 1 package" and codex still could not start.
+packument npm cached less than max-age ago is re-read only under
+`--prefer-online` - a plain retry printed "changed 1 package" and codex still
+could not start.
 
 Hardcoded contract: `codex --version`, not npm's exit code, decides success;
-up to 3 retries after 60, 120 and 240 s (420 s outlasts the 300 s max-age
-plus the 88 s the 0.156.1 binary trailed its wrapper); then the step fails
-closed with an ::error::. Negative controls run the same checks against the
-pre-fix one-liner and single-point mutations of the shipped step.
+up to 4 retries, the wait doubling from 60 s and capped at the 300 s max-age
+(60/120/240/300), so the last attempt starts 720 s after the first - past the
+max-age plus the longest lag a linux-x64 binary has had behind its wrapper
+since 0.149.0 (403 s, 0.153.3); then the step fails closed with an ::error::.
+Negative controls run the same checks against the pre-fix one-liner and
+single-point mutations of the shipped step.
 """
 
 import os
@@ -36,17 +39,18 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "codex-review.yml"
 _STEP_NAME = "Install Codex CLI"
 
-ATTEMPTS = 4  # the first install plus 3 retries
-DELAYS = ["60", "120", "240"]  # seconds before retries 1, 2 and 3
+ATTEMPTS = 5  # the first install plus 4 retries
+DELAYS = ["60", "120", "240", "300"]  # seconds before retries 1 to 4
 VERIFY = "codex --version"
 # The step as it shipped before this guard, byte for byte.
 PRE_FIX_STEP = "npm install -g @openai/codex@latest"
 
 _NPM_STUB = r"""#!/bin/sh
 # The registry lists the platform binary from npm call $STUB_LISTED_FROM on
-# (0 = never). npm caches the packument on its first fetch (max-age=300
-# outlives the whole step) and re-reads it only under --prefer-online. A
-# network error (a call number in $STUB_NPM_FAIL_ON) fetches nothing.
+# (0 = never). npm caches the packument on its first fetch and, within its
+# max-age, re-reads it only under --prefer-online. `sleep` is stubbed, so no
+# time passes here and the cached copy never goes stale. A network error (a
+# call number in $STUB_NPM_FAIL_ON) fetches nothing.
 n=$(( $(cat "$STUB_STATE/npm.count" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$STUB_STATE/npm.count"
 echo "npm $*" >> "$STUB_STATE/calls.log"
@@ -208,7 +212,7 @@ def _drop_verify(t: str) -> str:
 
 
 def _drop_retry(t: str) -> str:
-    return t.replace("for attempt in 1 2 3 4; do", "for attempt in 1; do")
+    return t.replace("for attempt in 1 2 3 4 5; do", "for attempt in 1; do")
 
 
 def _drop_cache_bypass(t: str) -> str:
@@ -217,6 +221,10 @@ def _drop_cache_bypass(t: str) -> str:
 
 def _shorten_backoff(t: str) -> str:
     return t.replace("delay=60\n", "delay=30\n")
+
+
+def _drop_cap(t: str) -> str:
+    return t.replace('if [ "$delay" -gt 300 ]; then delay=300; fi', ":")
 
 
 def _fail_open(t: str) -> str:
@@ -232,6 +240,7 @@ def _fail_open(t: str) -> str:
         _drop_retry,
         _drop_cache_bypass,
         _shorten_backoff,
+        _drop_cap,
         _fail_open,
     ],
     ids=[
@@ -240,6 +249,7 @@ def _fail_open(t: str) -> str:
         "retry-dropped",
         "cache-bypass-dropped",
         "backoff-shortened",
+        "cap-dropped",
         "fails-open",
     ],
 )
