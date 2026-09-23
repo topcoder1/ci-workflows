@@ -9,8 +9,8 @@
 #    for a '!' that is no longer there, and the entry matches nothing: under
 #    blocked:/sensitive: that gate disappears, and under always_review:
 #    codex-gate.mjs stops forcing a review of that path, so a 5-line diff to it
-#    skips Codex. Every parser warning now fails closed, not only errors
-#    (cases 1-3).
+#    skips Codex. Every warning the parser reports now fails closed, not only
+#    errors (cases 1-3).
 #
 # 2. An empty or whitespace-only string matches no changed file, and a
 #    non-string entry ('- 42', a bare '-', '- key: value') is skipped by every
@@ -18,9 +18,15 @@
 #    a changed file that gets that far down the list, and codex-gate.mjs throws
 #    on it in always_review:, failing the Codex job instead of naming the line.
 #    Both now fail closed in every class, in exclude: and in always_review
-#    (cases 4-5).
+#    (cases 4-5). So do two strings no changed path can match (case 6): one
+#    with leading or trailing whitespace — a '|' or '>' block scalar keeps a
+#    trailing newline — and one that starts with '#', which minimatch reads as
+#    a comment. The second is where the non-string message's own advice would
+#    otherwise lead: quoting a '- #scripts/deploy.sh' line (null) as written
+#    gives '#scripts/deploy.sh'. Both found by the independent review of this
+#    change.
 #
-# Cases 6-7 are the positive controls: a QUOTED '!x' is a real string and must
+# Cases 7-8 are the positive controls: a QUOTED '!x' is a real string and must
 # still reach the negation guard with that guard's own reason, and ordinary
 # entries must still load and classify.
 #
@@ -153,20 +159,23 @@ place() {
 # 0. PREMISE, pinned against the shipped bundle with the options classify.mjs
 #    uses: the hazards exist. yaml's parse() turns an unquoted '!' entry into an
 #    EMPTY string and only warns, minimatch matches that empty pattern against
-#    no real path, and minimatch throws on a non-string. If a future bundle
-#    changed any of these, this case says so and the guard's rationale needs a
-#    second look. (parse() prints its warning on stderr, discarded here.)
+#    no real path, minimatch throws on a non-string, and it matches neither a
+#    pattern that starts with '#' (a comment) nor a padded one. If a future
+#    bundle changed any of these, this case says so and the guard's rationale
+#    needs a second look. (parse() prints its warning on stderr, discarded.)
 premise=$(cd "$tmp" && node --input-type=module -e "
 import { parse, minimatch } from './classifier-deps.mjs';
 const opts = { dot: true, matchBase: false };
 const out = [JSON.stringify(parse('always_review:\n  - !scripts/la1_deploy_ssh_setup.sh\n'))];
 out.push(minimatch('scripts/la1_deploy_ssh_setup.sh', '', opts));
 try { minimatch('src/app.py', 42, opts); out.push('no throw'); } catch (e) { out.push(e.message); }
+out.push(minimatch('#notes/x.md', '#notes/**', opts));
+out.push(minimatch('scripts/deploy.sh', 'scripts/deploy.sh ', opts));
 console.log(out.join(' | '));
 " 2>/dev/null)
-want='{"always_review":[""]} | false | invalid pattern'
+want='{"always_review":[""]} | false | invalid pattern | false | false'
 if [ "$premise" = "$want" ]; then
-  echo "✓ premise: an unquoted '!' entry parses to '', '' matches nothing, and a non-string makes minimatch throw"
+  echo "✓ premise: an unquoted '!' entry parses to '', which matches nothing; a non-string makes minimatch throw; '#…' and padded patterns match nothing"
 else
   echo "✗ premise changed — want '$want', got '$premise'"
   failed=1
@@ -212,7 +221,7 @@ expect_fail_closed "a duplicate key (a parser ERROR) still fails closed through 
 #    two carry no warning at all: a bare '!' is YAML's non-specific tag and
 #    '!!str' its string tag, and both resolve an empty node to ''.
 for where in sensitive safe_test exclude.sensitive always_review; do
-  for raw in "''" "' '" '"\t"' '" "' '!' '!!str'; do
+  for raw in "''" "' '" '"\t"' '"\u00a0"' '!' '!!str'; do
     place "$where" "$raw"
     expect_fail_closed "- $raw under $where: fails closed as empty" \
       "(under '$where:') is empty or whitespace-only"
@@ -245,7 +254,33 @@ for where in sensitive safe_test exclude.sensitive always_review; do
     "(under '$where:') is a list, not a string"
 done
 
-# 6. POSITIVE CONTROL: quoted, '!x' is a real string, so it must reach the
+# 6. Strings no changed path can match fail closed in every location. Changed
+#    paths are trimmed before matching, so a pattern with leading or trailing
+#    whitespace never matches; the double-quoted "…\n" entry is the value a
+#    '|' or '>' block scalar produces, on one line. A pattern that starts with
+#    '#' is a minimatch COMMENT and matches nothing — and it is where case 5's
+#    '- #scripts/deploy.sh' leads if its author quotes the line as written.
+for where in sensitive safe_test exclude.sensitive always_review; do
+  for raw in "' scripts/deploy.sh'" "'scripts/deploy.sh '" '"scripts/deploy.sh\n"'; do
+    place "$where" "$raw"
+    expect_fail_closed "- $raw under $where: fails closed as padded" \
+      "(under '$where:') has leading or trailing whitespace"
+  done
+  place "$where" "'#scripts/deploy.sh'"
+  expect_fail_closed "quoted '#scripts/deploy.sh' under $where: fails closed as a minimatch comment" \
+    "(under '$where:') starts with '#'"
+done
+# The block scalars themselves, which take a second line.
+for style in '|' '>'; do
+  {
+    printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - 'cmd/**'"
+    printf '%s\n' "  - $style" "    scripts/deploy.sh"
+  } > "$tmp/repo/.github/risk-paths.yml"
+  expect_fail_closed "a '$style' block scalar (it keeps a trailing newline) fails closed as padded" \
+    "(under 'sensitive:') has leading or trailing whitespace"
+done
+
+# 7. POSITIVE CONTROL: quoted, '!x' is a real string, so it must reach the
 #    negation guard and fail with THAT guard's reason — not be swallowed by
 #    the warning or entry guards, which would hide why it is wrong.
 for where in sensitive safe_test exclude.sensitive always_review; do
@@ -255,11 +290,15 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   expect_err_lacks "the YAML parser warned" "quoted '!x' under $where: no parser warning"
   expect_err_lacks "empty or whitespace-only" "quoted '!x' under $where: not reported as empty"
   expect_err_lacks "not a string" "quoted '!x' under $where: not reported as a non-string"
+  expect_err_lacks "leading or trailing whitespace" "quoted '!x' under $where: not reported as padded"
+  expect_err_lacks "starts with '#'" "quoted '!x' under $where: not reported as a comment"
 done
 
-# 7. POSITIVE CONTROL: ordinary entries still load and classify, in every
-#    spelling the fleet uses — plain, single- and double-quoted, '!!str'-tagged,
-#    an interior space, a key left empty, and a '!' that sits in a comment.
+# 8. POSITIVE CONTROL: ordinary entries still load and classify, in the
+#    spellings a rules file can use — plain, single- and double-quoted,
+#    '!!str'-tagged, a '|-' block scalar (which strips its newline), a flow
+#    list, an interior space, a '#' escaped as '\#', a key left empty, and a
+#    '!' that sits in a comment.
 cat > "$tmp/repo/.github/risk-paths.yml" <<'YAML'
 # - !scripts/commented_out.sh   (a comment: the parser never sees it)
 blocked:
@@ -268,12 +307,16 @@ sensitive:
   - cmd/**
   - "internal/auth/**"
   - !!str scripts/deploy.sh
+  - |-
+    scripts/stripped.sh
 safe_test:
   - 'tests/**'
   - '**/*_test.go'
-safe_deps:
+safe_deps: ['go.sum', 'package-lock.json']
+safe_config:
 trivial:
   - 'docs/My Notes/**'
+  - '\#notes/**'
 exclude:
   sensitive:
     - 'cmd/**/*_test.go'
@@ -284,8 +327,11 @@ expect_class blocked ".env.prod classifies blocked" .env.prod
 expect_class sensitive "a plain unquoted entry gates (cmd/svc/main.go)" cmd/svc/main.go
 expect_class sensitive "a double-quoted entry gates (internal/auth/x.go)" internal/auth/x.go
 expect_class sensitive "a '!!str'-tagged entry gates (scripts/deploy.sh)" scripts/deploy.sh
+expect_class sensitive "a '|-' block scalar gates (scripts/stripped.sh)" scripts/stripped.sh
 expect_class safe_test "an exclusion still subtracts (cmd/svc/main_test.go)" cmd/svc/main_test.go
+expect_class safe_deps "a flow-list entry matches (go.sum)" go.sum
 expect_class trivial "an entry with an interior space matches" "docs/My Notes/a.md"
+expect_class trivial "an escaped '\\#' entry matches a path that starts with '#'" "#notes/x.md"
 expect_class standard "an unmatched path still falls back to standard" src/app.py
 
 exit "$failed"

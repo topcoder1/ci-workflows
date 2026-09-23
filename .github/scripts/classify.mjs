@@ -108,9 +108,9 @@ try {
 	fail(`failed to read ${RULES_PATH}: ${e.message}`);
 }
 
-// Every YAML parser WARNING fails closed, not only errors. A warning is yaml
-// carrying on with its best guess, and a guess in a rules file can be a rule
-// that silently does nothing. The motivating case: an UNQUOTED entry that
+// Every WARNING the YAML parser reports (doc.warnings) fails closed, not only
+// errors. A warning is yaml carrying on with its best guess, and a guess in a
+// rules file can be a rule that silently does nothing. The motivating case: an UNQUOTED entry that
 // starts with '!' is a YAML tag, not text. '- !scripts/la1_deploy_ssh_setup.sh'
 // and '- !secrets/**' name tags the parser cannot resolve, so it warns
 // (TAG_RESOLVE_FAILED), drops the tag and keeps an EMPTY string — and the
@@ -125,7 +125,18 @@ try {
 // ci-workflows#227 named this out of scope ("Rejecting empty patterns or YAML
 // warnings would be a separate hardening"); the independent review of
 // ci-workflows#228 raised it again. selftest/test_classify_dead_entry_guard.sh
-// pins it in every location.
+// pins it, and the entry pass below, in every location.
+//
+// Fleet audit before adding both, 2026-09-23, exit-code-gated over all 148
+// repos the token can see. Controls: whois-api-llc/whoisxmlapi-samples a 404
+// "Not Found" non-carrier; a bogus ref a "No commit found" bad ref, which is
+// never read as an absence; topcoder1/ci-workflows a carrier. There are 46
+// carriers (45 live, 1 archived), and 268 rules files — every default branch
+// plus the head, test-merge and non-default base of all 188 open PRs. They hold
+// 14,029 entries with no parser warning, no empty, padded, '#'-leading or
+// non-string entry, and no '!' outside a comment. All 268 exit 0 with both
+// guards, and every verdict is unchanged. In the same pass, synthetic tag,
+// empty and non-string files flipped from 0 to 1, and a clean one stayed at 0.
 if (yamlWarnings.length > 0) {
 	fail(
 		`${RULES_PATH}: the YAML parser warned — ` +
@@ -194,10 +205,10 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	}
 }
 
-// Every entry must be a string with something in it: in every class, in
-// always_review, and — through the same checkEntry() — in every exclude: list
-// below. The passes after this one test strings only and skip anything else,
-// so before this pass two kinds of entry went unchecked:
+// Every entry must be a string that some changed path could match: in every
+// class, in always_review, and — through the same checkEntry() — in every
+// exclude: list below. The passes after this one test strings only and skip
+// anything else, so before this pass these entries went unchecked:
 //
 // An empty or whitespace-only string matches no path. It reads like a rule and
 // gates nothing. YAML makes one without a warning from a bare '- !' (its
@@ -212,19 +223,31 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // the next, and in always_review it fails the Codex job instead of naming
 // itself. Rejecting it here, on every PR, makes it loud in the right place.
 //
-// Fail closed on both, in the style of the other passes: a rules entry nobody
-// can match is a gate that is not there.
+// Two strings can never match either (found by the independent review of this
+// guard). Changed paths are trimmed before matching (see changedFiles below and
+// codex-gate.mjs), so a pattern with leading or trailing whitespace matches
+// nothing — and a '|' or '>' block scalar keeps a trailing newline. And
+// minimatch reads a pattern that starts with '#' as a comment, which matches
+// nothing: a quoted '#…' is exactly what an author gets by quoting a
+// '- #scripts/x.sh' line as written, which YAML read as a comment (null).
+//
+// Fail closed on all of them, in the style of the other passes: a rules entry
+// nobody can match is a gate that is not there. The fleet audit is recorded
+// on the warning guard above; no caller carries any of these shapes.
 function checkEntry(p, where) {
 	if (typeof p !== 'string') {
 		const kind =
 			p === null ? 'null' : Array.isArray(p) ? 'a list' : typeof p === 'object' ? 'a mapping' : `a ${typeof p}`;
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is ${kind}, not a string — ` +
-				`YAML reads an unquoted number, true/false, null, '~' or a bare '-' as that type, and ` +
-				`'key: value' or '[…]' as a collection. minimatch throws on anything but a string, so ` +
-				`depending on which files a PR touches the line either crashes this script (or ` +
-				`codex-gate.mjs, for 'always_review:') or is skipped and silently matches nothing. ` +
-				`Quote the pattern ("- '…'") or delete the line.`
+				`YAML reads an unquoted number or true/false as that type, a bare '-', 'null', '~' or a ` +
+				`'- #…' comment as null, and 'key: value' or '[…]' as a collection. ` +
+				(where.startsWith(`${EXCLUDE_KEY}.`)
+					? `An exclusion that is not a string is skipped, so it silently exempts nothing. `
+					: `minimatch throws on anything but a string, so on a PR with a changed file that ` +
+						`reaches the entry ${where === 'always_review' ? 'codex-gate.mjs fails the Codex job' : 'this script crashes'}, ` +
+						`and on every other PR the line silently matches nothing. `) +
+				`Quote the path you meant ("- '…'") or delete the line.`
 		);
 	}
 	if (p.trim() === '') {
@@ -234,6 +257,22 @@ function checkEntry(p, where) {
 				`whitespace, so the line gates nothing while reading as if it did. A bare '- !' or ` +
 				`'- !!str' parses this way too: YAML reads the '!' as a tag, not text. Write the path ` +
 				`you meant, quoted ("- '…'"), or delete the line.`
+		);
+	}
+	if (p !== p.trim()) {
+		fail(
+			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') has leading or trailing whitespace — ` +
+				`changed paths are trimmed before they are matched, so no path starts or ends with ` +
+				`whitespace and the line gates nothing. A '|' or '>' block scalar keeps a trailing ` +
+				`newline this way. Write the pattern on one quoted line with nothing around it ("- '…'").`
+		);
+	}
+	if (p.startsWith('#')) {
+		fail(
+			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') starts with '#' — minimatch ` +
+				`reads a pattern that starts with '#' as a comment and never matches it, so the line ` +
+				`gates nothing. If the path was commented out, delete the line; to match a path that ` +
+				`really starts with '#', escape it ('\\#…').`
 		);
 	}
 }
@@ -259,9 +298,9 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // (either reads as no always_review at all) and applies any string it is
 // given without a word, so this script's fail-closed passes are the only
 // place a dead always_review entry gets caught before it silently skips a
-// required Codex review. The gate throws only on a non-string entry, which
-// fails the Codex job rather than naming the line; the entry pass above names
-// it here.
+// required Codex review. The gate throws on a non-string entry, which fails
+// the Codex job rather than naming the line; the entry pass above names it
+// here.
 for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	for (const p of rules[cls] || []) {
 		if (typeof p === 'string' && (p.includes('[') || p.includes(']'))) {
