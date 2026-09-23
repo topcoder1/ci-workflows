@@ -48,10 +48,10 @@ arbitrary helper scripts; that's a different kind of repo.
   disappears and the classifier still exits 0. Every warning yaml reports,
   while parsing or converting, now fails closed, and so does an entry that is
   empty, whitespace-only, padded (a `|` block scalar keeps a trailing
-  newline), broken across lines, `#`-leading (a minimatch comment) or not a
-  string, in every class, `exclude:` list and `always_review`. Positive
-  controls: a quoted `'!x'` still gets the negation guard's own message, and
-  ordinary entries still load.
+  newline), holding a line break (a `|` block of several lines), `#`-leading
+  (a minimatch comment) or not a string, in every class, `exclude:` list and
+  `always_review`. Positive controls: a quoted `'!x'` still gets the negation
+  guard's own message, and ordinary entries still load.
 - `test_classifier_deps_vendored.sh` — the classifier's deps are a committed,
   version-pinned esbuild bundle (`.github/scripts/classifier-deps.mjs`) instead
   of a run-time `npm install`. The install used to run inside the caller's
