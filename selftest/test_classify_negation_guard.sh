@@ -89,9 +89,14 @@ expect_fail_closed() {
 
 # expect_err_lacks <needle> <description> — the message from the LAST run must
 # not contain <needle>. Each tier's reason is distinct, so routing a class to
-# the other tier's message has to show up as a failure, not pass silently.
+# the other tier's message has to show up as a failure, not pass silently. An
+# EMPTY message fails too: a check that passes on silence proves nothing.
 expect_err_lacks() {
   case "$err" in
+    "")
+      echo "✗ $2 — no stderr to check: the classifier printed no message at all"
+      failed=1
+      ;;
     *"$1"*)
       echo "✗ $2 — stderr unexpectedly contains '$1':"
       printf '%s\n' "$err" | sed 's/^/    /'
@@ -175,10 +180,11 @@ done
 
 # 5. Brace expansion can SYNTHESIZE an extglob negation the raw pattern never
 #    spells: minimatch expands '{!,@}(tests)/**' to '!(tests)/**' plus
-#    '@(tests)/**', which together match every path. Neither a leading '!' nor
-#    the substring '!(' appears in the raw pattern, so a raw-string check
-#    passed it (Codex round 1 on this change). The guard must read minimatch's
-#    own expansion, at every call site: safe class, gating class, exclusion.
+#    '@(tests)/**', which together match every path below the root. Neither a
+#    leading '!' nor the substring '!(' appears in the raw pattern, so a
+#    raw-string check passed it (Codex round 1 on this change). The guard must
+#    read minimatch's own expansion, at every call site: safe class, gating
+#    class, exclusion.
 rules "blocked: []
 safe_test:
   - '{!,@}(tests)/**'

@@ -231,11 +231,12 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // well as the raw string, because braces can assemble an extglob negation the
 // raw pattern never spells: '{!,@}(tests)/**' has neither a leading '!' nor
 // '!(', yet minimatch expands it to '!(tests)/**' + '@(tests)/**', which
-// together match every path (Codex round 1 on the change that extended this
-// guard). Expansion can move a '!' or '(' but never mint one (ranges take only
-// letter or number endpoints), so the raw pattern bounds what it can build. A
-// leading '!' that appears only after expansion is literal to minimatch, which
-// settles negation before it expands braces; flagging it is merely strict.
+// together match every path below the root (Codex round 1 on the change that
+// extended this guard). Expansion can move a '!' or '(' but never mint one: a
+// range takes only letter or number endpoints and none yields either character,
+// so a pattern with no '!' cannot build a negation. A '!' that expansion moves
+// to the front never negates the whole pattern — minimatch settles that before
+// it expands braces — so flagging it when no '(' follows is merely strict.
 //
 // So — as with the bracket guard above — strictness costs nothing today and
 // stops the footgun from ever being introduced. selftest/test_classify_nocase.sh
