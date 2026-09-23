@@ -87,6 +87,20 @@ expect_fail_closed() {
   fi
 }
 
+# expect_err_lacks <needle> <description> — the message from the LAST run must
+# not contain <needle>. Each tier's reason is distinct, so routing a class to
+# the other tier's message has to show up as a failure, not pass silently.
+expect_err_lacks() {
+  case "$err" in
+    *"$1"*)
+      echo "✗ $2 — stderr unexpectedly contains '$1':"
+      printf '%s\n' "$err" | sed 's/^/    /'
+      failed=1
+      ;;
+    *) echo "✓ $2" ;;
+  esac
+}
+
 # 0. PREMISE, pinned against the shipped matcher with classify.mjs's own
 #    options: a negated pattern matches paths it does not name. This is the
 #    hazard the ban exists for. If a future bundle stopped inverting '!', this
@@ -144,11 +158,12 @@ $cls:
 "
   expect_fail_closed "leading-'!' negation under $cls: fails closed" \
     "uses glob negation" "(under '$cls:')" "auto-merge-eligible tier"
+  expect_err_lacks "case-insensitively" "...and $cls: is not given the case-fold reason"
 done
 
 # 4. ...and the extglob spelling of the same complement. 'src/!(*.md)' claims
 #    every non-markdown file under src/, including ones a future PR adds (and
-#    '!(tests)/**' at the root is the whole repo again).
+#    '**/!(*.md)' every non-markdown file in the repo).
 for cls in safe_test safe_deps safe_config trivial; do
   rules "blocked: []
 $cls:
@@ -191,11 +206,14 @@ expect_fail_closed "brace-synthesized '!(…)' in an exclusion fails closed" \
 # 6. The gating classes keep THEIR reason — the case-fold downgrade pinned in
 #    test_classify_nocase.sh case 10. Extending the ban must not blur the two
 #    messages: an author told the wrong reason fixes the wrong thing.
-rules "blocked:
+for cls in blocked sensitive; do
+  rules "$cls:
   - '!foo'
 "
-expect_fail_closed "negation under blocked: still cites the case-fold reason" \
-  "uses glob negation" "(under 'blocked:')" "case-insensitively"
+  expect_fail_closed "negation under $cls: still cites the case-fold reason" \
+    "uses glob negation" "(under '$cls:')" "case-insensitively"
+  expect_err_lacks "auto-merge-eligible tier" "...and $cls: is not given the safe-class reason"
+done
 
 # 7. POSITIVE CONTROL for the ban's precision. minimatch negates only on a
 #    leading '!' or a '!(' extglob; a '!' anywhere else is a literal character,

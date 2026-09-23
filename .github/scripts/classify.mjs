@@ -213,7 +213,7 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // classifies every file that is not blocked or sensitive as safe_test: all of
 // the repo's `standard` code becomes auto-merge eligible, and so does every
 // file a future PR adds. A '!(…)' extglob is the same complement scoped to one
-// segment ('!(tests)/**' at the root is the whole repo again). Paths come back
+// segment ('**/!(*.md)' is every non-markdown file in the repo). Paths come back
 // OUT of a class through exclude:, which subtracts only what it names. Found by
 // an independent code review during topcoder1/webcrawl#579 (2026-09-22), and
 // verified against the vendored bundle: minimatch(
@@ -258,7 +258,7 @@ for (const cls of PATTERN_CLASSES) {
 					: `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
 							`negation inverts the match. A leading '!' matches every path EXCEPT the one ` +
 							`it names, and classify() takes the first class that matches, so one such ` +
-							`entry reclassifies every ungated file (anything blocked: and sensitive: don't ` +
+							`entry reclassifies every other ungated file (anything blocked: and sensitive: don't ` +
 							`catch) into an auto-merge-eligible tier instead of the strict 'standard' ` +
 							`fallback — including every file a future PR adds; a '!(…)' extglob does the ` +
 							`same within its segment. List the paths you want in '${cls}' positively; to ` +
