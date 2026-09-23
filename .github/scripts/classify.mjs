@@ -257,8 +257,17 @@ function checkEntry(p, where) {
 	if (typeof p !== 'string') {
 		const kind =
 			p === null ? 'null' : Array.isArray(p) ? 'a list' : typeof p === 'object' ? 'a mapping' : `a ${typeof p}`;
+		// Show the value, to help find the line. A YAML alias to its own anchor
+		// ('- &x [*x]') is a legal cycle that JSON.stringify throws on, and the
+		// message must still come from fail(). (Codex review round 3.)
+		let shown;
+		try {
+			shown = p !== null && typeof p === 'object' ? JSON.stringify(p) : String(p);
+		} catch {
+			shown = '(recursive)';
+		}
 		fail(
-			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is ${kind}, not a string — ` +
+			`${RULES_PATH}: entry ${shown} (under '${where}:') is ${kind}, not a string — ` +
 				`YAML reads an unquoted number or true/false as that type, a bare '-', 'null', '~' or a ` +
 				`'- #…' comment as null, and 'key: value' or '[…]' as a collection. ` +
 				(where.startsWith(`${EXCLUDE_KEY}.`)
