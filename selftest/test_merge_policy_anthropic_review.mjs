@@ -1074,10 +1074,47 @@ test("an unrecognised top-level response field is accepted only when null (stagi
       "invalid_response",
     );
   }
-  // Required fields stay required.
-  const { usage, ...missing } = envelope();
-  await rejects(
-    client(async () => response(missing)).review(fixture()),
-    "invalid_response",
-  );
+  // Mixing a null extra field with a non-null one fails, in either order.
+  for (const extra of [
+    { diagnostics: null, a_future_field: {} },
+    { a_future_field: {}, diagnostics: null },
+  ]) {
+    await rejects(
+      client(async () => response({ ...envelope(), ...extra })).review(
+        fixture(),
+      ),
+      "invalid_response",
+    );
+  }
+  // Known optional fields keep their own rules: non-null is incomplete, not
+  // an unrecognised field.
+  for (const extra of [
+    { stop_details: { type: "refusal" } },
+    { container: { id: "container_1" } },
+  ]) {
+    await rejects(
+      client(async () => response({ ...envelope(), ...extra })).review(
+        fixture(),
+      ),
+      "incomplete_review",
+    );
+  }
+  // Every required field stays required, refused by the envelope itself.
+  for (const field of [
+    "id",
+    "type",
+    "role",
+    "model",
+    "content",
+    "stop_reason",
+    "stop_sequence",
+    "usage",
+  ]) {
+    const missing = envelope();
+    delete missing[field];
+    await rejects(
+      client(async () => response(missing)).review(fixture()),
+      "invalid_response",
+    );
+  }
 });

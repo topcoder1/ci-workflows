@@ -71,12 +71,14 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    receipt. The switch changes the authority digest, so receipts recorded under
    the old tag stop counting and open pull requests need a fresh cycle. Until
    the switch, cycles from `main` pass `--workflow-ref` with the old tag (for
-   `v5`, `refs/tags/merge-policy-review-v4`) and keep using it,
-   whose own workflow copy still runs; the driver defaults to the new ref. A
+   `v5`, `refs/tags/merge-policy-review-v4`) and keep using the old tag, whose
+   own workflow copy still runs; the driver defaults to the new ref. When the
+   upgrade answers a provider change, the old tag may be unable to complete any
+   review (`v4` cannot since 2026-09-24): then run no cycle until the switch. A
    tag that does not match the entry's `workflowRevision`, either way, still
    runs a paid review and then ends `RUN_NOT_FOUND`, with the orphaned run
    answering `PRODUCER_BUSY` until it finishes. After the switch, the old tag
-   joins `v1`/`v2`: never dispatch it again.
+   is retired with the earlier ones: never dispatch it again.
 
 ## One cycle
 
