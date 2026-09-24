@@ -233,7 +233,7 @@ jobs:
               p="${p#"${p%%[![:space:]]*}"}"
               [ -z "$p" ] && continue
               if echo "$f" | grep -Eq "$p"; then
-                override_hits="$override_hits$f\n"
+                override_hits="$override_hits$f"$'\n'
                 break
               fi
             done <<< "$unsafe_overrides"
@@ -244,7 +244,12 @@ jobs:
             echo "reason=unsafe-override" >> "$GITHUB_OUTPUT"
             echo "Not safe — diff touches a built-in unsafe-override path."
             echo "Override hits:"
-            printf "%b" "$override_hits"
+            # Render with printf '%s', never %b. These lists are built from
+            # PR-controlled file names and go to the step log — which the
+            # runner scans for ::workflow commands:: — so %b-expanding a name's
+            # backslash bytes into standalone lines is an injection surface.
+            # (Same reasoning as the risk step in claude-author-automerge.yml.)
+            printf '%s' "$override_hits"
             exit 0
           fi
 
@@ -294,20 +299,22 @@ jobs:
               fi
             done <<< "$all_globs"
             if [ "$matched" -eq 0 ]; then
-              unsafe_files="$unsafe_files$f\n"
+              unsafe_files="$unsafe_files$f"$'\n'
             fi
           done <<< "$changed"
 
           if [ -n "$unsafe_files" ]; then
             echo "all_safe=0" >> "$GITHUB_OUTPUT"
-            {
-              echo "unsafe<<EOF"
-              printf "%b" "$unsafe_files"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+            # The list of unsafe files is only ever logged, never read by a
+            # later step (no `outputs.unsafe` reference exists, and this
+            # reusable declares no job/workflow_call outputs). It is built
+            # from PR-controlled file names, so it must not be written to
+            # $GITHUB_OUTPUT: the decision (all_safe) is the only thing the
+            # rest of the job needs, and it is a function of classification
+            # alone. Keep the human-readable list on the step log only.
             echo "Not all safe — deferring to other automerge workflows."
             echo "Unsafe files:"
-            printf "%b" "$unsafe_files"
+            printf '%s' "$unsafe_files"
           else
             # TIER 2 — RISK-TIER HOLD. Evaluated ONLY here, in the branch
             # where every changed file is safe-by-glob and this workflow
@@ -345,7 +352,7 @@ jobs:
                   p="${p#"${p%%[![:space:]]*}"}"
                   [ -z "$p" ] && continue
                   if echo "$f" | grep -Eq "$p"; then
-                    annotated="$annotated$f (matched: $p)\n"
+                    annotated="$annotated$f (matched: $p)"$'\n'
                     break
                   fi
                 done <<< "$risk_tier_overrides"
@@ -360,13 +367,13 @@ jobs:
               pr_labels=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.labels[].name' 2>/dev/null || echo "")
               if printf '%s\n' "$pr_labels" | grep -Fxq "$bypass_label"; then
                 echo "::notice::Risk-tier paths present but '$bypass_label' is applied — hold released."
-                printf "%b" "$annotated"
+                printf '%s' "$annotated"
               else
                 echo "all_safe=0" >> "$GITHUB_OUTPUT"
                 echo "reason=risk-tier-hold" >> "$GITHUB_OUTPUT"
                 echo "::warning::Diff is docs/tests-only but touches risk-tier paths — holding for a human. Apply '$bypass_label' to release."
                 echo "Risk-tier hits:"
-                printf "%b" "$annotated"
+                printf '%s' "$annotated"
                 exit 0
               fi
             fi
