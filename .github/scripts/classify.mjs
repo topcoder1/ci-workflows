@@ -346,12 +346,33 @@ function isWrapped(n) {
 	}
 	return false;
 }
-const entryLists = [...PATTERN_CLASSES, 'always_review'].map((cls) => [cls, doc.get(cls, true)]);
-const excludeNode = deref(doc.get(EXCLUDE_KEY, true));
-if (isMap(excludeNode)) {
-	for (const { key, value } of excludeNode.items) {
+// The pairs of a mapping node, keyed the way toJS() keys them: an alias key
+// ('? *cls') is the key it names, so looking a class up by name would miss the
+// list under it. (Codex review round 1 of this guard.) A '<<' merge key — an
+// explicit '!!merge <<', or any '<<' under '%YAML 1.1' — copies another
+// mapping's pairs in, so a class list could come from anywhere in the file; no
+// rules file needs one, and it is refused rather than traced.
+function pairsOf(map, where) {
+	return map.items.map(({ key, value }) => {
 		const k = deref(key);
-		entryLists.push([`${EXCLUDE_KEY}.${isScalar(k) ? k.value : k}`, value]);
+		if (isScalar(k) && typeof k.value === 'symbol') {
+			fail(
+				`${RULES_PATH}: ${where} uses a '<<' merge key — it copies another mapping's keys into this ` +
+					`one, so a class list would be assembled from elsewhere in the file, out of reach of ` +
+					`the checks that read each entry's source. Write the keys out in full.`
+			);
+		}
+		return [isScalar(k) ? k.value : k, value];
+	});
+}
+const entryLists = [];
+for (const [key, value] of pairsOf(doc.contents, 'the top level')) {
+	if ([...PATTERN_CLASSES, 'always_review'].includes(key)) entryLists.push([key, value]);
+	const excludeNode = key === EXCLUDE_KEY ? deref(value) : null;
+	if (isMap(excludeNode)) {
+		for (const [cls, list] of pairsOf(excludeNode, `'${EXCLUDE_KEY}:'`)) {
+			entryLists.push([`${EXCLUDE_KEY}.${cls}`, list]);
+		}
 	}
 }
 for (const [where, list] of entryLists) {

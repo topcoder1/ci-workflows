@@ -32,7 +32,9 @@
 #    is rejected, as is a '>' block of more than one content line. An escaped
 #    line join ('\' at the end of a double-quoted line) folds nothing and stays
 #    legal; a '|' block keeps its line breaks, which the dead-entry guard
-#    already rejects.
+#    already rejects. The walk reads keys the way yaml's toJS() does, through
+#    alias keys ('? *cls'), and refuses a '<<' merge key, which would copy a
+#    class list in from elsewhere in the file.
 #
 # Case 6 is the positive control: every key and every legitimate spelling
 # still loads and classifies, in an LF and a CRLF file.
@@ -293,6 +295,32 @@ printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive_deploy_gated:" "  hold_vari
   "  paths: &gated" "    - cmd/**" "        internal/**" "sensitive: *gated" > "$rules"
 expect_fail_closed "an alias to a whole list holding a wrapped entry fails closed" \
   "entry \"cmd/** internal/**\" (under 'sensitive:') is wrapped over"
+# Through an alias KEY: '? *cls' is the key 'sensitive' to toJS, so the list
+# under it must be walked too. (Codex review round 1 of this change.)
+printf '%s\n' "blocked:" "  - '**/.env*'" "  - &cls sensitive" "? *cls" ": - cmd/**" \
+  "    internal/**" > "$rules"
+expect_fail_closed "a wrapped entry under an alias key ('? *cls' = sensitive) fails closed" \
+  "entry \"cmd/** internal/**\" (under 'sensitive:') is wrapped over"
+printf '%s\n' "blocked:" "  - '**/.env*'" "  - &cls sensitive" "sensitive:" "  - 'cmd/**'" \
+  "exclude:" "  ? *cls" "  : - cmd/**" "      x_test.go" > "$rules"
+expect_fail_closed "a wrapped entry under an alias key inside exclude: fails closed" \
+  "entry \"cmd/** x_test.go\" (under 'exclude.sensitive:') is wrapped over"
+# A '<<' merge key copies another mapping's keys into this one — with an
+# explicit '!!merge' tag, or under '%YAML 1.1' — so a class list would come
+# from elsewhere in the file. It is refused wherever classify.mjs reads keys:
+# at the top level and in exclude:. Inside exclude: it used to crash.
+printf '%s\n' "blocked:" "  - '**/.env*'" "exclude: &m" "  sensitive:" "    - 'cmd/**'" \
+  "!!merge <<: *m" > "$rules"
+expect_fail_closed "a '!!merge <<' key at the top level fails closed" \
+  "the top level uses a '<<' merge key"
+printf '%s\n' "%YAML 1.1" "---" "blocked:" "  - '**/.env*'" "exclude: &m" "  sensitive:" \
+  "    - 'cmd/**'" "<<: *m" > "$rules"
+expect_fail_closed "a '<<' merge key under '%YAML 1.1' fails closed" \
+  "the top level uses a '<<' merge key"
+printf '%s\n' "%YAML 1.1" "---" "blocked:" "  - '**/.env*'" "sensitive:" "  - &m 'cmd/**'" \
+  "exclude:" "  sensitive: &x" "    - 'cmd/**/*_test.go'" "  <<: {sensitive: *x}" > "$rules"
+expect_fail_closed "a '<<' merge key inside exclude: fails closed (it used to crash)" \
+  "'exclude:' uses a '<<' merge key"
 
 # 6. POSITIVE CONTROL: all nine keys load together — sensitive_deploy_gated in
 #    the {hold_variable, paths} shape dotclaude reads — and classify.
@@ -329,6 +357,9 @@ expect_class safe_deps "all nine keys: go.sum classifies safe_deps" go.sum
 expect_class safe_config "all nine keys: .editorconfig classifies safe_config" .editorconfig
 expect_class trivial "all nine keys: docs/a.md classifies trivial" docs/a.md
 expect_class standard "all nine keys: an unmatched path falls back to standard" src/app.py
+# An alias key is legal YAML and stays legal: it resolves to the key it names.
+printf '%s\n' "blocked:" "  - '**/.env*'" "  - &cls sensitive" "? *cls" ": - 'cmd/**'" > "$rules"
+expect_class sensitive "an alias key ('? *cls' = sensitive) still gates (cmd/svc/main.go)" cmd/svc/main.go
 
 # Every spelling that does NOT fold: a single-line '>-' block, a double-quoted
 # escaped line join (the '\' joins the lines with nothing between them), a flow
