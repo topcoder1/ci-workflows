@@ -288,6 +288,13 @@ for where in blocked sensitive safe_test exclude.sensitive always_review; do
   expect_fail_closed "'{,./}cmd/**' under $where: fails closed on its dead './' alternative alone" \
     "entry \"{,./}cmd/**\" (under '$where:') starts with './'" "and that alternative matches no changed path"
   expect_err_lacks "the entry matches no changed path" "'{,./}cmd/**' under $where: the whole entry is not called dead"
+  # ESCAPED, minimatch reads '\.' as a literal '.', so '\./infra/**' is the
+  # dead './infra/**' to it: the shape is judged as minimatch reads the entry.
+  # A regex habit's '\.github/**' reads as '.github/**' and stays legal (case 6).
+  # (Codex review round 6 of this change.)
+  place "$where" "'\\./infra/**'"
+  expect_fail_closed "'\\./infra/**' under $where: fails closed on the './' minimatch reads" \
+    "entry \"\\\\./infra/**\" (under '$where:') starts with './'" "(minimatch reads it as \"./infra/**\")"
   # NEGATED, the same shapes match nearly every path, not none: the negation
   # guard must name them, with its fail-open reason, not this one. (Codex
   # review round 3 of this change.)
@@ -473,6 +480,7 @@ sensitive:
     \
     chained.sh"
   - '.github/actions/**'
+  - '\.vscode/**'
 safe_deps: ['go.sum',
   'package-lock.json']
 trivial:
@@ -487,6 +495,7 @@ for endings in LF CRLF; do
   # indentation, so the value is 'scripts/chained.sh'. (Codex review round 4.)
   expect_class sensitive "$endings: a join chained over a line holding only '\\' gates (scripts/chained.sh)" scripts/chained.sh
   expect_class sensitive "$endings: a '.github/…' entry is not a './' entry" .github/actions/setup/action.yml
+  expect_class sensitive "$endings: an escaped '\\.vscode/**' reads as '.vscode/**' and gates" .vscode/settings.json
   expect_class safe_deps "$endings: a flow list spanning lines with its comma matches (package-lock.json)" package-lock.json
   expect_class trivial "$endings: a plain entry with an interior space matches" "docs/My Notes/a.md"
   expect_class trivial "$endings: a one-line double-quoted entry with an interior space matches" "docs/Team Notes/a.md"

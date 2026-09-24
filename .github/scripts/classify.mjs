@@ -533,7 +533,10 @@ function checkEntry(p, where) {
 	// location: '!tests/' matches nearly every path, not none, and that pass
 	// says why. (Codex review round 3 of this guard.)
 	if (usesNegation(p)) return;
-	for (const s of [p, ...minimatch.braceExpand(p)]) {
+	for (const alt of [p, ...minimatch.braceExpand(p)]) {
+		// Judged as minimatch reads it: '\.' is a literal '.', so '\./infra/**'
+		// is the dead './infra/**' to it. (Codex review round 6 of this guard.)
+		const s = minimatch.unescape(alt);
 		const shape = s.endsWith('/')
 			? "ends with '/'"
 			: s.startsWith('./')
@@ -544,9 +547,13 @@ function checkEntry(p, where) {
 		if (shape) {
 			fail(
 				`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') ${shape}` +
-					(s === p ? '' : ` (brace alternative ${JSON.stringify(s)})`) +
+					(alt !== p
+						? ` (brace alternative ${JSON.stringify(s)})`
+						: s !== p
+							? ` (minimatch reads it as ${JSON.stringify(s)})`
+							: '') +
 					` — changed paths are the repo-relative paths of files, so none ends with '/' or ` +
-					`starts with '/' or './', and ${s === p ? 'the entry' : 'that alternative'} matches no ` +
+					`starts with '/' or './', and ${alt === p ? 'the entry' : 'that alternative'} matches no ` +
 					`changed path. ` +
 					(s.endsWith('/')
 						? `In CODEOWNERS and .gitignore 'infra/' means everything under infra/; here that is 'infra/**'.`
