@@ -946,25 +946,31 @@ def actionlint_pin_problems(text):
                     f"`uses: {uses}` in the actionlint job: only actions/checkout "
                     "may run there, beside the hash-checked binary"
                 )
-    # And what runs must be what was verified: the job invokes the
-    # get_actionlint output, and no other step of it runs an actionlint of its
-    # own. The independent review of this guard got `pipx run actionlint-py`,
-    # a brew install and a pip install past every rule above.
+    # And what runs must be what was verified: the actionlint job invokes the
+    # get_actionlint output, and no run step in any job runs an actionlint of
+    # its own. The independent review of this guard got `pipx run
+    # actionlint-py`, a brew install and a pip install past every rule above.
+    # This matches the LITERAL expression: routing the path through `env:`
+    # (say ACTIONLINT_BIN) runs the same binary but trips both messages, so a
+    # refactor like that updates this rule too.
     exe = "${{ steps.get_actionlint.outputs.executable }}"
     invoked = False
-    for step in workflow["jobs"]["actionlint"]["steps"]:
-        if step.get("id") == "get_actionlint" or "run" not in step:
-            continue
-        body = "\n".join(
-            line
-            for line in step["run"].splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        invoked |= exe in body
-        if "actionlint" in body.replace(exe, "").lower():
-            problems.append(
-                f"step {step.get('name')!r} runs an actionlint other than {exe}"
+    for job_id, job in workflow["jobs"].items():
+        for step in job.get("steps") or []:
+            if step.get("id") == "get_actionlint" or "run" not in step:
+                continue
+            body = "\n".join(
+                line
+                for line in step["run"].splitlines()
+                if not line.lstrip().startswith("#")
             )
+            if job_id == "actionlint":
+                invoked |= exe in body
+            if "actionlint" in body.replace(exe, "").lower():
+                problems.append(
+                    f"step {step.get('name')!r} in job {job_id} runs an actionlint "
+                    f"other than {exe}"
+                )
     if not invoked:
         problems.append(f"no step runs the verified binary ({exe})")
     for name, var, pin in (
@@ -1119,6 +1125,18 @@ _ACTIONLINT_UNPINNED = {
             "${{ steps.get_actionlint.outputs.executable }}", "pipx run actionlint-py"
         ),
         "no step runs the verified binary",
+    ),
+    "a floating actionlint in another job": (
+        lambda t: t.replace(
+            "  draft-gate-triggers:\n",
+            "  workflow-lint:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: pipx run actionlint-py -color\n"
+            "\n"
+            "  draft-gate-triggers:\n",
+        ),
+        "in job workflow-lint runs an actionlint other than",
     ),
 }
 

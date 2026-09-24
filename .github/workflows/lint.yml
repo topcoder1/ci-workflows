@@ -226,11 +226,13 @@ jobs:
       # once. The version alone would not freeze the bytes: actionlint's
       # releases are not immutable, so a tag or an asset can be replaced under
       # an unchanged version. The hash does. Bump the two together: download
-      # the new tarball, confirm it with
-      #   gh attestation verify <tarball> --repo rhysd/actionlint
-      # (its signed build provenance), and pin its sha256sum. The release's
-      # checksums.txt is a cross-check only: it sits in the same mutable
-      # release as the tarball it vouches for.
+      # the new tarball, confirm its signed build provenance with
+      #   gh attestation verify <tarball> --repo rhysd/actionlint \
+      #     --signer-workflow rhysd/actionlint/.github/workflows/release.yaml \
+      #     --source-ref refs/tags/v<version>
+      # and pin its sha256sum. The release's checksums.txt is a cross-check
+      # only: it sits in the same mutable release as the tarball it vouches
+      # for.
       # Same literal-fallback convention as RUFF_VERSION: the `inputs` context
       # is null on this repo's own self-test events.
       # Pinned by selftest/test_workflow_guards.py.
