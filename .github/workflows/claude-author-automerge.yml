@@ -34,8 +34,9 @@ name: Claude-author Auto-merge (reusable)
 #       fix. The config file is not just .gitleaks.toml. Once that name
 #       exists, gitleaks lets Viper search for `.gitleaks`, which returns the
 #       first FILE among .gitleaks.<ext> (json before toml) or a bare
-#       .gitleaks. So a .gitleaks.json silently shadows .gitleaks.toml, and a
-#       .gitleaks.toml DIRECTORY hands the scan to any of the others. The
+#       .gitleaks. gitleaks parses that file as TOML whatever its extension.
+#       So a .gitleaks.json holding TOML text silently shadows .gitleaks.toml,
+#       and a .gitleaks.toml DIRECTORY hands the scan to any of the others. The
 #       segment rule enumerates Viper's closed extension list (v1.8.1 plus
 #       v1.19.0's tfvars); re-check it when gitleaks bumps Viper. Also gated:
 #       the dotless gitleaks.toml that gitleaks-action's README tells users to
