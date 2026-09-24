@@ -857,6 +857,11 @@ ACTIONLINT_PIN_VERSION = "1.7.12"
 ACTIONLINT_PIN_SHA256 = (
     "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 )
+# The one hash-checked way in, as the step spells it.
+ACTIONLINT_TARBALL_URL = (
+    "https://github.com/rhysd/actionlint/releases/download/"
+    "v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+)
 # Fetches that resolve to something other than one fixed, checked artifact.
 ACTIONLINT_FLOATING_FETCHES = {
     "raw.githubusercontent.com/rhysd/actionlint/": (
@@ -871,11 +876,21 @@ ACTIONLINT_FLOATING_FETCHES = {
 }
 
 
+def _get_actionlint_steps(workflow):
+    return [
+        s
+        for s in workflow["jobs"]["actionlint"]["steps"]
+        if s.get("id") == "get_actionlint"
+    ]
+
+
 def actionlint_pin_problems(text):
     """Return why lint.yml's actionlint download is not pinned ([] = pinned).
 
     The static half of the guard: no floating fetch anywhere, and the exact
-    hardcoded pins in both the input defaults and the step's fallbacks.
+    hardcoded pins, read from the PARSED workflow (the workflow_call input
+    defaults and the get_actionlint step's own env). A text search is not
+    enough: `UNUSED_ACTIONLINT_SHA256: ...` still contains the binding.
     Whether the step ENFORCES the hash is behavior, so that half executes
     the step instead (test_actionlint_download_fails_closed).
     """
@@ -888,20 +903,38 @@ def actionlint_pin_problems(text):
         for needle, why in ACTIONLINT_FLOATING_FETCHES.items()
         if needle in code
     ]
-    for name, env, pin in (
+    # The checked download must be the ONLY way actionlint gets in. Any other
+    # reference, a second fetch or a docker:// image, runs bytes the hash
+    # never saw.
+    stray = code.replace(ACTIONLINT_TARBALL_URL, "").count("rhysd/actionlint")
+    if stray:
+        problems.append(
+            f"rhysd/actionlint is referenced {stray} time(s) outside the pinned "
+            "download; the hash covers only that one"
+        )
+    workflow = yaml.safe_load(text)
+    # PyYAML reads a bare `on:` key as the boolean True (YAML 1.1).
+    inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
+    steps = _get_actionlint_steps(workflow)
+    step_env = {}
+    if len(steps) == 1:
+        step_env = steps[0].get("env") or {}
+    else:
+        problems.append("lint.yml needs exactly one step with id get_actionlint")
+    for name, var, pin in (
         ("actionlint_version", "ACTIONLINT_VERSION", ACTIONLINT_PIN_VERSION),
         ("actionlint_sha256", "ACTIONLINT_SHA256", ACTIONLINT_PIN_SHA256),
     ):
-        m = re.search(
-            rf'^      {name}:.*?^        default:\s*"([^"]*)"', code, flags=re.S | re.M
-        )
-        if not m or m.group(1) != pin:
-            problems.append(f"input {name} must default to {pin!r}")
+        default = (inputs.get(name) or {}).get("default")
+        if default != pin:
+            problems.append(f"input {name} must default to {pin!r}, not {default!r}")
         # The same literal as the step's fallback: on this repo's own
         # self-test events the `inputs` context is null.
-        binding = f"{env}: ${{{{ inputs.{name} || '{pin}' }}}}"
-        if binding not in code:
-            problems.append(f"{env} must be bound as `{binding}`")
+        binding = f"${{{{ inputs.{name} || '{pin}' }}}}"
+        if step_env.get(var) != binding:
+            problems.append(
+                f"{var} must be bound in the get_actionlint step's env as `{binding}`"
+            )
     return problems
 
 
@@ -975,6 +1008,23 @@ _ACTIONLINT_UNPINNED = {
         ),
         "input actionlint_version must default",
     ),
+    # Codex review round 3: a substring check still found the binding here,
+    # while the step itself would die on an unbound $ACTIONLINT_SHA256.
+    "the hash bound under another env name": (
+        lambda t: t.replace(
+            "          ACTIONLINT_SHA256: ${{",
+            "          UNUSED_ACTIONLINT_SHA256: ${{",
+        ),
+        "ACTIONLINT_SHA256 must be bound",
+    ),
+    "the verified binary swapped for upstream's image": (
+        lambda t: t.replace(
+            "${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=",
+            'docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest'
+            " -color -shellcheck=",
+        ),
+        "outside the pinned download",
+    ),
 }
 
 
@@ -1000,11 +1050,7 @@ def test_actionlint_pin_scanner_rejects_every_unpinned_shape(edit, expected):
 
 def _actionlint_download_script():
     workflow = yaml.safe_load((WORKFLOWS_DIR / "lint.yml").read_text())
-    (step,) = [
-        s
-        for s in workflow["jobs"]["actionlint"]["steps"]
-        if s.get("id") == "get_actionlint"
-    ]
+    (step,) = _get_actionlint_steps(workflow)
     return step["run"]
 
 
