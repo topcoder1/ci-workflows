@@ -116,10 +116,13 @@ for pkg in yaml minimatch esbuild; do
 	fi
 done
 
-# The entry point re-exports exactly the two symbols the classifier scripts use.
-# Keep this surface minimal: every added export widens the bundle and the audit.
+# The entry point re-exports exactly the symbols the classifier scripts use:
+# parse (codex-gate.mjs), parseDocument (classify.mjs, which must see the
+# parser's warnings to fail closed on them) and minimatch (both). Keep this
+# surface minimal: every added export widens the bundle and the audit.
+# parseDocument added no code — parse() is built on it, so it was already here.
 cat > "$work/entry.mjs" <<'ENTRY'
-export { parse } from 'yaml';
+export { parse, parseDocument } from 'yaml';
 export { minimatch } from 'minimatch';
 ENTRY
 

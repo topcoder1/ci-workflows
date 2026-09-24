@@ -93,9 +93,9 @@ else
 fi
 
 # 5. 'always_review' is validated too: classify.mjs never matches against it,
-#    but codex-gate.mjs consumes it with the same minimatch semantics and is
-#    permissive on config errors — this guard is the only fail-closed pass
-#    over that list.
+#    but codex-gate.mjs consumes it with the same minimatch semantics and
+#    applies any string it is given without a word, so a bracket there is dead
+#    unless classify.mjs's fail-closed passes catch it.
 cat > "$tmp/repo/.github/risk-paths.yml" <<'YAML'
 blocked: []
 always_review:
