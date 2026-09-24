@@ -1,0 +1,214 @@
+name: pinned-gate-tests
+description: |
+  Run a repo's merge-gate pytest files a second time, isolated from everything
+  in the checkout that can configure pytest or stand in for a module. In a
+  normal `pytest tests/ ...` run a PR can switch a gate test off without
+  touching it — a conftest.py that adds a deselected mark, a `--deselect` in
+  pyproject addopts, a new pytest.ini, a root-level `pytest.py`/`venv.py` that
+  `python -m` runs instead of the real module, a package directory or extension
+  module named like a gate test, or a code-bearing `tests/__init__.py`. Those
+  paths need no human click, so the PR auto-merges with the gate silently off.
+
+  This action runs first in a job (before the project is installed), in a venv
+  holding only pytest and the packages the gates import, and fails unless
+  exactly `expected` tests pass. Extracted from topcoder1/webcrawl's inline
+  step (PR #585); its PR body has the full route table each flag closes.
+
+  USE AS A STEP inside a job that already feeds a REQUIRED status check, before
+  installing the project. Do NOT wire it as its own job / required context: a
+  new required context sits at "Expected — Waiting for status to be reported"
+  on open PRs. See README.md.
+
+  LIMITATION: gate tests that import the project package itself cannot be
+  isolated this way — installing the project runs PR code, which defeats the
+  point. Such gates must not be routed through this action (list only the
+  test files and their in-directory helper modules in `imports`). If a gate
+  file imports an uninstalled, undeclared module, collection fails and the
+  step fails closed.
+
+inputs:
+  files:
+    description: |
+      Newline-separated gate test files, repo-root-relative, ALL in one
+      directory (e.g. tests/regression/test_a.py). The directory is derived
+      from them and used as --confcutdir. Keep this list and `expected` in the
+      caller's workflow file (a `blocked` risk tier), never in a repo file the
+      tests read.
+    required: true
+  expected:
+    description: |
+      Exact number of tests that must pass. A hardcoded literal, not a
+      comparison against --collect-only (that count shrinks along with a
+      dropped test). Changing it means editing the caller workflow, which is a
+      human-gated click.
+    required: true
+  imports:
+    description: |
+      Newline-separated bare-name modules the gate files import that live in the
+      gate directory (helpers like `_risk_paths_glob`). The pre-check pins each
+      to its own .py in that directory, so a package or extension module of the
+      same name cannot shadow it. Do NOT list installed packages (pytest,
+      pyyaml) or the project package. Default: none.
+    required: false
+    default: ""
+  pytest-version:
+    description: |
+      Pinned pytest version. The isolation was verified against 9.1.1's
+      collection rules — bump deliberately.
+    required: false
+    default: "9.1.1"
+  extra-packages:
+    description: |
+      Space-separated, version-pinned packages installed alongside pytest (what
+      the gate files import at collection time). Default covers PyYAML for
+      risk-paths.yml gates.
+    required: false
+    default: "pyyaml==6.0.3"
+
+runs:
+  using: composite
+  steps:
+    - name: Run pinned gate tests, isolated from pytest config
+      # -eo pipefail (the composite bash default, set explicitly for anyone
+      # copying this block): a pytest failure — exit 1, 2, 4 or 5 — stops the
+      # step at the tee, before the count check.
+      shell: bash
+      # Inputs arrive as env vars, never interpolated into the script body, so
+      # a value cannot inject shell and the selftest can run this run: block
+      # verbatim by supplying the same env.
+      env:
+        GATE_FILES: ${{ inputs.files }}
+        GATE_IMPORTS: ${{ inputs.imports }}
+        EXPECTED: ${{ inputs.expected }}
+        PYTEST_VERSION: ${{ inputs.pytest-version }}
+        EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+      run: |
+        set -euo pipefail
+
+        # --- Parse and validate inputs (no mapfile: macOS ships bash 3.2) ---
+        files=()
+        while IFS= read -r line; do
+          line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+          line="${line%"${line##*[![:space:]]}"}"   # rtrim
+          [ -n "$line" ] && files+=("$line")
+        done <<< "$GATE_FILES"
+        if [ "${#files[@]}" -eq 0 ]; then
+          echo "::error::pinned-gate-tests: the files input is empty"
+          exit 1
+        fi
+
+        case "$EXPECTED" in
+          ''|*[!0-9]*) echo "::error::pinned-gate-tests: expected must be a non-negative integer, got '$EXPECTED'"; exit 1 ;;
+        esac
+        if [ "$EXPECTED" -eq 0 ]; then
+          echo "::error::pinned-gate-tests: expected must be > 0 (a zero-test gate is not a gate)"
+          exit 1
+        fi
+
+        # All gate files must live in one directory (that directory is the
+        # --confcutdir below). Also fail closed on a missing or non-.py file.
+        gate_dir=""
+        modules=""
+        for f in "${files[@]}"; do
+          case "$f" in
+            *.py) ;;
+            *) echo "::error::pinned-gate-tests: not a .py file: $f"; exit 1 ;;
+          esac
+          if [ ! -f "$f" ]; then
+            echo "::error::pinned-gate-tests: gate file not found: $f"
+            exit 1
+          fi
+          d=$(dirname "$f")
+          if [ -z "$gate_dir" ]; then
+            gate_dir="$d"
+          elif [ "$d" != "$gate_dir" ]; then
+            echo "::error::pinned-gate-tests: all files must be in one directory ($gate_dir vs $d)"
+            exit 1
+          fi
+          b=$(basename "$f" .py)
+          modules="$modules $b"
+        done
+        # Add the declared in-directory helper imports to the pin set.
+        for m in $GATE_IMPORTS; do
+          modules="$modules $m"
+        done
+
+        # --- Isolated venv: pytest + the gates' import deps, past the pip cache
+        # (setup-python's cache can carry an earlier run of this same PR). -I on
+        # every interpreter so a root-level venv.py/pytest.py in the checkout is
+        # not on sys.path and cannot stand in under `python -m`.
+        # A UNIQUE dir per invocation: a caller with gate files in two
+        # directories runs this action twice, and a shared venv would let the
+        # second run inherit the first's packages (an undeclared plugin, a
+        # stale import) and lose its isolation. `venv` does not clear an
+        # existing dir and pip does not remove earlier installs.
+        workdir=$(mktemp -d "$RUNNER_TEMP/pinned-gate-tests.XXXXXX")
+        venv="$workdir/venv"
+        log="$workdir/gates.log"
+        python -I -m venv "$venv"
+        # shellcheck disable=SC2086  # EXTRA_PACKAGES is an intentional word list
+        "$venv/bin/pip" install --quiet --no-cache-dir \
+          "pytest==$PYTEST_VERSION" $EXTRA_PACKAGES
+
+        # --- Pre-check, before pytest starts. Fails if the gate directory is a
+        # package (its __init__ would run at setup), or if any gate/helper
+        # module name would import from anything but its own .py in that
+        # directory (a package dir or extension module of the same name is
+        # imported ahead of the .py, and can set __file__ to pass pytest's own
+        # mismatch check). This also catches a deleted gate file.
+        GATE_DIR="$gate_dir" GATE_MODULES="$modules" \
+          "$venv/bin/python" -I - <<'PY'
+        import os
+        import sys
+        from importlib.machinery import PathFinder
+        from pathlib import Path
+
+        gate_dir = Path(os.environ["GATE_DIR"]).resolve()
+        if (gate_dir / "__init__.py").exists():
+            print(f"::error::{gate_dir}/__init__.py would load the gates as part of a package")
+            sys.exit(1)
+        for name in os.environ["GATE_MODULES"].split():
+            spec = PathFinder.find_spec(name, [*sys.path, str(gate_dir)])
+            origin = spec.origin if spec else None
+            want = str(gate_dir / f"{name}.py")
+            if origin != want:
+                print(f"::error::{name} would import from {origin}, not from {want}")
+                sys.exit(1)
+        PY
+
+        # --- Run the gate files, isolated:
+        #   -I                       checkout not on sys.path (root venv.py/pytest.py)
+        #   -c /dev/null --rootdir . no pyproject.toml/pytest.ini/tox.ini/setup.cfg
+        #   --noconftest             no conftest.py, at any level
+        #   -p no:cacheprovider      no cache plugin
+        #   --confcutdir <gate dir>  stop pytest's package walk before tests/;
+        #                            under -c /dev/null confcutdir would default
+        #                            to /dev and take in a code-bearing
+        #                            tests/__init__.py
+        #   --import-mode=append     the gate dir goes LAST on sys.path, so a
+        #                            module dropped there cannot shadow one the
+        #                            gates import (they still find helpers by
+        #                            bare name)
+        "$venv/bin/python" -I -m pytest \
+          -c /dev/null --rootdir . --noconftest -p no:cacheprovider \
+          --confcutdir "$gate_dir" --import-mode=append \
+          "${files[@]}" \
+          | tee "$log"
+
+        # --- Exactly `expected` must pass, and NOTHING else. A pytest failure
+        # (exit 1/2/4/5) already stopped the step at the tee under pipefail;
+        # this guards the zero-exit summaries. `N passed` must equal expected,
+        # AND the summary must carry no skipped / deselected / xfailed / xpassed
+        # outcome — otherwise an added-then-disabled test could hold `passed` at
+        # `expected` while a gate test does not run. (Adding a test to a gate
+        # file is itself a human-gated edit, but rejecting these is free and
+        # makes the contract "exactly N passed" literal.)
+        summary=$(tail -n 1 "$log")
+        if [ "$(grep -Eo '[0-9]+ passed' <<<"$summary")" != "$EXPECTED passed" ]; then
+          echo "::error::expected exactly $EXPECTED passed, pytest reported: $summary"
+          exit 1
+        fi
+        if grep -Eqw '(failed|error|errors|skipped|deselected|xfailed|xpassed)' <<<"$summary"; then
+          echo "::error::gate run has non-passing outcomes (only '$EXPECTED passed' is accepted): $summary"
+          exit 1
+        fi
