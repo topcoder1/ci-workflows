@@ -67,6 +67,13 @@ arbitrary helper scripts; that's a different kind of repo.
   review went red. Requiring a recognizable CLEAN phrase failed the same way.
   The accepted cost — asserted explicitly — is that a finding phrased outside
   both forms is missed.
+- `test_codex_gate_priority.sh` — `codex-gate.mjs`'s rule order. An
+  `always_review` match must run Codex even on a diff under `SIZE_THRESHOLD`
+  and even when every changed file is docs/tests; hoisting either skip above
+  it would silently stop every caller's `always_review` from forcing a read.
+  Each run case has a control that differs only in the match and must skip.
+  The first selftest to execute `codex-gate.mjs` at all (gap raised on
+  whois-api-llc/wxa_webcat#1612).
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base

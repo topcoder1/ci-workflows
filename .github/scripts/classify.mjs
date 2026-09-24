@@ -192,7 +192,7 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 }
 
 // Glob negation fails closed in EVERY pattern class, for a different reason in
-// each half of PATTERN_CLASSES.
+// each half of PATTERN_CLASSES, and in always_review for a third.
 //
 // In the gating classes it is incompatible with the case-fold, and breaks its
 // one invariant. '!' inverts the match, so folding case REMOVES gating rather
@@ -226,7 +226,35 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // patterns and not one '!' outside a comment, so nothing is negated in any
 // class by any spelling. All 267 still exit 0 with this guard.
 //
-// Every guard site — both halves here and the exclude: guard below — tests a
+// In always_review it inverts the list's one job. This script never matches
+// always_review, but codex-gate.mjs forces a Codex review whenever ANY changed
+// file matches ANY entry, and to minimatch a negated entry is a valid glob, so
+// the gate applies it without a word: it is caught here or nowhere. It forces
+// review on every path EXCEPT the one it names: small and docs/tests-only diffs
+// to that path alone skip Codex, while every other diff is pushed into review.
+// always_review has no exclude:, so there is no subtraction to rewrite it into.
+// ci-workflows#227 left this list out on purpose: a match only ever ADDS a
+// Codex run, so negation can widen review but never narrow it. True against a
+// file without the entry, not against the entry the author wrote: the list
+// exists to force review of the paths it names, and negation exempts exactly
+// the named one, the same intent argument the bracket pass above makes for a
+// dead entry. A deliberate segment extglob ('src/!(generated)/**') is where
+// #227 is right: it forces exactly what it means and cannot fail open. It is
+// rejected anyway, as the bracket pass rejects an intentional '*.[jt]s': no
+// check can tell it from an accident, and the fleet uses none. Its rewrite is
+// 'src/**', which over-forces in the safe direction, not a list of
+// subdirectories, which leaves each new one to the cost gate. An independent
+// review on whois-api-llc/wxa_webcat#1612 (2026-09-23) measured
+// '!scripts/la1_deploy_ssh_setup.sh' passing this script with exit 0 and that
+// path's small diffs skipping Codex. Fleet audit before extending the ban,
+// same day, exit-code-gated with the same controls:
+// 142 non-archived repos, 45 carriers, and 247 rules files (every default
+// branch plus the head, test-merge and non-default base of all 176 open PRs).
+// Three carry always_review (topcoder1/ipgeo_core, whois-api-llc/techrecon,
+// whois-api-llc/wxa_webcat), none negates an entry, and all 247 exit 0 with
+// this guard.
+//
+// Every guard site — all three here and the exclude: guard below — tests a
 // pattern with usesNegation(), which reads minimatch's own brace expansion as
 // well as the raw string, because braces can assemble an extglob negation the
 // raw pattern never spells: '{!,@}(tests)/**' has neither a leading '!' nor
@@ -241,11 +269,12 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // So — as with the bracket guard above — strictness costs nothing today and
 // stops the footgun from ever being introduced. selftest/test_classify_nocase.sh
 // (case 10) pins the gating half; selftest/test_classify_negation_guard.sh pins
-// the safe half and the brace-built spellings at every guard site.
+// the safe half, always_review (case 9) and the brace-built spellings at every
+// guard site.
 function usesNegation(p) {
 	return [p, ...minimatch.braceExpand(p)].some((s) => s.trimStart().startsWith('!') || s.includes('!('));
 }
-for (const cls of PATTERN_CLASSES) {
+for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 	for (const p of rules[cls] || []) {
 		if (typeof p === 'string' && usesNegation(p)) {
 			fail(
@@ -256,15 +285,26 @@ for (const cls of PATTERN_CLASSES) {
 							`REMOVES gating instead of adding it (minimatch('FOO','!foo') is true, but ` +
 							`false with nocase). Express the rule positively — list the paths you want ` +
 							`gated rather than the ones you don't. Context: wxa-jake-ai#877.`
-					: `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
-							`negation inverts the match. A leading '!' matches every path EXCEPT the one ` +
-							`it names, and classify() takes the first class that matches, so one such ` +
-							`entry reclassifies every other ungated file (anything blocked: and sensitive: don't ` +
-							`catch) into an auto-merge-eligible tier instead of the strict 'standard' ` +
-							`fallback — including every file a future PR adds; a '!(…)' extglob does the ` +
-							`same within its segment. List the paths you want in '${cls}' positively; to ` +
-							`carve some back out, use "${EXCLUDE_KEY}:\\n  ${cls}:\\n    - '…'", which ` +
-							`subtracts only what it names.`
+					: cls === 'always_review'
+						? `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
+								`codex-gate.mjs forces a Codex review whenever ANY changed file matches ANY ` +
+								`'${cls}' entry, and a leading '!' matches every path EXCEPT the one it names. ` +
+								`The named path is the one path the entry does not force: small and ` +
+								`docs/tests-only diffs to it alone skip Codex, while a diff to any other path ` +
+								`is forced into review; a '!(…)' extglob does the same within its segment. ` +
+								`List the paths that must always be reviewed positively ('${cls}' has no ` +
+								`'${EXCLUDE_KEY}:'): prefer a broader glob such as 'src/**', which over-forces ` +
+								`in the safe direction, to a list of subdirectories, which leaves each new ` +
+								`one to the size and docs/tests skips.`
+						: `${RULES_PATH}: pattern '${p}' (under '${cls}:') uses glob negation — ` +
+								`negation inverts the match. A leading '!' matches every path EXCEPT the one ` +
+								`it names, and classify() takes the first class that matches, so one such ` +
+								`entry reclassifies every other ungated file (anything blocked: and sensitive: don't ` +
+								`catch) into an auto-merge-eligible tier instead of the strict 'standard' ` +
+								`fallback — including every file a future PR adds; a '!(…)' extglob does the ` +
+								`same within its segment. List the paths you want in '${cls}' positively; to ` +
+								`carve some back out, use "${EXCLUDE_KEY}:\\n  ${cls}:\\n    - '…'", which ` +
+								`subtracts only what it names.`
 			);
 		}
 	}
