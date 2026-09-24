@@ -115,11 +115,14 @@ class ReviewContextTests(unittest.TestCase):
         result = self.run_step()
         self.assertEqual(result.returncode, 0, result.stderr)
         context = self.context()
+        empty_tree = self.git("hash-object", "-t", "tree", "/dev/null").strip()
         expected = self.git(
+            f"--attr-source={empty_tree}",
             "--no-pager",
             "diff",
             "--no-ext-diff",
             "--no-textconv",
+            "--text",
             "--no-renames",
             "--full-index",
             f"{self.base}...{self.head}",
@@ -144,6 +147,49 @@ class ReviewContextTests(unittest.TestCase):
         result = self.run_step(head="1" * 40)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())
+
+    def test_files_the_prs_attributes_mark_binary_reach_the_review(self):
+        # The PR's own .gitattributes decides what plain `git diff` prints:
+        # `-diff` on a path (here also on the .gitattributes itself) and
+        # `binary` in a subdirectory's file each reduce the content to
+        # "Binary files ... differ".
+        (self.repo / ".gitattributes").write_text(".gitattributes -diff\n*.cfg -diff\n")
+        (self.repo / "settings.cfg").write_text("setting_marker = 1\n")
+        (self.repo / "conf").mkdir()
+        (self.repo / "conf" / ".gitattributes").write_text("* binary\n")
+        (self.repo / "conf" / "app.txt").write_text("nested_marker = 2\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "attributes that hide files")
+        self.head = self.git("rev-parse", "HEAD").strip()
+        # Control: without --text these paths never reach the patch.
+        plain = self.git(
+            "--no-pager", "diff", "--no-ext-diff", "--no-textconv", f"{self.base}...{self.head}", "--"
+        )
+        self.assertIn("Binary files", plain)
+        self.assertNotIn("setting_marker", plain)
+        result = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = self.context()
+        patch = (context / "diff.patch").read_text()
+        self.assertNotIn("Binary files", patch)
+        for line in ("setting_marker = 1", "nested_marker = 2", "*.cfg -diff", "* binary"):
+            self.assertIn(line, patch)
+        for row in (context / "files.tsv").read_text().splitlines():
+            added, deleted, _path = row.split("\t", 2)
+            self.assertTrue(added.isdigit() and deleted.isdigit(), row)
+
+    def test_both_diff_commands_ignore_the_prs_attributes(self):
+        # Joined continuation lines: one entry per shell command.
+        commands = self.step["run"].replace("\\\n", " ").splitlines()
+        patch = [c for c in commands if 'diff.patch"' in c and " diff " in c]
+        numstat = [c for c in commands if "files.tsv" in c and " diff " in c]
+        self.assertEqual(len(patch), 1)
+        self.assertEqual(len(numstat), 1)
+        for command in patch + numstat:
+            self.assertIn('git --attr-source="$empty_tree" --no-pager diff', command)
+        # --text: the patch prints each file's content, never a binary summary.
+        self.assertIn(" --text ", patch[0])
+        self.assertIn('empty_tree="$(git hash-object -t tree /dev/null)"', commands)
 
     def test_repository_diff_programs_are_not_executed(self):
         marker = self.directory / "unexpected-execution"
