@@ -192,12 +192,14 @@ if (yamlWarnings.length > 0) {
 // entry pass), 2026-09-23, exit-code-gated over all 148 repos the token can
 // see, with the controls named on the warning guard above (plus
 // whois-api-llc/dnssniper-prod-, recorded as an empty repository, not a
-// non-carrier). 46 carriers (45 live, 1 archived) and 269 rules files — every
-// default branch plus the head, test-merge and non-default base of all 187
-// open PRs. Each is a plain mapping using only the nine allowed keys; their
-// 14,217 entries hold no whitespace at all, so nothing is wrapped, and none
-// ends with '/' or starts with '/' or './'. All 269 exit 0 before and after,
-// and a per-path spot check of every distinct file changed no verdict. In the
+// non-carrier), and re-run on the final guard: 46 carriers (45 live, 1
+// archived) and 273 rules files — every default branch plus the head,
+// test-merge and non-default base of all 189 open PRs. Each is a plain mapping
+// using only the nine allowed keys, with no directive, merge key or alias key;
+// their 14,555 entries hold no whitespace and no CR at all, so nothing is
+// wrapped, and none ends with '/' or starts with '/' or './', escaped or not.
+// All 273 exit 0 before and after, and a per-path spot check of every distinct
+// file changed no verdict. In the
 // same pass a synthetic file of each shape flipped from 0 to 1, and a clean
 // one holding all nine keys stayed at 0. The three always_review users
 // (topcoder1/ipgeo_core, whois-api-llc/techrecon, whois-api-llc/wxa_webcat)
