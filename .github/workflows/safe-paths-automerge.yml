@@ -179,7 +179,8 @@ jobs:
           ^(.*/)?\.env($|\..*)
           ^(.*/)?keychain.*
           ^(.*/)?credentials.*
-          (^|/)\.?gitleaks\.toml$
+          (^|/)\.gitleaks(\.(json|toml|yaml|yml|properties|props|prop|hcl|tfvars|dotenv|env|ini))?(/|$)
+          (^|/)gitleaks\.toml$
           (^|/)\.gitleaksignore$
           ^(.*/)?migrations(/|$)
           .*\.sql$
@@ -327,7 +328,7 @@ jobs:
             # holds — same rename-bypass reasoning as tier 1.
             #
             # One `grep -E -f` pass rather than the nested per-pattern loop
-            # used above: tier 1 is a single pattern, tier 2 is 38, and at
+            # used above: tier 1 is a single pattern, tier 2 is 39, and at
             # the 3000-file cap the nested form would fork ~100k greps.
             # Matching FILES is all the decision needs; the per-pattern
             # attribution below runs only over the (few) hits, so the log

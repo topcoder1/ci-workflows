@@ -18,7 +18,8 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 ^(.*/)?\.env($|\..*)
 ^(.*/)?keychain.*
 ^(.*/)?credentials.*
-(^|/)\.?gitleaks\.toml$
+(^|/)\.gitleaks(\.(json|toml|yaml|yml|properties|props|prop|hcl|tfvars|dotenv|env|ini))?(/|$)
+(^|/)gitleaks\.toml$
 (^|/)\.gitleaksignore$
 ^(.*/)?migrations(/|$)
 .*\.sql$
@@ -165,14 +166,15 @@ done
 
 # --- gitleaks config: typo negative control (2026-09-24) ---
 # The corpus proves the list above gates gitleaks' config and ignore files.
-# This proves those verdicts come from the two gitleaks lines and can FAIL:
+# This proves those verdicts come from the three gitleaks lines and can FAIL:
 # misspell `gitleaks` in a copy of the list, and every path below must then
 # stop matching. If one still matches, a different pattern is carrying it, and
 # the corpus entry proves nothing about the gitleaks lines. The probe paths are
 # HARDCODED on purpose — a probe read back out of the list under test agrees
 # with that list no matter what it says (see test_classify_env_globs.sh case 3).
-gitleaks_paths=(.gitleaks.toml sub/.gitleaks.toml gitleaks.toml .github/gitleaks.toml
-  .gitleaksignore services/api/.gitleaksignore)
+gitleaks_paths=(.gitleaks.toml sub/.gitleaks.toml .gitleaks.json services/api/.gitleaks.json
+  .gitleaks.toml/.keep .gitleaks.yaml .gitleaks .gitleaks/config.toml
+  gitleaks.toml .github/gitleaks.toml .gitleaksignore services/api/.gitleaksignore)
 patterns_typo="$(printf '%s\n' "$patterns" | sed 's/gitleaks/gitlaeks/g')"
 
 matches_typo() {
@@ -187,11 +189,11 @@ matches_typo() {
 
 echo ""
 echo "gitleaks typo negative control — must match the list, and NOT a copy with 'gitleaks' misspelled:"
-# Sanity: the mutation rewrote exactly the two gitleaks lines. Rewriting none
-# would let every check below pass vacuously.
-if [ "$(printf '%s\n' "$patterns" | grep -c 'gitleaks')" != "2" ] || \
+# Sanity: the mutation rewrote exactly the three gitleaks lines. Rewriting
+# none would let every check below pass vacuously.
+if [ "$(printf '%s\n' "$patterns" | grep -c 'gitleaks')" != "3" ] || \
    [ -n "$(printf '%s\n' "$patterns_typo" | grep -F 'gitleaks' || true)" ]; then
-  echo "  ✗ the typo did not rewrite exactly the two gitleaks patterns (FAILED)"
+  echo "  ✗ the typo did not rewrite exactly the three gitleaks patterns (FAILED)"
   failed=$((failed + 1))
 fi
 for p in "${gitleaks_paths[@]}"; do
