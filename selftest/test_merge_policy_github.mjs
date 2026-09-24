@@ -341,6 +341,7 @@ test("CLI wrapper strips secrets and server content from exceptions", () => {
       run,
       env: { GH_TOKEN: secret },
       sleep() {},
+      warn() {},
     });
     assert.throws(
       () => api.call("GET", "user"),
@@ -367,6 +368,7 @@ test("API failures distinguish rejected writes from uncertain remote mutations",
         throw error;
       },
       sleep() {},
+      warn() {},
     });
     assert.throws(
       () => api.call(method, "synthetic/endpoint"),
@@ -388,6 +390,7 @@ test("GET retries transient failures with backoff; a 4xx answer and every write 
   const scripted = (outcomes) => {
     const calls = [];
     const sleeps = [];
+    const warnings = [];
     const api = new GitHubAPI({
       run(...args) {
         calls.push(args[1]);
@@ -396,8 +399,9 @@ test("GET retries transient failures with backoff; a 4xx answer and every write 
         return next;
       },
       sleep: (ms) => sleeps.push(ms),
+      warn: (line) => warnings.push(line),
     });
-    return { api, calls, sleeps };
+    return { api, calls, sleeps, warnings };
   };
   {
     const { api, calls, sleeps } = scripted([
@@ -409,9 +413,9 @@ test("GET retries transient failures with backoff; a 4xx answer and every write 
     assert.equal(calls.length, 3);
     assert.deepEqual(sleeps, [1000, 3000]);
   }
-  {
+  for (const status of [500, 502, 503]) {
     const { api, calls, sleeps } = scripted([
-      failing("HTTP 502"),
+      failing(`HTTP ${status}`),
       '{"ok":true}',
     ]);
     assert.deepEqual(api.call("GET", "synthetic/read"), { ok: true });
@@ -419,7 +423,21 @@ test("GET retries transient failures with backoff; a 4xx answer and every write 
     assert.deepEqual(sleeps, [1000]);
   }
   {
-    const { api, calls, sleeps } = scripted([failing("connection reset")]);
+    // The open-PR list inside every snapshot is paginated: a retry must
+    // re-send the whole paginated read.
+    const { api, calls } = scripted([failing("connection reset"), "[[1],[2]]"]);
+    assert.deepEqual(
+      api.call("GET", "synthetic/pages", undefined, { pages: true }),
+      [[1], [2]],
+    );
+    assert.equal(calls.length, 2);
+    for (const args of calls)
+      assert.deepEqual(args.slice(-2), ["--paginate", "--slurp"]);
+  }
+  {
+    const { api, calls, sleeps, warnings } = scripted([
+      failing("connection reset SECRET-XYZ"),
+    ]);
     assert.throws(
       () => api.call("GET", "synthetic/read"),
       (error) =>
@@ -429,6 +447,13 @@ test("GET retries transient failures with backoff; a 4xx answer and every write 
     );
     assert.equal(calls.length, 4);
     assert.deepEqual(sleeps, [1000, 3000, 9000]);
+    // One notice before each retry, so a slow read is visibly not hung; it
+    // never carries gh's own output.
+    assert.deepEqual(warnings, [
+      "GitHub GET failed or returned invalid data (synthetic/read); retry 1 of 3 in 1000 ms",
+      "GitHub GET failed or returned invalid data (synthetic/read); retry 2 of 3 in 3000 ms",
+      "GitHub GET failed or returned invalid data (synthetic/read); retry 3 of 3 in 9000 ms",
+    ]);
   }
   for (const status of [403, 404, 422]) {
     const { api, calls, sleeps } = scripted([
@@ -469,6 +494,7 @@ test("the default GET backoff really waits (synchronous sleep)", () => {
       return '{"ok":true}';
     },
     retryDelaysMs: [60],
+    warn() {},
   });
   const started = performance.now();
   assert.deepEqual(api.call("GET", "synthetic/read"), { ok: true });
