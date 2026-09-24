@@ -399,10 +399,14 @@ def test_precheck_placeholder_cases_fail(wheelhouse, mutate, why):
 # name could shadow it. The pre-check reads the pinned files' imports and fails
 # on any that would load from the gate directory without being declared.
 def test_undeclared_helper_import_fails(wheelhouse):
-    """The clean tree, with `_gate_glob` left out of `imports`."""
+    """The clean tree, with `_gate_glob` left out of `imports`. The pin reaches
+    the helper only through `from _gate_glob import matches`, so this is the
+    `from X import Y` path of the scan; the scanner file, scanned first, has
+    no gate-directory import to trip on."""
     rc, out = _run_action(wheelhouse, imports="")
     assert rc != 0, f"an undeclared in-directory helper must fail:\n{out}"
-    assert "_gate_glob" in out and "not pinned" in out, out
+    assert "test_delete_pins.py imports _gate_glob" in out, out
+    assert "not pinned" in out, out
 
 
 def test_optional_import_filled_from_gate_dir_fails(wheelhouse):
@@ -417,6 +421,19 @@ def test_optional_import_filled_from_gate_dir_fails(wheelhouse):
     rc, out = _run_action(wheelhouse, mutate=mutate)
     assert rc != 0, f"an undeclared module filling an optional import must fail:\n{out}"
     assert "_gate_glob_accel" in out and "not pinned" in out, out
+
+
+def test_extension_module_filling_an_optional_import_fails(wheelhouse):
+    """The same optional import, filled by a zero-byte EXTENSION module
+    (`.abi3.so`, an import suffix on Linux and macOS alike) rather than a
+    `.py`: every import suffix counts, not only source files."""
+
+    def mutate(repo):
+        (repo / "tests/regression/_gate_glob_accel.abi3.so").write_bytes(b"")
+
+    rc, out = _run_action(wheelhouse, mutate=mutate)
+    assert rc != 0, f"an extension module filling an optional import must fail:\n{out}"
+    assert "_gate_glob_accel.abi3.so" in out and "not pinned" in out, out
 
 
 def test_symlink_filling_an_optional_import_fails(wheelhouse):
