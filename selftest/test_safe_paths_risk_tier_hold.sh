@@ -228,16 +228,18 @@ def block(text, name):
     m = re.search(r"^ +%s='(.*?)'\n" % name, text, re.S | re.M)
     if not m:
         sys.exit("FAIL[drift-guard]: could not locate %s=' block" % name)
-    return [l.strip() for l in m.group(1).splitlines() if l.strip()]
+    # Leading indentation only, as both gates strip it. A trailing space
+    # stays part of the regex (`$ ` never matches), so it must count as drift.
+    return [l.lstrip() for l in m.group(1).splitlines() if l.strip()]
 a, b = block(wf, "risk_tier_overrides"), block(sib, "patterns")
 if a != b:
     only_wf = [p for p in a if p not in b]
     only_sib = [p for p in b if p not in a]
     print("FAIL[drift-guard]: tier-2 list has drifted from claude-author-automerge.yml")
     for p in only_wf:
-        print("    only in safe-paths-automerge.yml:      %s" % p)
+        print("    only in safe-paths-automerge.yml:      %r" % p)
     for p in only_sib:
-        print("    only in claude-author-automerge.yml:   %s" % p)
+        print("    only in claude-author-automerge.yml:   %r" % p)
     sys.exit(1)
 print("ok[drift-guard] %d patterns identical in both gates" % len(a))
 PY

@@ -220,15 +220,18 @@ text = open(sys.argv[1]).read()
 m = re.search(r"^ +patterns='(.*?)'\n", text, re.S | re.M)
 if not m:
     sys.exit("  could not locate the patterns=' block in claude-author-automerge.yml")
-shipped = [l.strip() for l in m.group(1).splitlines() if l.strip()]
-mirror = [l.strip() for l in os.environ["MIRROR"].splitlines() if l.strip()]
+# Strip leading indentation only, as the runtime loop does. A trailing space
+# is part of the regex there, and `$ ` never matches, so it silently disables
+# the pattern. That must count as drift, not be normalised away.
+shipped = [l.lstrip() for l in m.group(1).splitlines() if l.strip()]
+mirror = [l.lstrip() for l in os.environ["MIRROR"].splitlines() if l.strip()]
 if shipped != mirror:
     for p in mirror:
         if p not in shipped:
-            print("  only in this selftest:              %s" % p)
+            print("  only in this selftest:              %r" % p)
     for p in shipped:
         if p not in mirror:
-            print("  only in claude-author-automerge.yml: %s" % p)
+            print("  only in claude-author-automerge.yml: %r" % p)
     if sorted(shipped) == sorted(mirror):
         print("  same patterns in a different order (the first match names the pattern in the blocked-PR comment)")
     sys.exit(1)
