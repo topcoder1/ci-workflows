@@ -69,7 +69,7 @@ findings:
 
 `clean` requires zero findings. `findings` requires at least one. Every finding needs a unique lowercase key, original title/reason, priority 0–3 and a repository-relative path. Case is preserved. Missing fields, unknown fields, contradictory outcomes, duplicate findings, malformed paths and partial finding counts fail. Prose is never parsed into a clean outcome. This version accepts no disposition or not-applicable receipts; those need a separately reviewed authorized path.
 
-Bounds are 64 KiB per receipt, 16 KiB normalized metadata, 64 findings, 16 producer entries, 4,096 ledger events, and two seconds per reader call. Input structures also have depth, node and text limits. Accessors, sparse arrays, hidden properties and cycles are refused. Shared-memory bytes and byte-array subclasses are refused.
+Bounds are 64 KiB per receipt, 16 KiB normalized metadata, 64 findings, 16 producer entries, 4,096 ledger events, and ten seconds per reader call. Input structures also have depth, node and text limits. Accessors, sparse arrays, hidden properties and cycles are refused. Shared-memory bytes and byte-array subclasses are refused.
 
 ## Candidate batch and replay
 

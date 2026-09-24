@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { createGitHubArtifactClient } from "../.github/scripts/merge-policy-github-artifact.mjs";
+import {
+  GITHUB_ARTIFACT_LIMITS,
+  createGitHubArtifactClient,
+} from "../.github/scripts/merge-policy-github-artifact.mjs";
 import {
   createIntakeReaders,
   dispatchTarget,
@@ -301,6 +304,37 @@ test("the readers admit the receipt through the real intake, with one fresh rech
     assert.equal(init.method, "GET");
     assert.equal(init.redirect, "manual");
   }
+});
+
+test("the adapter hands the intake's 10 s deadline to the live recheck (staging run 35810541667)", async () => {
+  // Without it the client falls back to its own 2 s default, which the live
+  // recheck (five sequential requests, 1.2-1.8 s) outruns in production.
+  const f = fixture();
+  const seen = [];
+  const client = Object.freeze({
+    read: (...args) => f.client.read(...args),
+    recheck: (selector, options) => {
+      seen.push({
+        deadlineMs: options?.deadlineMs,
+        signal: options?.signal instanceof AbortSignal,
+      });
+      return f.client.recheck(selector, options);
+    },
+  });
+  const readers = createIntakeReaders({ client, prefetch: await prefetch(f) });
+  await prepareReviewIntake(intakeInputs(readers));
+  assert.deepEqual(seen, [{ deadlineMs: 10000, signal: true }]);
+});
+
+test("the intake's read deadline fits the artifact client's own maximum (staging run 35810541667)", () => {
+  // Hardcoded, never derived: the live re-read took up to 1,769 ms against the
+  // old 2,000 ms, and the client refuses a deadline above its own maximum as
+  // invalid_input, which would stop the second metadata read before it starts.
+  assert.equal(INTAKE_LIMITS.readDeadlineMs, 10000);
+  assert.equal(GITHUB_ARTIFACT_LIMITS.maximumDeadlineMs, 10000);
+  assert.ok(
+    INTAKE_LIMITS.readDeadlineMs <= GITHUB_ARTIFACT_LIMITS.maximumDeadlineMs,
+  );
 });
 
 test("the second metadata read runs under the intake's deadline and refuses moved facts", async () => {

@@ -502,7 +502,7 @@ test("complete finding receipt yields one atomic candidate, preserves text and l
         ? INTAKE_LIMITS.artifactBytes
         : INTAKE_LIMITS.metadataBytes,
     );
-    assert.equal(call.options.deadlineMs, 2000);
+    assert.equal(call.options.deadlineMs, 10000);
     assert.equal(call.options.signal.aborted, true);
   }
 });
@@ -906,8 +906,32 @@ test("a stalled reader times out and receives cancellation without returning a c
     signal = options.signal;
     return new Promise(() => {});
   };
+  const started = performance.now();
   await fails(input, "adapter_timeout");
+  // The timer is the deadline readers are told (10 s), not a shorter one.
+  assert.ok(performance.now() - started >= 9_900);
   assert.equal(signal.aborted, true);
+});
+test("a second metadata read slower than 2 s still completes (staging run 35810541667)", async () => {
+  // The adapter answers the second metadata read with client.recheck(): five
+  // sequential GitHub requests, measured live at 1,190-1,769 ms. Under a 2 s
+  // read deadline the v4 verification cycle's intake failed adapter_timeout.
+  const { input, state } = fixture();
+  const answer = input.readers.metadata;
+  input.readers.metadata = async (selector, options) => {
+    if (state.calls.some((call) => call.kind === "metadata"))
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    return answer(selector, options);
+  };
+  const result = await prepareReviewIntake(input);
+  assert.equal(result.changed, true);
+  assert.deepEqual(
+    state.calls.map((call) => call.kind),
+    ["metadata", "artifact", "metadata"],
+  );
+  // Every reader is told the deadline it actually gets, so the artifact
+  // client's own bound on the live re-read matches the intake's timer.
+  for (const call of state.calls) assert.equal(call.options.deadlineMs, 10000);
 });
 
 test("review text at the producer bounds passes intake unchanged and evaluates under the ledger engine", async () => {

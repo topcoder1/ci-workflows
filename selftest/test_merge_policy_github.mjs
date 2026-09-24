@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   CHECK_NAME,
+  GITHUB_GET_RETRY_DELAYS_MS,
   GitHubAPI,
   PolicyController,
   parseArgs,
@@ -336,7 +337,12 @@ test("CLI wrapper strips secrets and server content from exceptions", () => {
     },
     () => `${secret} invalid JSON`,
   ]) {
-    const api = new GitHubAPI({ run, env: { GH_TOKEN: secret } });
+    const api = new GitHubAPI({
+      run,
+      env: { GH_TOKEN: secret },
+      sleep() {},
+      warn() {},
+    });
     assert.throws(
       () => api.call("GET", "user"),
       (error) =>
@@ -361,12 +367,139 @@ test("API failures distinguish rejected writes from uncertain remote mutations",
           status === null ? "Synthetic transport failure" : `HTTP ${status}`;
         throw error;
       },
+      sleep() {},
+      warn() {},
     });
     assert.throws(
       () => api.call(method, "synthetic/endpoint"),
       (error) => error.uncertainWrite === uncertain,
     );
   }
+});
+
+test("GET retries transient failures with backoff; a 4xx answer and every write fail at once (staging run 35819981851)", () => {
+  // A transient network error on the post-write readback retained an
+  // operation lock that needed manual reconciliation. Reads are idempotent;
+  // a definite 4xx is an answer (404 means missing), and writes stay single.
+  assert.deepEqual(GITHUB_GET_RETRY_DELAYS_MS, [1000, 3000, 9000]);
+  const failing = (stderr) => {
+    const error = new Error("Synthetic API failure");
+    error.stderr = stderr;
+    return error;
+  };
+  const scripted = (outcomes) => {
+    const calls = [];
+    const sleeps = [];
+    const warnings = [];
+    const api = new GitHubAPI({
+      run(...args) {
+        calls.push(args[1]);
+        const next = outcomes[Math.min(calls.length, outcomes.length) - 1];
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      sleep: (ms) => sleeps.push(ms),
+      warn: (line) => warnings.push(line),
+    });
+    return { api, calls, sleeps, warnings };
+  };
+  {
+    const { api, calls, sleeps } = scripted([
+      failing("dial tcp: i/o timeout"),
+      "not json",
+      '{"ok":true}',
+    ]);
+    assert.deepEqual(api.call("GET", "synthetic/read"), { ok: true });
+    assert.equal(calls.length, 3);
+    assert.deepEqual(sleeps, [1000, 3000]);
+  }
+  for (const status of [500, 502, 503]) {
+    const { api, calls, sleeps } = scripted([
+      failing(`HTTP ${status}`),
+      '{"ok":true}',
+    ]);
+    assert.deepEqual(api.call("GET", "synthetic/read"), { ok: true });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(sleeps, [1000]);
+  }
+  {
+    // The open-PR list inside every snapshot is paginated: a retry must
+    // re-send the whole paginated read.
+    const { api, calls } = scripted([failing("connection reset"), "[[1],[2]]"]);
+    assert.deepEqual(
+      api.call("GET", "synthetic/pages", undefined, { pages: true }),
+      [[1], [2]],
+    );
+    assert.equal(calls.length, 2);
+    for (const args of calls)
+      assert.deepEqual(args.slice(-2), ["--paginate", "--slurp"]);
+  }
+  {
+    const { api, calls, sleeps, warnings } = scripted([
+      failing("connection reset SECRET-XYZ"),
+    ]);
+    assert.throws(
+      () => api.call("GET", "synthetic/read"),
+      (error) =>
+        /^GitHub GET failed/.test(error.message) &&
+        error.status === null &&
+        error.uncertainWrite === false,
+    );
+    assert.equal(calls.length, 4);
+    assert.deepEqual(sleeps, [1000, 3000, 9000]);
+    // One notice before each retry, so a slow read is visibly not hung; it
+    // never carries gh's own output.
+    assert.deepEqual(warnings, [
+      "GitHub GET failed or returned invalid data (synthetic/read); retry 1 of 3 in 1000 ms",
+      "GitHub GET failed or returned invalid data (synthetic/read); retry 2 of 3 in 3000 ms",
+      "GitHub GET failed or returned invalid data (synthetic/read); retry 3 of 3 in 9000 ms",
+    ]);
+  }
+  for (const status of [403, 404, 422]) {
+    const { api, calls, sleeps } = scripted([
+      failing(`HTTP ${status}`),
+      '{"ok":true}',
+    ]);
+    assert.throws(
+      () => api.call("GET", "synthetic/read"),
+      (error) => error.status === status,
+    );
+    assert.equal(calls.length, 1);
+    assert.deepEqual(sleeps, []);
+  }
+  for (const method of ["PUT", "POST", "PATCH", "DELETE"]) {
+    const { api, calls, sleeps } = scripted([
+      failing("connection reset"),
+      '{"ok":true}',
+    ]);
+    assert.throws(
+      () => api.call(method, "synthetic/write", {}),
+      (error) => error.uncertainWrite === true,
+    );
+    assert.equal(calls.length, 1);
+    assert.deepEqual(sleeps, []);
+  }
+});
+
+test("the default GET backoff really waits (synchronous sleep)", () => {
+  let calls = 0;
+  const api = new GitHubAPI({
+    run() {
+      calls += 1;
+      if (calls === 1) {
+        const error = new Error("Synthetic transport failure");
+        error.stderr = "connection reset";
+        throw error;
+      }
+      return '{"ok":true}';
+    },
+    retryDelaysMs: [60],
+    warn() {},
+  });
+  const started = performance.now();
+  assert.deepEqual(api.call("GET", "synthetic/read"), { ok: true });
+  assert.ok(performance.now() - started >= 55);
+  assert.equal(calls, 2);
 });
 
 test("malformed control documents cannot leak their contents in errors", () => {
