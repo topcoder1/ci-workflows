@@ -182,10 +182,16 @@ RISKY: .gitattributes
 RISKY: sub/.gitattributes
 RISKY: docs/.gitattributes
 RISKY: tests/fixtures/.gitattributes
-# Still SAFE: git reads only that exact name. Measured: the same `* -diff` in
-# .gitattributes.bak or docs/gitattributes.md leaves the finding in place.
+# Still SAFE: on a case-sensitive filesystem git reads only that exact name.
+# Measured: the same `* -diff` in .gitattributes.bak or docs/gitattributes.md
+# leaves the finding in place. A template like GitHub's Python.gitattributes is
+# never read either; it also pins the (^|/) anchor. Case-sensitive on purpose:
+# every fleet gitleaks job runs on ubuntu-latest. On a case-insensitive
+# filesystem (macOS, Windows) git also honours .GITATTRIBUTES, so a job moved
+# to such a runner needs a case-insensitive rule.
 SAFE: docs/gitattributes.md
 SAFE: .gitattributes.bak
+SAFE: docs/examples/Python.gitattributes
 
 # ── RISKY: fleet CI templates (2026-07-16 gap — dotclaude#157) ─────────────
 # The caller templates + fleet automation under templates/ci-workflows/ are the
