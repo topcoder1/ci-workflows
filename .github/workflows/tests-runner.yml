@@ -83,6 +83,26 @@ on:
         required: false
         type: boolean
         default: false
+      pinned_gate_files:
+        description: "Opt-in (Python only): newline-separated merge-gate pytest files, repo-root-relative and all in one directory, to run a SECOND time through the pinned-gate-tests action — isolated from the checkout's pytest config, conftests, look-alike modules and __init__.py — as the first step of the Tests (Python) job, before uv, the git-deps credential or any PR code. The step fails unless exactly `pinned_gate_expected` tests pass. Keep this list and the count in the caller's workflow (a `blocked` path), never in a file the tests read. Empty (default) skips the step. See .github/actions/pinned-gate-tests/README.md."
+        required: false
+        type: string
+        default: ""
+      pinned_gate_expected:
+        description: "Exact number of tests the pinned_gate_files must pass (required when pinned_gate_files is set; the action fails closed on an empty or non-numeric value)."
+        required: false
+        type: string
+        default: ""
+      pinned_gate_imports:
+        description: "Newline-separated bare-name helper modules the pinned gates import from the gate directory (e.g. _risk_paths_glob). The action fails on any in-directory import left out of this list."
+        required: false
+        type: string
+        default: ""
+      pinned_gate_extra_packages:
+        description: "Space-separated, version-pinned packages the pinned gates import (installed in the action's isolated venv alongside pytest). Mirrors the action's own default."
+        required: false
+        type: string
+        default: "pyyaml==6.0.3"
     secrets:
       GIT_DEPS_PAT:
         description: "Preferred, least-privilege git-deps credential: a fine-grained READ-ONLY PAT scoped to just the dependency repos (e.g. whois-api-llc/wxa-secrets, topcoder1/webcrawl). When forwarded, it is used for the insteadOf rewrite INSTEAD of AUTOMERGE_PAT, so theft during the residual dependency-resolution window yields read access to those few repos — not the fleet-wide automerge credential. Same materialization rules as AUTOMERGE_PAT (push:main whenever forwarded; pull_request only with use_pat_for_git_deps: true)."
@@ -112,14 +132,28 @@ jobs:
           INPUT_LANGUAGE: ${{ inputs.language || 'auto' }}
           INPUT_WORKDIR: ${{ inputs.working_directory || '.' }}
           INPUT_GO_VERSION: ${{ inputs.go_version || '' }}
+          INPUT_PINNED_GATE_FILES: ${{ inputs.pinned_gate_files || '' }}
         run: |
           set -euo pipefail
           cd "$INPUT_WORKDIR"
 
+          # Pinned merge gates are pytest files, so a caller that sets them is
+          # a Python repo — and its language must NOT come from the checkout.
+          # Auto-detection reads PR-controlled manifests: a PR that adds a
+          # package.json (or swaps out pyproject.toml) would route the run to
+          # another job, or fail this one as ambiguous, and either way skip
+          # run-python and its gate step. A skipped required check passes.
+          # Decided before any manifest is read.
+          if [[ -n "$INPUT_PINNED_GATE_FILES" ]]; then
+            if [[ "$INPUT_LANGUAGE" != "auto" && "$INPUT_LANGUAGE" != "python" ]]; then
+              echo "::error::pinned_gate_files is set but language is '$INPUT_LANGUAGE'; pinned gates are pytest files and run in the Python job"
+              exit 1
+            fi
+            LANG="python"
           # Auto-detection enumerates ALL signals (not first-match) so we can
           # fail loudly on multi-language repos rather than silently picking
           # the wrong one (see techrecon: go.mod root + web/package.json).
-          if [[ "$INPUT_LANGUAGE" == "auto" ]]; then
+          elif [[ "$INPUT_LANGUAGE" == "auto" ]]; then
             found=()
             { [[ -f pyproject.toml ]] || [[ -f requirements.txt ]]; } && found+=("python")
             [[ -f go.mod ]] && found+=("go")
@@ -161,13 +195,37 @@ jobs:
   run-python:
     name: Tests (Python)
     needs: detect
-    if: needs.detect.outputs.language == 'python'
+    # With pinned gates configured this job must run even if `detect` failed:
+    # skipped, its required check would pass without the gate step having
+    # run. `!cancelled()` lifts the implicit success()-of-needs gate; callers
+    # without pinned gates still run only on a successful python detection,
+    # exactly as before.
+    if: ${{ !cancelled() && (needs.detect.outputs.language == 'python' || format('{0}', inputs.pinned_gate_files) != '') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python_version || '3.13' }}
+      # The caller's merge gates, run a second time isolated from everything in
+      # the checkout that could switch them off in the test run below (opt-in:
+      # skipped unless pinned_gate_files is set, so no other caller changes).
+      # It must stay HERE: after setup-python (it builds its venv from
+      # `python`) and before `Install uv`, the git-deps credential and `uv
+      # sync` — before any PR code has run and before a credential is on disk.
+      # The action is pinned by SHA; bumping it is a deliberate PR.
+      # selftest/test_tests_runner_pinned_gates.py pins the placement and wiring.
+      - name: Merge gates, isolated from pytest config
+        # format() for a string comparison: GHA's loose equality coerces
+        # mismatched types to numbers, and on this workflow's own self-test
+        # runs (no workflow_call) `inputs.*` is null.
+        if: ${{ format('{0}', inputs.pinned_gate_files) != '' }}
+        uses: topcoder1/ci-workflows/.github/actions/pinned-gate-tests@1c3163033161aa35c9836a7eec05c00967fcca12 # ci-workflows#234
+        with:
+          files: ${{ inputs.pinned_gate_files }}
+          expected: ${{ inputs.pinned_gate_expected }}
+          imports: ${{ inputs.pinned_gate_imports }}
+          extra-packages: ${{ inputs.pinned_gate_extra_packages }}
       - name: Install uv
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
