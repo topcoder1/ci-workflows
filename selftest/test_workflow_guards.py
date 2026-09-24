@@ -840,6 +840,197 @@ def test_lint_ruff_version_is_pinned():
         "the step must reject non-exact ruff_version values; a caller passing "
         "`0.15.*` would float to latest-matching while still looking pinned"
     )
+
+
+# The actionlint download is pinned by version AND by the release tarball's
+# SHA-256. Both pins are hardcoded here, not read back from lint.yml: a check
+# that took its expectations from the file under test would follow an edit
+# that re-floats the download, and pass. A deliberate bump edits these two
+# lines too, in the same PR.
+ACTIONLINT_PIN_VERSION = "1.7.12"
+ACTIONLINT_PIN_SHA256 = (
+    "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+)
+ACTIONLINT_TARBALL_URL = (
+    "https://github.com/rhysd/actionlint/releases/download/"
+    "v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+)
+# Fetches that resolve to something other than one fixed, checked artifact.
+ACTIONLINT_FLOATING_FETCHES = {
+    "raw.githubusercontent.com/rhysd/actionlint/": (
+        "fetches from a git ref of the actionlint repo: /main/ moves, and even "
+        "a tag can be re-pointed (its releases are not immutable)"
+    ),
+    "download-actionlint.bash": (
+        "runs upstream's installer, which installs the latest release unless "
+        "given a version, and verifies no checksum"
+    ),
+    "/releases/latest": "resolves to whichever release is newest",
+}
+
+
+def actionlint_pin_problems(text):
+    """Return why the actionlint download in `text` is not pinned ([] = pinned).
+
+    Shared by the lint.yml guard and its negative controls, so the shapes
+    those pin run through the same code path as the guard.
+    """
+    # Comments go first, so prose describing the old fetch cannot trip this.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    problems = [
+        f"{needle}: {why}"
+        for needle, why in ACTIONLINT_FLOATING_FETCHES.items()
+        if needle in code
+    ]
+    for name, env, pin in (
+        ("actionlint_version", "ACTIONLINT_VERSION", ACTIONLINT_PIN_VERSION),
+        ("actionlint_sha256", "ACTIONLINT_SHA256", ACTIONLINT_PIN_SHA256),
+    ):
+        m = re.search(
+            rf'^      {name}:.*?^        default:\s*"([^"]*)"', code, flags=re.S | re.M
+        )
+        if not m or m.group(1) != pin:
+            problems.append(f"input {name} must default to {pin!r}")
+        # The same literal as the step's fallback: on this repo's own
+        # self-test events the `inputs` context is null.
+        binding = f"{env}: ${{{{ inputs.{name} || '{pin}' }}}}"
+        if binding not in code:
+            problems.append(f"{env} must be bound as `{binding}`")
+    fetch_at = code.find(ACTIONLINT_TARBALL_URL)
+    if fetch_at == -1:
+        problems.append(f"the step must download {ACTIONLINT_TARBALL_URL}")
+    else:
+        m = re.search(
+            r'!= "\$ACTIONLINT_SHA256" \]; then\n(.*?)\n\s*fi\n',
+            code[fetch_at:],
+            flags=re.S,
+        )
+        if not m or "exit 1" not in m.group(1):
+            problems.append(
+                "a SHA-256 mismatch must fail the step (exit 1) after the download"
+            )
+    if "actionlint_version must be an exact x.y.z version" not in code:
+        problems.append("the step must reject a non-exact actionlint_version")
+    return problems
+
+
+def test_lint_actionlint_is_pinned_by_version_and_checksum():
+    """lint.yml must install one fixed, checksum-verified actionlint.
+
+    Until 2026-09-24 the step ran upstream's download-actionlint.bash,
+    fetched from rhysd/actionlint's main branch: whatever that branch said,
+    installing whatever it called the latest release, verifying nothing.
+    lint.yml is a reusable the fleet calls @main, so an upstream compromise
+    or a breaking actionlint release would have run in every caller's lint
+    job at once.
+
+    The version alone is not the pin. actionlint's releases are not
+    immutable, so a tag or an asset can be replaced under an unchanged
+    version; the tarball's SHA-256 is what freezes the bytes. The version is
+    exact x.y.z like ruff_version (test_lint_ruff_version_is_pinned), and an
+    override must bring its own hash.
+    """
+    problems = actionlint_pin_problems((WORKFLOWS_DIR / "lint.yml").read_text())
+    assert not problems, "lint.yml's actionlint download is not pinned:\n  " + (
+        "\n  ".join(problems)
+    )
+
+
+# The pre-pin step, verbatim from lint.yml before 2026-09-24.
+_ACTIONLINT_PRE_PIN_STEP = (
+    "      - name: Download actionlint\n"
+    "        id: get_actionlint\n"
+    "        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint"
+    "/main/scripts/download-actionlint.bash)\n"
+    "        shell: bash\n"
+)
+
+
+def _actionlint_step(text):
+    start = text.index("      - name: Download actionlint\n")
+    return text[start : text.index("      - name: Run actionlint\n", start)]
+
+
+# Each shape: (an edit to lint.yml, what the scanner must report for it).
+_ACTIONLINT_UNPINNED = {
+    "the pre-pin step (installer from main, latest release)": (
+        lambda t: t.replace(_actionlint_step(t), _ACTIONLINT_PRE_PIN_STEP),
+        "raw.githubusercontent.com/rhysd/actionlint/",
+    ),
+    "the installer fetched from a version tag": (
+        lambda t: t.replace(
+            _actionlint_step(t),
+            _ACTIONLINT_PRE_PIN_STEP.replace("/main/", "/v1.7.12/").replace(
+                ".bash)", ".bash) 1.7.12"
+            ),
+        ),
+        "download-actionlint.bash",
+    ),
+    "the latest-release asset": (
+        lambda t: t.replace(
+            ACTIONLINT_TARBALL_URL,
+            "https://github.com/rhysd/actionlint/releases/latest/download/"
+            "actionlint_linux_amd64.tar.gz",
+        ),
+        "/releases/latest",
+    ),
+    "the checksum never compared": (
+        lambda t: t.replace('!= "$ACTIONLINT_SHA256"', '!= "$got"'),
+        "SHA-256 mismatch",
+    ),
+    "a mismatch that only warns": (
+        lambda t: re.sub(
+            r'(!= "\$ACTIONLINT_SHA256" \]; then\n.*?)exit 1',
+            r"\1true",
+            t,
+            count=1,
+            flags=re.S,
+        ),
+        "SHA-256 mismatch",
+    ),
+    "a wildcard in the self-test fallback": (
+        lambda t: t.replace(f"|| '{ACTIONLINT_PIN_VERSION}' }}}}", "|| '1.7.*' }}"),
+        "ACTIONLINT_VERSION must be bound",
+    ),
+    "the input default moved off the pin": (
+        lambda t: t.replace(
+            f'default: "{ACTIONLINT_PIN_VERSION}"', 'default: "1.7.13"'
+        ),
+        "input actionlint_version must default",
+    ),
+    "the exact-version guard removed": (
+        lambda t: t.replace(
+            "actionlint_version must be an exact x.y.z version",
+            "bad actionlint_version",
+        ),
+        "non-exact actionlint_version",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "edit,expected", _ACTIONLINT_UNPINNED.values(), ids=_ACTIONLINT_UNPINNED.keys()
+)
+def test_actionlint_pin_scanner_rejects_every_unpinned_shape(edit, expected):
+    """The pin guard must not go vacuous.
+
+    Each shape re-floats the download, or disarms what makes the pin mean
+    anything, while leaving the rest of lint.yml intact. The first is the
+    exact form the guard replaced.
+    """
+    text = (WORKFLOWS_DIR / "lint.yml").read_text()
+    broken = edit(text)
+    assert broken != text, (
+        "this edit no longer changes lint.yml — re-point it at the current step"
+    )
+    problems = actionlint_pin_problems(broken)
+    assert any(expected in p for p in problems), (
+        f"the scanner no longer reports {expected!r} for this shape: {problems}"
+    )
+
+
 def test_sticky_comment_action_steps_are_nonfatal():
     """A sticky-comment ACTION step is reporting, not the gate.
 

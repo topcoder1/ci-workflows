@@ -83,7 +83,7 @@ name: Lint
 #   - ruff is OFF by default for the same reason: repos that never gated
 #     on ruff usually carry pre-existing lint drift that would block the
 #     install PR. Callers with clean Python opt in via run_ruff.
-#   - ruff's VERSION is pinned (ruff_version), unlike the other tools here.
+#   - ruff's VERSION is pinned (ruff_version), as is actionlint's (below).
 #     Its default rule set changes between minor releases, so a floating
 #     resolve reddens every consumer the day a release lands. Bump the pin
 #     deliberately, in a PR that shows the new findings.
@@ -91,6 +91,11 @@ name: Lint
 #     selection of its own. The pin makes the inherited default set stable;
 #     declaring `select` is what keeps a future pin bump from silently
 #     re-scoping enforcement. See selftest/test_ruff_ruleset_warning.sh.
+#   - actionlint's pin (actionlint_version) is also a CONTENT pin: the release
+#     tarball must match actionlint_sha256 before it runs, so neither a new
+#     release nor a replaced asset reaches a caller until a PR here bumps the
+#     pair. The job used to run upstream's installer from its main branch;
+#     see the Download actionlint step.
 
 on:
   pull_request:
@@ -128,6 +133,16 @@ on:
         required: false
         type: boolean
         default: false
+      actionlint_version:
+        description: "Exact actionlint version to run. Pinned, NOT floating: a new release can add checks that redden every consumer at once, with no code change. Overriding it requires actionlint_sha256 for the same release."
+        required: false
+        type: string
+        default: "1.7.12"
+      actionlint_sha256:
+        description: "SHA-256 of that release's actionlint_<version>_linux_amd64.tar.gz, from its actionlint_<version>_checksums.txt. The download is rejected unless it matches, so pass this with any actionlint_version override."
+        required: false
+        type: string
+        default: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
       install_node_deps:
         description: >-
           DEPRECATED / no-op, kept so existing callers that pass it do not
@@ -203,9 +218,40 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Pinned by version AND by the release tarball's SHA-256
+      # (actionlint_version / actionlint_sha256). This step used to run
+      # upstream's download-actionlint.bash fetched from rhysd/actionlint's
+      # main branch: whatever that branch said, installing whatever it called
+      # the latest release, verifying nothing, in every caller's lint job at
+      # once. The version alone would not freeze the bytes: actionlint's
+      # releases are not immutable, so a tag or an asset can be replaced under
+      # an unchanged version. The hash does. Bump the two together, taking the
+      # hash from the release's actionlint_<version>_checksums.txt.
+      # Same literal-fallback convention as RUFF_VERSION: the `inputs` context
+      # is null on this repo's own self-test events.
+      # Pinned by selftest/test_workflow_guards.py.
       - name: Download actionlint
         id: get_actionlint
-        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        env:
+          ACTIONLINT_VERSION: ${{ inputs.actionlint_version || '1.7.12' }}
+          ACTIONLINT_SHA256: ${{ inputs.actionlint_sha256 || '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ACTIONLINT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::actionlint_version must be an exact x.y.z version (got '${ACTIONLINT_VERSION}')."
+            exit 1
+          fi
+          dir="${RUNNER_TEMP:?RUNNER_TEMP is not set}/actionlint"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          got=$(sha256sum "$dir/actionlint.tar.gz" | cut -d' ' -f1)
+          if [ "$got" != "$ACTIONLINT_SHA256" ]; then
+            echo "::error::actionlint ${ACTIONLINT_VERSION} tarball has SHA-256 ${got}, expected ${ACTIONLINT_SHA256}. An actionlint_version override needs the matching actionlint_sha256, from the release's checksums.txt."
+            exit 1
+          fi
+          tar -xzf "$dir/actionlint.tar.gz" -C "$dir" actionlint
+          echo "executable=$dir/actionlint" >> "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Run actionlint
