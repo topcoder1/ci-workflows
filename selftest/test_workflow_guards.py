@@ -5,11 +5,17 @@ repo's own PRs, so wrapping the .sh selftests here is what makes them
 CI-enforced rather than run-manually-only documentation.
 """
 
+import hashlib
+import io
+import os
 import pathlib
 import re
 import subprocess
+import tarfile
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -851,10 +857,6 @@ ACTIONLINT_PIN_VERSION = "1.7.12"
 ACTIONLINT_PIN_SHA256 = (
     "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 )
-ACTIONLINT_TARBALL_URL = (
-    "https://github.com/rhysd/actionlint/releases/download/"
-    "v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-)
 # Fetches that resolve to something other than one fixed, checked artifact.
 ACTIONLINT_FLOATING_FETCHES = {
     "raw.githubusercontent.com/rhysd/actionlint/": (
@@ -870,10 +872,12 @@ ACTIONLINT_FLOATING_FETCHES = {
 
 
 def actionlint_pin_problems(text):
-    """Return why the actionlint download in `text` is not pinned ([] = pinned).
+    """Return why lint.yml's actionlint download is not pinned ([] = pinned).
 
-    Shared by the lint.yml guard and its negative controls, so the shapes
-    those pin run through the same code path as the guard.
+    The static half of the guard: no floating fetch anywhere, and the exact
+    hardcoded pins in both the input defaults and the step's fallbacks.
+    Whether the step ENFORCES the hash is behavior, so that half executes
+    the step instead (test_actionlint_download_fails_closed).
     """
     # Comments go first, so prose describing the old fetch cannot trip this.
     code = "\n".join(
@@ -898,21 +902,6 @@ def actionlint_pin_problems(text):
         binding = f"{env}: ${{{{ inputs.{name} || '{pin}' }}}}"
         if binding not in code:
             problems.append(f"{env} must be bound as `{binding}`")
-    fetch_at = code.find(ACTIONLINT_TARBALL_URL)
-    if fetch_at == -1:
-        problems.append(f"the step must download {ACTIONLINT_TARBALL_URL}")
-    else:
-        m = re.search(
-            r'!= "\$ACTIONLINT_SHA256" \]; then\n(.*?)\n\s*fi\n',
-            code[fetch_at:],
-            flags=re.S,
-        )
-        if not m or "exit 1" not in m.group(1):
-            problems.append(
-                "a SHA-256 mismatch must fail the step (exit 1) after the download"
-            )
-    if "actionlint_version must be an exact x.y.z version" not in code:
-        problems.append("the step must reject a non-exact actionlint_version")
     return problems
 
 
@@ -970,25 +959,11 @@ _ACTIONLINT_UNPINNED = {
     ),
     "the latest-release asset": (
         lambda t: t.replace(
-            ACTIONLINT_TARBALL_URL,
-            "https://github.com/rhysd/actionlint/releases/latest/download/"
-            "actionlint_linux_amd64.tar.gz",
+            "releases/download/v${ACTIONLINT_VERSION}/"
+            "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz",
+            "releases/latest/download/actionlint_linux_amd64.tar.gz",
         ),
         "/releases/latest",
-    ),
-    "the checksum never compared": (
-        lambda t: t.replace('!= "$ACTIONLINT_SHA256"', '!= "$got"'),
-        "SHA-256 mismatch",
-    ),
-    "a mismatch that only warns": (
-        lambda t: re.sub(
-            r'(!= "\$ACTIONLINT_SHA256" \]; then\n.*?)exit 1',
-            r"\1true",
-            t,
-            count=1,
-            flags=re.S,
-        ),
-        "SHA-256 mismatch",
     ),
     "a wildcard in the self-test fallback": (
         lambda t: t.replace(f"|| '{ACTIONLINT_PIN_VERSION}' }}}}", "|| '1.7.*' }}"),
@@ -1000,13 +975,6 @@ _ACTIONLINT_UNPINNED = {
         ),
         "input actionlint_version must default",
     ),
-    "the exact-version guard removed": (
-        lambda t: t.replace(
-            "actionlint_version must be an exact x.y.z version",
-            "bad actionlint_version",
-        ),
-        "non-exact actionlint_version",
-    ),
 }
 
 
@@ -1014,11 +982,10 @@ _ACTIONLINT_UNPINNED = {
     "edit,expected", _ACTIONLINT_UNPINNED.values(), ids=_ACTIONLINT_UNPINNED.keys()
 )
 def test_actionlint_pin_scanner_rejects_every_unpinned_shape(edit, expected):
-    """The pin guard must not go vacuous.
+    """The static guard must not go vacuous.
 
-    Each shape re-floats the download, or disarms what makes the pin mean
-    anything, while leaving the rest of lint.yml intact. The first is the
-    exact form the guard replaced.
+    Each shape re-floats the download while leaving the rest of lint.yml
+    intact. The first is the exact form the guard replaced.
     """
     text = (WORKFLOWS_DIR / "lint.yml").read_text()
     broken = edit(text)
@@ -1029,6 +996,165 @@ def test_actionlint_pin_scanner_rejects_every_unpinned_shape(edit, expected):
     assert any(expected in p for p in problems), (
         f"the scanner no longer reports {expected!r} for this shape: {problems}"
     )
+
+
+def _actionlint_download_script():
+    workflow = yaml.safe_load((WORKFLOWS_DIR / "lint.yml").read_text())
+    (step,) = [
+        s
+        for s in workflow["jobs"]["actionlint"]["steps"]
+        if s.get("id") == "get_actionlint"
+    ]
+    return step["run"]
+
+
+_FAKE_ACTIONLINT = b"#!/bin/sh\necho fake actionlint\n"
+
+
+def _fake_actionlint_tarball():
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        member = tarfile.TarInfo("actionlint")
+        member.size = len(_FAKE_ACTIONLINT)
+        member.mode = 0o755
+        tar.addfile(member, io.BytesIO(_FAKE_ACTIONLINT))
+    return buf.getvalue()
+
+
+# Stands in for curl: records the URL it was asked for, then serves the
+# tarball at $SERVED to wherever -o points.
+_CURL_SHIM = """#!/bin/bash
+out= url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+printf '%s\\n' "$url" >> "$REQUESTED"
+cp "$SERVED" "$out"
+"""
+
+
+def _run_actionlint_download(workdir, script, version, sha256, tarball):
+    """Run the step's script as `shell: bash` does, with curl faked."""
+    shim = workdir / "bin"
+    shim.mkdir(parents=True)
+    (shim / "curl").write_text(_CURL_SHIM)
+    (shim / "curl").chmod(0o755)
+    (workdir / "served.tar.gz").write_bytes(tarball)
+    runner_temp = workdir / "runner_temp"
+    runner_temp.mkdir()
+    github_output = workdir / "github_output"
+    github_output.write_text("")
+    requested = workdir / "requested"
+    (workdir / "step.sh").write_text(script)
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "step.sh"],
+        cwd=workdir,
+        env={
+            "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(github_output),
+            "ACTIONLINT_VERSION": version,
+            "ACTIONLINT_SHA256": sha256,
+            "SERVED": str(workdir / "served.tar.gz"),
+            "REQUESTED": str(requested),
+        },
+        capture_output=True,
+        text=True,
+    )
+    return SimpleNamespace(
+        rc=proc.returncode,
+        log=proc.stdout + proc.stderr,
+        output=github_output.read_text(),
+        requested=requested.read_text().splitlines() if requested.exists() else [],
+        binary=runner_temp / "actionlint" / "actionlint",
+    )
+
+
+def test_actionlint_download_fails_closed(tmp_path):
+    """The step must hand on only a tarball that matches the SHA-256.
+
+    Codex review round 2 on this guard's first draft: a static check that
+    the step compares against "$ACTIONLINT_SHA256" still passed with
+    `[ "$ACTIONLINT_SHA256" != "$ACTIONLINT_SHA256" ]`, which never fires, so
+    a replaced tarball would have run. Enforcement is behavior, so this
+    executes lint.yml's own step, with curl faked, and judges what it does.
+    """
+    script = _actionlint_download_script()
+    tarball = _fake_actionlint_tarball()
+
+    # Positive control first. The served bytes match, so the step must pass;
+    # a harness that could never pass (a missing tool, a shim not on PATH)
+    # would otherwise make every must-fail case below pass vacuously.
+    ok = _run_actionlint_download(
+        tmp_path / "match",
+        script,
+        ACTIONLINT_PIN_VERSION,
+        hashlib.sha256(tarball).hexdigest(),
+        tarball,
+    )
+    assert ok.rc == 0, ok.log
+    assert ok.requested == [
+        "https://github.com/rhysd/actionlint/releases/download/"
+        f"v{ACTIONLINT_PIN_VERSION}/actionlint_{ACTIONLINT_PIN_VERSION}"
+        "_linux_amd64.tar.gz"
+    ]
+    assert ok.output == f"executable={ok.binary}\n"
+    assert ok.binary.read_bytes() == _FAKE_ACTIONLINT
+
+    # A replaced asset: the pinned version, but not the pinned bytes.
+    bad = _run_actionlint_download(
+        tmp_path / "mismatch",
+        script,
+        ACTIONLINT_PIN_VERSION,
+        ACTIONLINT_PIN_SHA256,
+        tarball,
+    )
+    assert bad.rc != 0, "a tarball that does not match the SHA-256 must fail"
+    assert "executable=" not in bad.output
+    assert not bad.binary.exists(), "a mismatched tarball must not be extracted"
+
+    # Not exact x.y.z: rejected before anything is fetched.
+    for i, version in enumerate(("1.7.*", "latest", f"{ACTIONLINT_PIN_VERSION}\nx")):
+        run = _run_actionlint_download(
+            tmp_path / f"version{i}", script, version, ACTIONLINT_PIN_SHA256, tarball
+        )
+        assert run.rc != 0 and run.requested == [], (
+            f"actionlint_version {version!r} must be rejected before any download"
+        )
+
+
+# Fail-open versions of the step. Each keeps every string the static guard
+# checks, so only the behavioral guard can catch it.
+_FAIL_OPEN_EDITS = {
+    "compares the pin with itself (Codex round 2)": (
+        '[ "$got" != "$ACTIONLINT_SHA256" ]',
+        '[ "$ACTIONLINT_SHA256" != "$ACTIONLINT_SHA256" ]',
+    ),
+    "a mismatch only warns": ("  exit 1\nfi\ntar -xzf", "  true\nfi\ntar -xzf"),
+}
+
+
+@pytest.mark.parametrize(
+    "old,new", _FAIL_OPEN_EDITS.values(), ids=_FAIL_OPEN_EDITS.keys()
+)
+def test_actionlint_download_harness_sees_a_fail_open_step(tmp_path, old, new):
+    """The behavioral guard must not go vacuous either: with the hash check
+    disarmed, the harness has to watch a mismatched tarball get through."""
+    script = _actionlint_download_script()
+    assert old in script, "this edit no longer applies — re-point it at the step"
+    tarball = _fake_actionlint_tarball()
+    run = _run_actionlint_download(
+        tmp_path,
+        script.replace(old, new),
+        ACTIONLINT_PIN_VERSION,
+        ACTIONLINT_PIN_SHA256,
+        tarball,
+    )
+    assert run.rc == 0 and run.binary.is_file(), run.log
 
 
 def test_sticky_comment_action_steps_are_nonfatal():
