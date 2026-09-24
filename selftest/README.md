@@ -69,7 +69,9 @@ arbitrary helper scripts; that's a different kind of repo.
   guard reads each entry's source through yaml's node predicates, which the
   vendored bundle now exports. It follows alias keys (`? *cls`) as `toJS()`
   does, and refuses a `<<` merge key, which would copy a class list in from
-  elsewhere in the file. Positive controls: all nine keys together, and
+  elsewhere in the file. A carriage return outside a CRLF line ending fails
+  closed too: YAML 1.2 and most parsers read a lone CR as a line break, and
+  classify's parser reads it as text. Positive controls: all nine keys together, and
   every spelling that folds nothing (an escaped `\` line join, a one-line `>-`
   block, a flow list across lines with its comma), in LF and CRLF files.
 - `test_classifier_deps_vendored.sh` — the classifier's deps are a committed,

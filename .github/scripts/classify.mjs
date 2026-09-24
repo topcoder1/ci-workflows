@@ -101,6 +101,24 @@ function fail(msg) {
 let rules, yamlWarnings, source, doc;
 try {
 	source = readFileSync(RULES_PATH, 'utf8');
+	// A carriage return that does not end a CRLF line ending splits readers:
+	// YAML 1.2 and most parsers (PyYAML, libyaml, Ruby's Psych) read a lone CR
+	// as a line break, while yaml 2.9 reads it as text. '  - cmd/**<CR>  - x/**'
+	// is then two gates to every other reader and ONE dead pattern here, and a
+	// lone CR that ends a comment swallows the next line. So a lone CR anywhere
+	// in the file fails closed. This claims nothing about a CR inside a pattern
+	// — ci-workflows#231 measured that such a pattern can match a real path —
+	// and an explicit "\r" inside double quotes stays legal. (Independent review,
+	// round 4, of this guard.)
+	if (/\r(?!\n)/.test(source)) {
+		fail(
+			`${RULES_PATH}: holds a carriage return outside a CRLF line ending — YAML 1.2 and most ` +
+				`parsers read a lone CR as a line break, but this one reads it as text, so the file means ` +
+				`different rules to different readers: an entry or comment that ends in a lone CR swallows ` +
+				`the next line here, and its gate silently disappears. Save the file with LF or CRLF line ` +
+				`endings; to match a path that really holds a CR, write "\\r" inside double quotes.`
+		);
+	}
 	doc = parseDocument(source);
 	// parse() threw the first error; this keeps that path, and its message,
 	// exactly as it was. What parseDocument() adds is the warnings, which
@@ -334,8 +352,8 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 const deref = (n) => (isAlias(n) ? n.resolve(doc) : n);
 function isWrapped(n) {
 	const text = source.slice(n.range[0], n.range[1]);
-	// yaml breaks a line only at '\n' (or '\r\n'); a lone CR is content, and a
-	// pattern holding one can match a real path. (ci-workflows#231's evidence.)
+	// yaml breaks a line only at '\n' (or '\r\n'). A lone CR never gets this
+	// far: the file is refused when it is read.
 	if (n.type === 'PLAIN' || n.type === 'QUOTE_SINGLE') return text.includes('\n');
 	if (n.type === 'QUOTE_DOUBLE') {
 		// An escaped line break ('\' ending the line) joins the lines with

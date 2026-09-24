@@ -338,20 +338,32 @@ for where in blocked sensitive safe_test exclude.sensitive always_review; do
       "(under '$where:') is wrapped over" "ONE pattern"
   done
 done
-# A carriage return INSIDE a pattern is no line break to anyone. Changed paths
-# are split on '\n' and trimmed only at the ends, git allows a CR in a file
-# name, and yaml keeps a raw CR as content in every scalar style, so such a
-# pattern can match a real path and is not dead — the evidence that declined
-# the same finding on ci-workflows#231. Every spelling must load, not be read
-# as wrapped, and match the internal-CR path it names. A CR at either end is
-# padding, which the dead-entry guard rejects. (An earlier revision of this
-# change rejected all of these.)
-for raw in "cmd/**${cr}src/**" "'cmd/**${cr}src/**'" "\"cmd/**${cr}src/**\"" '"cmd/**\rsrc/**"' \
-  "|-${nl}    cmd/**${cr}src/**" ">-${nl}    cmd/**${cr}src/**"; do
+# A carriage return that is not part of a CRLF line ending splits readers:
+# YAML 1.2, PyYAML, libyaml and Ruby's Psych read a lone CR as a line break,
+# while yaml 2.9 (classify's parser) reads it as text. So
+# '  - cmd/**<CR>  - internal/**' is two gates to every other reader and ONE
+# dead pattern here, and a lone CR ending a comment hides the next "line".
+# (Independent review, round 4, of this change.) A lone CR anywhere in the
+# file therefore fails closed: in every scalar style, in a comment, and as
+# classic-Mac line endings.
+for raw in "cmd/**${cr}src/**" "'cmd/**${cr}src/**'" "\"cmd/**${cr}src/**\"" \
+  "|-${nl}    cmd/**${cr}src/**" ">-${nl}    cmd/**${cr}src/**" "cmd/**${cr}  - internal/**"; do
   printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - $raw" > "$rules"
-  expect_class sensitive "an internal CR ($(printf '%s' "$raw" | tr '\r\n' '^|')) loads and matches a path with one" \
-    "cmd/foo${cr}src/bar.go"
+  expect_fail_closed "a lone CR ($(printf '%s' "$raw" | tr '\r\n' '^|')) fails closed" \
+    "a carriage return outside a CRLF line ending"
 done
+printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - 'x/**'" "  # was:${cr}  - 'cmd/**'" > "$rules"
+expect_fail_closed "a lone CR ending a comment (it hid the next line from this parser) fails closed" \
+  "a carriage return outside a CRLF line ending"
+printf 'blocked:\r  - %s\r' "'**/.env*'" > "$rules"
+expect_fail_closed "a file with classic-Mac (lone CR) line endings fails closed" \
+  "a carriage return outside a CRLF line ending"
+# A CR INSIDE a pattern value is not dead, as ci-workflows#231 measured:
+# changed paths are split on '\n' and trimmed only at the ends, and git allows
+# a CR in a file name. Written explicitly as a '"\r"' escape, it stays legal
+# and matches a changed path that holds the CR.
+printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" '  - "cmd/**\rsrc/**"' > "$rules"
+expect_class sensitive "a '\"\\r\"' escape loads and matches a changed path holding the CR" "cmd/foo${cr}src/bar.go"
 # The trade-off, pinned: a double-quoted entry with a REAL interior space,
 # written over lines with an escaped join, is refused too — it fits on one line.
 place sensitive "\"docs/My Notes/\\${nl}        **\""
