@@ -152,6 +152,42 @@ RISKY: backend/.env.secret
 RISKY: .env.example
 RISKY: src/keychain_helpers.py
 
+# ── RISKY: secret-scanner config — gitleaks (2026-09-24) ───────────────────
+# gitleaks reads its rules and allowlists, and its ignore list, from the PR's
+# OWN checkout. So a PR that leaks a secret can add an allowlist regex to
+# .gitleaks.toml or the finding's fingerprint to .gitleaksignore in the same
+# diff and turn the gitleaks check green (REQUIRED in wxaintel-platform,
+# techrecon and wxa_vpn). Found 2026-09-24 by an independent review of
+# topcoder1/wxaintel-platform's gitleaks fix: the central regex matched neither.
+#
+# Discovery, verified in gitleaks' cmd/root.go (master and v8.21.2): config is
+# --config, then $GITLEAKS_CONFIG, then (source)/.gitleaks.toml; the ignore
+# list is (--gitleaks-ignore-path, default .)/.gitleaksignore plus
+# (source)/.gitleaksignore. `--source sub/` makes the nested copies live, so
+# every depth is gated. The CLI never auto-reads a dotless gitleaks.toml, but
+# gitleaks-action's README tells users to create exactly that file at the root,
+# and it is the natural --config/$GITLEAKS_CONFIG target. Only a gitleaks
+# config carries that name, so gating it cannot over-block.
+RISKY: .gitleaks.toml
+RISKY: sub/.gitleaks.toml
+RISKY: gitleaks.toml
+RISKY: .github/gitleaks.toml
+RISKY: .gitleaksignore
+RISKY: services/api/.gitleaksignore
+# Still SAFE: files that merely mention gitleaks. docs/gitleaks-scan-2026-05.json
+# is a real scan REPORT in whois-api-llc/techrecon; no fleet workflow passes it
+# as --baseline-path, so it is inert. Exact names, not a suffix family: gitleaks
+# never reads .gitleaks.toml.example. A repo that points --config,
+# $GITLEAKS_CONFIG, --baseline-path, --gitleaks-ignore-path or an [extend] path
+# at some other file lists that file in its own .github/risk-paths.yml
+# `blocked:`. The pointer sits in a gated workflow or config, but its target can
+# have any name, so it cannot be enumerated here.
+SAFE: docs/gitleaks.md
+SAFE: src/gitleaks_helper.py
+SAFE: docs/gitleaks-scan-2026-05.json
+SAFE: .gitleaks.toml.example
+SAFE: .gitignore
+
 # ── RISKY: containers + compose ────────────────────────────────────────────
 RISKY: Dockerfile
 RISKY: deploy/Dockerfile.api

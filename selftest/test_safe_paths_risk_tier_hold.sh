@@ -145,6 +145,22 @@ run_case "risk-pricing-top-level-file" 0 risk-tier-hold "docs/pricing.md"
 # still auto-merge, or the exception over-blocks.
 run_case "safe-marketingnotes" 1 - "docs/marketingnotes.md"
 run_case "safe-product-pages-overview" 1 - "docs/product-pages-overview.md"
+# gitleaks config and ignore files (2026-09-24). gitleaks reads them from the
+# PR's own checkout, so editing one can allowlist a secret leaked in the same
+# diff. A root copy is not safe-by-glob, so this workflow never arms that
+# shape and claude-author-automerge's regex is the gate there (boundary pin
+# below). One reaches the would-arm branch in two ways: nested under a safe
+# tree, where `gitleaks --source tests/fixtures` would read it, or through a
+# caller's extra_safe_globs. An "ignore files are harmless" glob is the
+# plausible one, and it swallows .gitleaksignore along with .gitignore.
+run_case "risk-gitleaks-fixture-config" 0 risk-tier-hold "tests/fixtures/.gitleaks.toml"
+export EXTRA_GLOBS='(^|/)\.[^/]*ignore$'
+run_case "risk-gitleaksignore-via-extra-glob" 0 risk-tier-hold "docs/runbook.md" ".gitleaksignore"
+# Control for the case above: the same extra glob still arms a plain
+# .gitignore, so the hold comes from the gitleaks pattern, not the glob.
+run_case "extra-glob-gitignore-still-arms" 1 - "docs/runbook.md" ".gitignore"
+export EXTRA_GLOBS=""
+run_case "gitleaks-root-not-safe-by-glob" 0 - "docs/runbook.md" ".gitleaksignore"
 
 # 2. The bypass label releases the hold.
 LABELS="auto-merge-approved"
@@ -160,6 +176,10 @@ run_case "bypass-releases-adr" 1 - "docs/decisions/ADR-0003-cluster-algorithm.md
 # risk_tier_overrides blocks, never the tier a pattern sits in).
 LABELS="auto-merge-approved"
 run_case "bypass-releases-pricing" 1 - "docs/marketing/pricing-block-handoff.md"
+# gitleaks config is tier-2 too, like .env and the workflows: a label click
+# on a PR that edits the allowlist is a human deciding on that allowlist.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitleaks" 1 - "tests/fixtures/.gitleaks.toml"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
