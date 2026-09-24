@@ -27,6 +27,7 @@ Expectations are hardcoded, never derived from the action under test.
 
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -408,13 +409,30 @@ def test_zero_expected_fails(wheelhouse):
     assert rc != 0, out
 
 
-# --- Structural: the run: block still carries every load-bearing flag ------
-# If a refactor drops one of these, a bypass route reopens while the behavioral
-# cases above (which use harmless placeholders) could still pass. This is the
-# vacuum guard for the two flags whose defense only shows against an executable
-# payload (--noconftest, --confcutdir) and for the rest besides.
+def _executable_lines(run: str) -> str:
+    """The run: block with shell comments removed, so a load-bearing flag left
+    in a comment after being dropped from the command does not satisfy the
+    guard below (Codex P2 on this PR). Drop full-comment lines, then strip
+    inline ` # ...` comments (shell requires whitespace before `#`); no code
+    line here carries an in-string `#`.
+    """
+    kept = []
+    for line in run.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(re.sub(r"(?<=\s)#.*$", "", line))
+    return "\n".join(kept)
+
+
+# --- Structural: the EXECUTABLE command still carries every load-bearing flag
+# If a refactor drops one of these from the command, a bypass route reopens
+# while the behavioral cases above (which use harmless placeholders) could still
+# pass. This is the vacuum guard for the two flags whose defense only shows
+# against an executable payload (--noconftest, --confcutdir) and the rest
+# besides. Checked against the comment-stripped script so a flag surviving only
+# in a comment does not count.
 def test_run_block_pins_every_flag():
-    run = _shipped_step()["run"]
+    code = _executable_lines(_shipped_step()["run"])
     required = [
         "python -I -m venv",  # -I on the bootstrap; isolated venv
         "--no-cache-dir",  # past a poisoned pip cache
@@ -427,22 +445,24 @@ def test_run_block_pins_every_flag():
         '--confcutdir "$gate_dir"',  # stop the package walk before tests/
         "--import-mode=append",  # gate dir last on sys.path
         "PathFinder.find_spec",  # module-origin pre-check
-        "__init__.py",  # gate-dir package pre-check
+        '"__init__.py"',  # gate-dir package pre-check (the code literal)
     ]
-    missing = [flag for flag in required if flag not in run]
-    assert not missing, f"the action dropped load-bearing flag(s): {missing}"
+    missing = [flag for flag in required if flag not in code]
+    assert not missing, (
+        f"the action dropped load-bearing flag(s) from the command: {missing}"
+    )
     # The -I pre-check reads gate dir + module names from the environment, so a
     # gate name can never be interpolated into the script.
-    assert 'GATE_DIR="$gate_dir" GATE_MODULES="$modules"' in run
+    assert 'GATE_DIR="$gate_dir" GATE_MODULES="$modules"' in code
     # The count check compares against the caller's EXPECTED literal, exactly.
-    assert '"$EXPECTED passed"' in run
+    assert '"$EXPECTED passed"' in code
     # ...and rejects any non-passing outcome, so an added-then-disabled test
     # cannot hold `passed` at EXPECTED (Codex P1).
-    assert "skipped|deselected|xfailed|xpassed" in run
+    assert "skipped|deselected|xfailed|xpassed" in code
     # A unique venv dir per invocation, so two calls in one job never share
     # packages (Codex P2).
-    assert 'mktemp -d "$RUNNER_TEMP/pinned-gate-tests.XXXXXX"' in run
-    assert '"$RUNNER_TEMP/gates/bin' not in run, (
+    assert 'mktemp -d "$RUNNER_TEMP/pinned-gate-tests.XXXXXX"' in code
+    assert '"$RUNNER_TEMP/gates/bin' not in code, (
         "fixed venv path reused across invocations"
     )
 
