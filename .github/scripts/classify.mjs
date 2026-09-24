@@ -526,7 +526,11 @@ function checkEntry(p, where) {
 	// in from CODEOWNERS or .gitignore, where 'infra/' means everything under
 	// infra/ and a leading '/' anchors a pattern to the repo root; here every
 	// pattern is already anchored there. Brace alternatives are checked too,
-	// since '{infra/,terraform/}' spells the same dead entry twice.
+	// since '{infra/,terraform/}' spells the same dead entry twice. A NEGATED
+	// entry is left to the negation pass below, which rejects it in every
+	// location: '!tests/' matches nearly every path, not none, and that pass
+	// says why. (Codex review round 3 of this guard.)
+	if (usesNegation(p)) return;
 	for (const s of [p, ...minimatch.braceExpand(p)]) {
 		const shape = s.endsWith('/')
 			? "ends with '/'"

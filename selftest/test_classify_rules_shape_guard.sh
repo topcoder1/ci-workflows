@@ -287,6 +287,15 @@ for where in blocked sensitive safe_test exclude.sensitive always_review; do
   expect_fail_closed "'{,./}cmd/**' under $where: fails closed on its dead './' alternative alone" \
     "entry \"{,./}cmd/**\" (under '$where:') starts with './'" "and that alternative matches no changed path"
   expect_err_lacks "the entry matches no changed path" "'{,./}cmd/**' under $where: the whole entry is not called dead"
+  # NEGATED, the same shapes match nearly every path, not none: the negation
+  # guard must name them, with its fail-open reason, not this one. (Codex
+  # review round 3 of this change.)
+  for neg in '!infra/' '!./infra/**' '!/infra/**'; do
+    place "$where" "'$neg'"
+    expect_fail_closed "'$neg' under $where: gets the negation guard's message" \
+      "pattern '$neg' (under '$where:') uses glob negation"
+    expect_err_lacks "matches no changed path" "'$neg' under $where: not called dead"
+  done
 done
 
 # 5. A pattern wrapped over lines fails closed in every location, in each
