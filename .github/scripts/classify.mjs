@@ -186,6 +186,23 @@ if (yamlWarnings.length > 0) {
 // which YAML reads as ONE list of one-key mappings, so every PR classifies
 // 'standard'. An empty or comment-only file (null) crashed on rules[cls] with a
 // TypeError instead: closed, but naming nothing.
+//
+// Fleet audit before adding this guard and the three after it (the key
+// allowlist, the wrapped-pattern guard, and the '/' and './' checks in the
+// entry pass), 2026-09-23, exit-code-gated over all 148 repos the token can
+// see, with the controls named on the warning guard above (plus
+// whois-api-llc/dnssniper-prod-, recorded as an empty repository, not a
+// non-carrier). 46 carriers (45 live, 1 archived) and 269 rules files — every
+// default branch plus the head, test-merge and non-default base of all 187
+// open PRs. Each is a plain mapping using only the nine allowed keys; their
+// 14,217 entries hold no whitespace at all, so nothing is wrapped, and none
+// ends with '/' or starts with '/' or './'. All 269 exit 0 before and after,
+// and a per-path spot check of every distinct file changed no verdict. In the
+// same pass a synthetic file of each shape flipped from 0 to 1, and a clean
+// one holding all nine keys stayed at 0. The three always_review users
+// (topcoder1/ipgeo_core, whois-api-llc/techrecon, whois-api-llc/wxa_webcat)
+// all run pr-classify.yml, so these guards reach them: codex-gate.mjs still
+// tolerates every one of these shapes on its own.
 if (rules === null || rules === undefined) {
 	fail(
 		`${RULES_PATH}: holds no rules — it is empty, holds only comments, or is null — so no class ` +
@@ -381,11 +398,13 @@ for (const [where, list] of entryLists) {
 // pattern with leading or trailing whitespace matches nothing — a '|' or '>'
 // block scalar keeps a trailing newline — and neither does one with a line
 // break inside, which is what a '|' block of several lines or a "\n" escape
-// becomes: ONE pattern, not a list. (NOT caught: a '>-' block, or a plain or
-// quoted scalar wrapped over lines, folds its lines into spaces and keeps no
-// newline — a '>' or '>+' block keeps one, which the padded check catches —
-// and no value check can tell that space from a real one like
-// 'docs/My Notes/**'; catching it means reading the source, not the value.)
+// becomes: ONE pattern, not a list. (A '>' block, or a plain or quoted scalar
+// wrapped over lines, folds its lines into spaces instead, and no value check
+// can tell that space from a real one like 'docs/My Notes/**': the
+// wrapped-pattern guard above reads the source, and names every one of them
+// before this pass runs — including a '>' or '>+' block, which keeps a
+// trailing newline. That order matters: this pass's advice for a padded entry,
+// one quoted line, would turn a wrapped pair into a single dead pattern.)
 // And minimatch reads a pattern that starts with '#' as a comment, which
 // matches nothing: a quoted '#…' is exactly what an author gets by quoting a
 // '- #scripts/x.sh' line as written, which YAML read as a comment (null).

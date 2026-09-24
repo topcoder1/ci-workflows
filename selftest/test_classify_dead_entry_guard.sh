@@ -23,8 +23,9 @@
 #    (cases 4-5). So do three kinds of string no changed path can match (case
 #    6): one with leading or trailing whitespace — a '|' or '>' block scalar
 #    keeps a trailing newline — one with a line break inside, which is what a
-#    '|' block of several lines or a "\n" escape becomes (a '>-' block or a
-#    scalar wrapped over lines folds into spaces instead, and is NOT caught),
+#    '|' block of several lines or a "\n" escape becomes (a '>' block or a
+#    scalar wrapped over lines folds into spaces instead; the wrapped-pattern
+#    guard catches that, see test_classify_rules_shape_guard.sh),
 #    and one that starts with '#', which
 #    minimatch reads as a comment. The last is where the non-string message's
 #    own advice would otherwise lead: quoting a '- #scripts/deploy.sh' line
@@ -326,16 +327,18 @@ done
 } > "$tmp/repo/.github/risk-paths.yml"
 expect_fail_closed "a two-line '|-' block scalar fails closed on the line break" \
   "(under 'sensitive:') contains a line break" "matches no changed path"
-# A '>' or '>+' block of several lines folds into spaces but keeps its
-# trailing newline, so the padded check still catches it. Only '>-' (and a
-# wrapped plain or quoted scalar) folds away every newline: not caught here.
+# A '>' or '>+' block of several lines folds into spaces and keeps its
+# trailing newline. The wrapped-pattern guard names it first, on purpose: the
+# padded check's advice, one quoted line, would turn it into the single dead
+# pattern 'cmd/** internal/**'. test_classify_rules_shape_guard.sh pins '>-'.
 for style in '>' '>+'; do
   {
     printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - $style"
     printf '%s\n' "    cmd/**" "    internal/**"
   } > "$tmp/repo/.github/risk-paths.yml"
-  expect_fail_closed "a two-line '$style' block (folded, trailing newline kept) fails closed as padded" \
-    "(under 'sensitive:') has leading or trailing whitespace"
+  expect_fail_closed "a two-line '$style' block (folded, trailing newline kept) fails closed as wrapped, not padded" \
+    "(under 'sensitive:') is wrapped over"
+  expect_err_lacks "leading or trailing whitespace" "a two-line '$style' block: the padded message does not fire first"
 done
 # The block scalars themselves, which take a second line.
 for style in '|' '>'; do
