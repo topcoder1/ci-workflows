@@ -946,6 +946,27 @@ def actionlint_pin_problems(text):
                     f"`uses: {uses}` in the actionlint job: only actions/checkout "
                     "may run there, beside the hash-checked binary"
                 )
+    # And what runs must be what was verified: the job invokes the
+    # get_actionlint output, and no other step of it runs an actionlint of its
+    # own. The independent review of this guard got `pipx run actionlint-py`,
+    # a brew install and a pip install past every rule above.
+    exe = "${{ steps.get_actionlint.outputs.executable }}"
+    invoked = False
+    for step in workflow["jobs"]["actionlint"]["steps"]:
+        if step.get("id") == "get_actionlint" or "run" not in step:
+            continue
+        body = "\n".join(
+            line
+            for line in step["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        invoked |= exe in body
+        if "actionlint" in body.replace(exe, "").lower():
+            problems.append(
+                f"step {step.get('name')!r} runs an actionlint other than {exe}"
+            )
+    if not invoked:
+        problems.append(f"no step runs the verified binary ({exe})")
     for name, var, pin in (
         ("actionlint_version", "ACTIONLINT_VERSION", ACTIONLINT_PIN_VERSION),
         ("actionlint_sha256", "ACTIONLINT_SHA256", ACTIONLINT_PIN_SHA256),
@@ -1028,9 +1049,9 @@ _ACTIONLINT_UNPINNED = {
         "ACTIONLINT_VERSION must be bound",
     ),
     "the input default moved off the pin": (
-        lambda t: t.replace(
-            f'default: "{ACTIONLINT_PIN_VERSION}"', 'default: "1.7.13"'
-        ),
+        # 0.0.0, never a plausible next pin, so a real bump cannot turn this
+        # edit into a no-op. (Independent review.)
+        lambda t: t.replace(f'default: "{ACTIONLINT_PIN_VERSION}"', 'default: "0.0.0"'),
         "input actionlint_version must default",
     ),
     # Codex review round 3: a substring check still found the binding here,
@@ -1082,6 +1103,22 @@ _ACTIONLINT_UNPINNED = {
             "      - uses: actions/setup-go@v6\n\n      - name: Run actionlint\n",
         ),
         "only actions/checkout may run there",
+    ),
+    # Independent review of this guard: nothing tied what RUNS to what was
+    # verified. `pipx run --spec` is how this same file runs ruff.
+    "another actionlint run beside the verified one": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - run: pipx run actionlint-py -color\n\n"
+            "      - name: Run actionlint\n",
+        ),
+        "runs an actionlint other than",
+    ),
+    "the verified binary never runs": (
+        lambda t: t.replace(
+            "${{ steps.get_actionlint.outputs.executable }}", "pipx run actionlint-py"
+        ),
+        "no step runs the verified binary",
     ),
 }
 
