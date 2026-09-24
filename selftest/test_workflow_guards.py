@@ -26,6 +26,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_automerge_decision_label.sh",
     "selftest/test_automerge_findings_gate.sh",
     "selftest/test_automerge_hold_gate.sh",
+    "selftest/test_automerge_output_injection.sh",
     "selftest/test_automerge_pat_attribution_gate.sh",
     "selftest/test_automerge_quiet_anchor.sh",
     "selftest/test_automerge_risk_patterns.sh",
@@ -56,6 +57,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_ruff_format_gate.sh",
     "selftest/test_ruff_ruleset_warning.sh",
     "selftest/test_safe_paths_classifier_hold.sh",
+    "selftest/test_safe_paths_output_injection.sh",
     "selftest/test_safe_paths_risk_tier_hold.sh",
     "selftest/test_safe_paths_unsafe_overrides.sh",
     # These two shipped unlisted (#152 and #160) and ran in CI never —

@@ -1326,21 +1326,35 @@ jobs:
                 continue
               fi
               if echo "$f" | grep -Eq "$p"; then
-                matched="$matched$f (matched: $p)\n"
+                # Accumulate with a REAL newline separator ($'\n'), so the
+                # list can be written and displayed with printf '%s' rather
+                # than printf "%b". The file name $f is PR-controlled and may
+                # contain literal backslash bytes; %b would interpret those,
+                # which is exactly what the output-injection guard forbids.
+                matched="$matched$f (matched: $p)"$'\n'
                 break
               fi
             done <<< "$patterns"
           done <<< "$changed"
 
           if [ -n "$matched" ]; then
+            # `matched` is built from PR-controlled file names. Write it with
+            # a RANDOM per-run heredoc delimiter — a file name cannot forge a
+            # delimiter it cannot predict, so it cannot terminate the value
+            # early and append its own output line (e.g. flip `risky`). Emit
+            # with printf '%s' (never %b) so the name's own backslash bytes
+            # are not interpreted. `matched` already ends in a newline, so the
+            # closing delimiter lands on its own line. Pinned by
+            # selftest/test_automerge_output_injection.sh.
+            delim="MATCHED_EOF_$(openssl rand -hex 16 2>/dev/null || echo "${RANDOM}${RANDOM}${RANDOM}${RANDOM}")"
             {
               echo "risky=1"
-              echo "matched<<EOF"
-              printf "%b" "$matched"
-              echo "EOF"
+              echo "matched<<$delim"
+              printf '%s' "$matched"
+              echo "$delim"
             } >> "$GITHUB_OUTPUT"
             echo "Risk-tier match — auto-merge blocked:"
-            printf "%b" "$matched"
+            printf '%s' "$matched"
           else
             echo "risky=0" >> "$GITHUB_OUTPUT"
             echo "No risk-tier paths matched."
@@ -2111,7 +2125,10 @@ jobs:
             echo ""
             echo "Matched files:"
             echo '```'
-            printf "%b" "$MATCHED"
+            # $MATCHED now carries real newlines (see the `risk` step), so
+            # render it with printf '%s' — never %b, which would interpret a
+            # PR-controlled file name's own backslash bytes.
+            printf '%s' "$MATCHED"
             echo '```'
             echo ""
             echo "**Bypass options (no PR detail navigation needed):**"
