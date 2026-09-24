@@ -47,8 +47,14 @@ inputs:
       Newline-separated bare-name modules the gate files import that live in the
       gate directory (helpers like `_risk_paths_glob`). The pre-check pins each
       to its own .py in that directory, so a package or extension module of the
-      same name cannot shadow it. Do NOT list installed packages (pytest,
-      pyyaml) or the project package. Default: none.
+      same name cannot shadow it. Every such import must be listed: the
+      pre-check reads the pinned files' imports and fails if the gate
+      directory holds a module, directory or symlink under the top-level name
+      of one that is not listed (a helper left out, or something dropped there
+      to fill an optional import or a package's submodule). Gate files
+      importing each other need no
+      entry — `files` already pins them. Do NOT list installed packages
+      (pytest, pyyaml) or the project package. Default: none.
     required: false
     default: ""
   pytest-version:
@@ -167,24 +173,75 @@ runs:
         # directory (a package dir or extension module of the same name is
         # imported ahead of the .py, and can set __file__ to pass pytest's own
         # mismatch check). This also catches a deleted gate file.
+        # Then it reads the imports of every pinned file (parsed, never run)
+        # and fails if the gate directory holds anything an unpinned import
+        # could load from it: a helper left out of `imports`, a module dropped
+        # there to fill an optional import that resolves nowhere in a clean
+        # tree, or a directory named like a dotted import's top-level package
+        # (a namespace package, or one that extends its __path__, merges
+        # submodules from every directory of that name on sys.path). Checked
+        # in the gate directory itself, lexically: a symlink counts wherever
+        # it points, since Python imports it through its own path. Stricter
+        # than asking where the import would resolve, deliberately: a gate
+        # directory has no business holding a module named like one the gates
+        # import from elsewhere.
         GATE_DIR="$gate_dir" GATE_MODULES="$modules" \
           "$venv/bin/python" -I - <<'PY'
+        import ast
         import os
         import sys
-        from importlib.machinery import PathFinder
+        from importlib.machinery import PathFinder, all_suffixes
         from pathlib import Path
 
         gate_dir = Path(os.environ["GATE_DIR"]).resolve()
         if (gate_dir / "__init__.py").exists():
             print(f"::error::{gate_dir}/__init__.py would load the gates as part of a package")
             sys.exit(1)
-        for name in os.environ["GATE_MODULES"].split():
-            spec = PathFinder.find_spec(name, [*sys.path, str(gate_dir)])
+        pinned = os.environ["GATE_MODULES"].split()
+        search = [*sys.path, str(gate_dir)]
+        for name in pinned:
+            spec = PathFinder.find_spec(name, search)
             origin = spec.origin if spec else None
             want = str(gate_dir / f"{name}.py")
             if origin != want:
                 print(f"::error::{name} would import from {origin}, not from {want}")
                 sys.exit(1)
+
+
+        def gate_dir_entry(top):
+            """What in the gate directory an import of `top` could load or
+            merge: a directory (package or namespace portion) or a module file
+            with any import suffix. Never resolves symlinks."""
+            base = gate_dir / top
+            if base.is_symlink() or base.is_dir():
+                return base
+            for suffix in all_suffixes():
+                candidate = gate_dir / (top + suffix)
+                if os.path.lexists(candidate):
+                    return candidate
+            return None
+
+
+        for pinned_name in pinned:
+            source = gate_dir / f"{pinned_name}.py"
+            for node in ast.walk(ast.parse(source.read_bytes(), filename=str(source))):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    imported = [node.module]
+                else:
+                    continue
+                for full_name in imported:
+                    top = full_name.split(".")[0]
+                    if top in pinned:
+                        continue
+                    entry = gate_dir_entry(top)
+                    if entry is not None:
+                        print(
+                            f"::error::{source.name} imports {full_name}, and the gate directory "
+                            f"has {entry.name} for it, which is not pinned: add it to the imports input"
+                        )
+                        sys.exit(1)
         PY
 
         # --- Run the gate files, isolated:

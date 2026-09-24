@@ -35,16 +35,17 @@ in a fresh venv holding only pytest and the packages the gates import, and
 see the comments in [`action.yml`](action.yml) and the route table in the
 webcrawl PR:
 
-| Flag                                                                   | Route it closes                                                                                 |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `-I` on venv bootstrap, pre-check and pytest                           | root-level `pytest.py` / `venv.py` on `sys.path` under `python -m`                              |
-| `-c /dev/null --rootdir .`                                             | `pyproject.toml` / `pytest.ini` / `tox.ini` / `setup.cfg`                                       |
-| `--noconftest`                                                         | `conftest.py` at any level                                                                      |
-| `--confcutdir <gate dir>`                                              | a code-bearing `tests/__init__.py` run during pytest's package walk                             |
-| `--import-mode=append`                                                 | a module dropped in the gate dir shadowing one the gates import                                 |
-| pre-check (no `__init__.py`; `PathFinder.find_spec` origin per module) | a package dir / extension module named like a gate or helper; a deleted gate file               |
-| exact `expected` count                                                 | a deselected, skipped or uncollected test                                                       |
-| `--no-cache-dir`, pinned `pytest==`                                    | a poisoned pip cache from an earlier run of the same PR; a pytest that changes collection rules |
+| Flag                                                                   | Route it closes                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-I` on venv bootstrap, pre-check and pytest                           | root-level `pytest.py` / `venv.py` on `sys.path` under `python -m`                                                                                                                                                 |
+| `-c /dev/null --rootdir .`                                             | `pyproject.toml` / `pytest.ini` / `tox.ini` / `setup.cfg`                                                                                                                                                          |
+| `--noconftest`                                                         | `conftest.py` at any level                                                                                                                                                                                         |
+| `--confcutdir <gate dir>`                                              | a code-bearing `tests/__init__.py` run during pytest's package walk                                                                                                                                                |
+| `--import-mode=append`                                                 | a module dropped in the gate dir shadowing one the gates import                                                                                                                                                    |
+| pre-check (no `__init__.py`; `PathFinder.find_spec` origin per module) | a package dir / extension module named like a gate or helper; a deleted gate file                                                                                                                                  |
+| pre-check import scan (pinned files' `import`s, parsed not run)        | a helper left out of `imports`; a module, symlink or directory dropped in the gate dir under the name of something the gates import (filling an optional import, or a namespace/`extend_path` package's submodule) |
+| exact `expected` count                                                 | a deselected, skipped or uncollected test                                                                                                                                                                          |
+| `--no-cache-dir`, pinned `pytest==`                                    | a poisoned pip cache from an earlier run of the same PR; a pytest that changes collection rules                                                                                                                    |
 
 ## Usage
 
@@ -69,9 +70,11 @@ jobs:
             tests/regression/test_recursive_delete_sites_are_gated.py
             tests/regression/test_risk_paths_cover_recursive_deletes.py
           expected: "109"
-          # Helper modules the gates import by bare name, in the gate dir:
-          imports: |
-            _risk_paths_glob
+          # These two gates import only each other (already pinned by `files`),
+          # so no `imports`. A gate that imports a helper from the gate dir by
+          # bare name must list it, e.g.:
+          # imports: |
+          #   _risk_paths_glob
           # Optional — these are the defaults:
           # pytest-version: "9.1.1"
           # extra-packages: "pyyaml==6.0.3"
@@ -91,13 +94,13 @@ change is needed.
 
 ## Inputs
 
-| Input            | Required | Default         | Notes                                                                                                                                                                    |
-| ---------------- | -------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `files`          | yes      | —               | Newline-separated gate test files, repo-root-relative, **all in one directory**.                                                                                         |
-| `expected`       | yes      | —               | Exact number of tests that must pass. A hardcoded literal.                                                                                                               |
-| `imports`        | no       | `""`            | Newline-separated bare-name helper modules the gates import from the gate directory. Pinned by the pre-check. Do **not** list installed packages or the project package. |
-| `pytest-version` | no       | `9.1.1`         | Pinned; the isolation was verified against 9.1.1's collection rules.                                                                                                     |
-| `extra-packages` | no       | `pyyaml==6.0.3` | Space-separated, version-pinned packages the gate files import at collection time.                                                                                       |
+| Input            | Required | Default         | Notes                                                                                                                                                                                                                                                                                                  |
+| ---------------- | -------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `files`          | yes      | —               | Newline-separated gate test files, repo-root-relative, **all in one directory**.                                                                                                                                                                                                                       |
+| `expected`       | yes      | —               | Exact number of tests that must pass. A hardcoded literal.                                                                                                                                                                                                                                             |
+| `imports`        | no       | `""`            | Newline-separated bare-name helper modules the gates import from the gate directory. Pinned by the pre-check, and **required** for every such import: the step fails on one left undeclared. Gate files importing each other need no entry. Do **not** list installed packages or the project package. |
+| `pytest-version` | no       | `9.1.1`         | Pinned; the isolation was verified against 9.1.1's collection rules.                                                                                                                                                                                                                                   |
+| `extra-packages` | no       | `pyyaml==6.0.3` | Space-separated, version-pinned packages the gate files import at collection time.                                                                                                                                                                                                                     |
 
 ## Keep `expected` and `files` in the caller workflow
 
@@ -131,6 +134,14 @@ Bumping the pin is a deliberate PR.
 Every failure path exits non-zero: empty/invalid inputs, a non-`.py` path, an
 absolute path or one with a `..` segment (repo-root-relative only), files
 spanning two directories, a missing or deleted gate file, a gate-directory
-package, a name-shadow of a gate or helper module, a pytest exit of 1/2/4/5,
-and any count other than `expected`. Callers must treat a failure as a hard
-block — that is the whole point.
+package, a name-shadow of a gate or helper module, anything in the gate
+directory — a module file, a directory or a symlink, wherever it points — named
+like the top-level package of an import the pinned files make without being
+declared in `imports`, a pytest exit of 1/2/4/5, and any count other than
+`expected`. Callers must
+treat a failure as a hard block — that is the whole point.
+
+The import scan reads the static `import` / `from … import` statements of the
+pinned files (gates and declared helpers). It does not see dynamic imports
+(`importlib.import_module("…")`) or imports made lazily inside the standard
+library or installed packages; keep gate files to plain static imports.
