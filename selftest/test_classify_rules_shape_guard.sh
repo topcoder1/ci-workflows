@@ -303,7 +303,8 @@ done
 #    '>' block, a double-quoted line that ends in an ESCAPED backslash ('\\'),
 #    which is a literal '\', not a line join, and a double-quoted line join
 #    with a space or tab typed before its '\' — YAML keeps that whitespace, so
-#    the lines still join with a space between them. (Independent review.)
+#    the lines still join with a space between them (independent review) —
+#    and so does an ESCAPED space ('\ '), even on a continuation line.
 for where in blocked sensitive safe_test exclude.sensitive always_review; do
   for raw in "cmd/**${nl}        internal/**" \
     "'cmd/**${nl}        internal/**'" \
@@ -312,7 +313,9 @@ for where in blocked sensitive safe_test exclude.sensitive always_review; do
     ">${nl}        cmd/**${nl}        internal/**" \
     "\"cmd/\\\\${nl}        internal/**\"" \
     "\"cmd/** \\${nl}        internal/**\"" \
-    "\"cmd/**${tab}\\${nl}        internal/**\""; do
+    "\"cmd/**${tab}\\${nl}        internal/**\"" \
+    "\"cmd/**\\ \\${nl}        internal/**\"" \
+    "\"cmd/\\${nl}        \\ \\${nl}        internal/**\""; do
     place "$where" "$raw"
     expect_fail_closed "a wrapped entry under $where: fails closed — $(printf '%s' "$raw" | tr '\n' '|')" \
       "(under '$where:') is wrapped over" "ONE pattern"
@@ -445,6 +448,9 @@ sensitive:
     scripts/folded.sh
   - "scripts/\
     joined.sh"
+  - "scripts/\
+    \
+    chained.sh"
   - '.github/actions/**'
 safe_deps: ['go.sum',
   'package-lock.json']
@@ -455,6 +461,9 @@ for endings in LF CRLF; do
   if [ "$endings" = CRLF ]; then crlf "$rules"; fi
   expect_class sensitive "$endings: a single-line '>-' block gates (scripts/folded.sh)" scripts/folded.sh
   expect_class sensitive "$endings: an escaped double-quoted line join gates (scripts/joined.sh)" scripts/joined.sh
+  # The middle line holds only its indentation and a '\': YAML strips that
+  # indentation, so the value is 'scripts/chained.sh'. (Codex review round 4.)
+  expect_class sensitive "$endings: a join chained over a line holding only '\\' gates (scripts/chained.sh)" scripts/chained.sh
   expect_class sensitive "$endings: a '.github/…' entry is not a './' entry" .github/actions/setup/action.yml
   expect_class safe_deps "$endings: a flow list spanning lines with its comma matches (package-lock.json)" package-lock.json
   expect_class trivial "$endings: a plain entry with an interior space matches" "docs/My Notes/a.md"

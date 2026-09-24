@@ -337,11 +337,18 @@ function isWrapped(n) {
 		// when an odd run of backslashes precedes it; '\\' is a literal '\'. The
 		// join adds nothing between the lines — but a space or tab typed before
 		// the '\' (a shell continuation habit) is kept, so those lines still join
-		// with whitespace between them. (Independent review of this guard.)
+		// with whitespace between them. (Independent review of this guard.) A run
+		// of whitespace that starts a line is that line's indentation, which YAML
+		// strips, so a join chained over a line holding only '\' is legal.
+		// (Codex review round 4.)
 		for (let i = 0; i < text.length; i++) {
 			if (text[i] === '\\') {
 				const join = text.startsWith('\r\n', i + 1) ? 2 : text[i + 1] === '\n' || text[i + 1] === '\r' ? 1 : 0;
-				if (join && (text[i - 1] === ' ' || text[i - 1] === '\t')) return true;
+				if (join) {
+					let j = i - 1;
+					while (text[j] === ' ' || text[j] === '\t') j--;
+					if (j < i - 1 && text[j] !== '\n' && text[j] !== '\r') return true;
+				}
 				i += join || 1;
 			} else if (text[i] === '\r' || text[i] === '\n') return true;
 		}
