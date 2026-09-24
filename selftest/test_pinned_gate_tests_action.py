@@ -14,7 +14,9 @@ and the ways it must FAIL: the four count cases (a parametrize row removed, a
 module-level skip, the files emptied, a gate file deleted), input validation,
 and the pre-check fired by HARMLESS placeholder files (an empty `__init__.py`,
 a package directory or a zero-byte extension module named like a gate or helper
-module). It deliberately does NOT carry executable bypass payloads — the full
+module, an empty module or a symlink to one filling an optional import, an
+empty directory named like a dotted import's package) plus a helper left out of
+`imports`. It deliberately does NOT carry executable bypass payloads — the full
 route-by-route replay (a conftest that deselects, a root `pytest.py`/`venv.py`,
 a package that re-runs the scanner, a `tests/__init__.py` that rewrites a test's
 `__code__`) lives with webcrawl#585's own corpus and is run against the repo it
@@ -52,7 +54,13 @@ EXPECTED = "8"  # 5 in the pin (2 sites + 3 gate files), 3 in the scanner (1 + 2
 _HELPER = '''\
 """Glob matching for risk-paths.yml patterns, shared by the gate tests."""
 
+import os.path
 import re
+
+try:  # optional accelerator, absent in this repo: an import that resolves nowhere
+    import _gate_glob_accel
+except ImportError:
+    _gate_glob_accel = None
 
 
 def matches(glob, path):
@@ -385,6 +393,69 @@ def test_precheck_placeholder_cases_fail(wheelhouse, mutate, why):
     assert "::error::" in out, out
 
 
+# --- Behavioral: every bare-name import that lands in the gate dir is pinned --
+# A helper the caller forgot to list in `imports` resolves from the gate
+# directory but is not pinned, so a package or extension module of the same
+# name could shadow it. The pre-check reads the pinned files' imports and fails
+# on any that would load from the gate directory without being declared.
+def test_undeclared_helper_import_fails(wheelhouse):
+    """The clean tree, with `_gate_glob` left out of `imports`."""
+    rc, out = _run_action(wheelhouse, imports="")
+    assert rc != 0, f"an undeclared in-directory helper must fail:\n{out}"
+    assert "_gate_glob" in out and "not pinned" in out, out
+
+
+def test_optional_import_filled_from_gate_dir_fails(wheelhouse):
+    """The helper's optional `_gate_glob_accel` import resolves nowhere in the
+    clean tree (which passes). An empty placeholder named like it, dropped in the
+    gate directory, would now be imported by the gates: the pre-check must fail
+    on it before pytest starts."""
+
+    def mutate(repo):
+        (repo / "tests/regression/_gate_glob_accel.py").write_text("")
+
+    rc, out = _run_action(wheelhouse, mutate=mutate)
+    assert rc != 0, f"an undeclared module filling an optional import must fail:\n{out}"
+    assert "_gate_glob_accel" in out and "not pinned" in out, out
+
+
+def test_symlink_filling_an_optional_import_fails(wheelhouse):
+    """The same optional import, filled by a SYMLINK in the gate directory that
+    points outside it (at an empty file). Python imports it through the link's
+    own path, which is in the gate directory, so it must count as a gate-
+    directory module wherever it points (Codex P1: a resolve()-then-contain
+    check followed the link out and passed it)."""
+
+    def mutate(repo):
+        (repo / "elsewhere").mkdir()
+        (repo / "elsewhere/empty.py").write_text("")
+        (repo / "tests/regression/_gate_glob_accel.py").symlink_to(
+            "../../elsewhere/empty.py"
+        )
+
+    rc, out = _run_action(wheelhouse, mutate=mutate)
+    assert rc != 0, f"a symlinked module filling an optional import must fail:\n{out}"
+    assert "_gate_glob_accel" in out and "not pinned" in out, out
+
+
+def test_directory_named_like_a_dotted_import_fails(wheelhouse):
+    """The helper does `import os.path`. A directory in the gate directory named
+    like the top-level package of a dotted import is the shape a namespace
+    package, or one that extends its __path__, would merge submodules from
+    (Codex P2: the scan resolved only the top-level name, found it elsewhere,
+    and passed). An empty directory with an empty module is enough to fail."""
+
+    def mutate(repo):
+        (repo / "tests/regression/os").mkdir()
+        (repo / "tests/regression/os/path.py").write_text("")
+
+    rc, out = _run_action(wheelhouse, mutate=mutate)
+    assert rc != 0, (
+        f"a directory named like a dotted import's package must fail:\n{out}"
+    )
+    assert "os" in out and "not pinned" in out, out
+
+
 # --- Behavioral: input validation, before any venv is built ---------------
 def test_files_in_two_directories_fail(wheelhouse):
     rc, out = _run_action(
@@ -464,6 +535,10 @@ def test_run_block_pins_every_flag():
         '--confcutdir "$gate_dir"',  # stop the package walk before tests/
         "--import-mode=append",  # gate dir last on sys.path
         "PathFinder.find_spec",  # module-origin pre-check
+        "ast.walk(ast.parse(",  # the pinned files' imports are scanned
+        "all_suffixes()",  # any importable file in the gate dir counts
+        "base.is_symlink() or base.is_dir()",  # symlinks/dirs, never resolved
+        "not pinned: add it to the imports input",
         '"__init__.py"',  # gate-dir package pre-check (the code literal)
     ]
     missing = [flag for flag in required if flag not in code]
