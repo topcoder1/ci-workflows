@@ -229,11 +229,16 @@ def test_checker_rejects_every_known_bad_shape(mutate):
 GATES = "tests/regression/test_example_gate.py"
 
 
-def _run_detect(manifests, *, pinned="", language="auto"):
+def _detect_step(wf):
+    return next(s for s in wf["jobs"]["detect"]["steps"] if s.get("id") == "d")
+
+
+def _run_detect(manifests, *, pinned="", language="auto", wf=None):
     """Run the shipped `detect` script as GitHub runs a bare `run:` step, in a
     workdir holding `manifests`. Returns (returncode, language-or-None, output).
+    `wf` swaps in a mutated workflow for a negative control.
     """
-    step = next(s for s in _load()["jobs"]["detect"]["steps"] if s.get("id") == "d")
+    step = _detect_step(wf or _load())
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp) / "work"
         work.mkdir()
@@ -311,3 +316,48 @@ def test_without_pinned_gates_detection_is_unchanged(manifests, expected):
 def test_without_pinned_gates_ambiguity_still_fails():
     rc, _, out = _run_detect(["pyproject.toml", "package.json"])
     assert rc != 0 and "ambiguous" in out, out
+
+
+# Both auto-detect failures name the inputs that fix them, Markdown-quoted.
+# Inside the step's double quotes an unescaped backtick pair is a command
+# substitution: bash runs `language:` as a command, fails, and splices in
+# nothing, so the annotation read "Pass  explicitly, or set  to the correct
+# subdir." The step still failed closed; only the hint was lost.
+INPUT_HINTS = ("`language:`", "`working_directory:`")
+AUTO_DETECT_FAILURES = {
+    "no manifest": [],
+    "ambiguous": ["pyproject.toml", "package.json"],
+}
+
+
+def _auto_detect_error(manifests, wf=None):
+    """The one `::error::` annotation a failed auto-detection prints."""
+    rc, _, out = _run_detect(manifests, wf=wf)
+    errors = [line for line in out.splitlines() if line.startswith("::error::")]
+    assert rc != 0 and len(errors) == 1, f"rc={rc}\n{out}"
+    return errors[0]
+
+
+def _names_the_inputs(error):
+    return all(hint in error for hint in INPUT_HINTS)
+
+
+@pytest.mark.parametrize(
+    "manifests", AUTO_DETECT_FAILURES.values(), ids=AUTO_DETECT_FAILURES.keys()
+)
+def test_auto_detect_failures_name_the_inputs_that_fix_them(manifests):
+    error = _auto_detect_error(manifests)
+    assert _names_the_inputs(error), error
+
+
+@pytest.mark.parametrize(
+    "manifests", AUTO_DETECT_FAILURES.values(), ids=AUTO_DETECT_FAILURES.keys()
+)
+def test_hint_check_rejects_unescaped_backticks(manifests):
+    """Negative control: with the backticks unescaped (the pre-fix form), the
+    same check must fail, or it would also pass on a blanked hint."""
+    wf = copy.deepcopy(_load())
+    step = _detect_step(wf)
+    step["run"] = step["run"].replace("\\`", "`")
+    error = _auto_detect_error(manifests, wf=wf)
+    assert not _names_the_inputs(error), error

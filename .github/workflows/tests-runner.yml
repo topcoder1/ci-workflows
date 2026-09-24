@@ -158,11 +158,13 @@ jobs:
             { [[ -f pyproject.toml ]] || [[ -f requirements.txt ]]; } && found+=("python")
             [[ -f go.mod ]] && found+=("go")
             [[ -f package.json ]] && found+=("js")
+            # The hints' backticks are escaped: a bare pair inside double
+            # quotes is a command substitution and prints as nothing.
             if [[ ${#found[@]} -eq 0 ]]; then
-              echo "::error::no language manifest in '$INPUT_WORKDIR' (pyproject.toml / requirements.txt / go.mod / package.json). Pass `language:` explicitly, or set `working_directory:` to the correct subdir."
+              echo "::error::no language manifest in '$INPUT_WORKDIR' (pyproject.toml / requirements.txt / go.mod / package.json). Pass \`language:\` explicitly, or set \`working_directory:\` to the correct subdir."
               exit 1
             elif [[ ${#found[@]} -gt 1 ]]; then
-              echo "::error::ambiguous language detection in '$INPUT_WORKDIR' — found: ${found[*]}. Pass `language:` and `working_directory:` explicitly. Multi-language repos need one caller per language."
+              echo "::error::ambiguous language detection in '$INPUT_WORKDIR' — found: ${found[*]}. Pass \`language:\` and \`working_directory:\` explicitly. Multi-language repos need one caller per language."
               exit 1
             fi
             LANG="${found[0]}"
