@@ -24,7 +24,7 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    the workflow file at `.github/workflows/merge-policy-review-dispatch.yml`
    from the template, with the job condition's repository literals for that
    repository; the entrypoint and its imports at the same commit; the tag
-   `merge-policy-review-v4` on that commit; rulesets that forbid updating or
+   `merge-policy-review-v5` on that commit; rulesets that forbid updating or
    deleting the tag and creating a same-name branch (the v2 packet procedure);
    the secret `MERGE_POLICY_REVIEW_API_KEY`. Node is pinned in the template
    and load-bearing: the entrypoint's `import.meta.main` guard needs Node
@@ -61,7 +61,8 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    under review". Any commit clears it; the producer's own documentation is a
    good one.
 7. **Upgrading an installed producer to a new tag** (Stage A moved from `v3` to
-   `v4` for the reviewer's schema fix): install the new source at one commit as
+   `v4` for the reviewer's schema fix, then to `v5` when the API added a
+   top-level response field): install the new source at one commit as
    in step 2 — the same workflow path keeps the same `workflowId` — tag it, then
    land another commit per step 6. Switch the producers entry's
    `workflowRevision` to the tagged commit only then, and only between cycles:
@@ -69,13 +70,13 @@ may prepare files and commands; it does not mint tags, rulesets or secrets.
    because intake re-reads the live entry and would refuse an in-flight cycle's
    receipt. The switch changes the authority digest, so receipts recorded under
    the old tag stop counting and open pull requests need a fresh cycle. Until
-   the switch, cycles from `main` pass
-   `--workflow-ref refs/tags/merge-policy-review-v3` and keep using the old tag,
+   the switch, cycles from `main` pass `--workflow-ref` with the old tag (for
+   `v5`, `refs/tags/merge-policy-review-v4`) and keep using it,
    whose own workflow copy still runs; the driver defaults to the new ref. A
    tag that does not match the entry's `workflowRevision`, either way, still
    runs a paid review and then ends `RUN_NOT_FOUND`, with the orphaned run
-   answering `PRODUCER_BUSY` until it finishes. After the switch, `v3` joins
-   `v1`/`v2`: never dispatch it again.
+   answering `PRODUCER_BUSY` until it finishes. After the switch, the old tag
+   joins `v1`/`v2`: never dispatch it again.
 
 ## One cycle
 

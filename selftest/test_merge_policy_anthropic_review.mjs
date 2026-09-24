@@ -1051,3 +1051,33 @@ test("no comparison data reaches the output schema", async () => {
   for (const path of ["src/check.mjs", "src/new.mjs", "lib/a.mjs", "lib/z.mjs"])
     assert.ok(!text.includes(path), path);
 });
+
+test("an unrecognised top-level response field is accepted only when null (staging run 36049558488)", async () => {
+  // On 2026-09-24 the Messages API began returning a top-level
+  // `diagnostics: null` on every response, within the same API version. The
+  // strict envelope refused every review as invalid_response.
+  for (const extra of [
+    { diagnostics: null },
+    { diagnostics: null, a_future_field: null },
+  ]) {
+    const result = await client(async () =>
+      response({ ...envelope(), ...extra }),
+    ).review(fixture());
+    assert.deepEqual(result.review, clean);
+  }
+  // A non-null surprise still fails closed.
+  for (const value of [{}, { cache: "hit" }, "", "x", 0, false, []]) {
+    await rejects(
+      client(async () =>
+        response({ ...envelope(), diagnostics: value }),
+      ).review(fixture()),
+      "invalid_response",
+    );
+  }
+  // Required fields stay required.
+  const { usage, ...missing } = envelope();
+  await rejects(
+    client(async () => response(missing)).review(fixture()),
+    "invalid_response",
+  );
+});
