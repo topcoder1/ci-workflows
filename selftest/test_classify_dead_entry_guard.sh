@@ -33,7 +33,8 @@
 #
 # Cases 7-8 are the positive controls: a QUOTED '!x' is a real string and must
 # still reach the negation guard with that guard's own reason, and ordinary
-# entries must still load and classify.
+# entries must still load and classify. Case 9 pins that the conversion-warning
+# capture puts process.emitWarning back once conversion ends.
 #
 # ci-workflows#227 named this as out of scope ("Rejecting empty patterns or
 # YAML warnings would be a separate hardening"); the independent review of
@@ -399,5 +400,39 @@ expect_class safe_deps "a flow-list entry matches (go.sum)" go.sum
 expect_class trivial "an entry with an interior space matches" "docs/My Notes/a.md"
 expect_class trivial "an escaped '\\#' entry matches a path that starts with '#'" "#notes/x.md"
 expect_class standard "an unmatched path still falls back to standard" src/app.py
+
+# 9. The conversion-warning capture swaps process.emitWarning for the length of
+#    doc.toJS() alone, and must put the original back in its finally. The CLI
+#    runs in its own process, so a preload (node --import) records the original
+#    and reports at exit whether classify.mjs restored it: on a clean run, and
+#    on one that captured a warning and failed closed. (Codex CI review of this
+#    change: the restore was untested.)
+cat > "$tmp/probe-emitwarning.mjs" <<'EOF'
+const original = process.emitWarning;
+process.on('exit', () => {
+  process.stderr.write(process.emitWarning === original ? 'EMITWARNING=restored\n' : 'EMITWARNING=replaced\n');
+});
+EOF
+# expect_restored <description> — run with the probe preloaded and require it
+# to report the original process.emitWarning in place at exit.
+expect_restored() {
+  set +e
+  out=$(printf '%s\n' "src/app.py" | (cd "$tmp/repo" && node --import "$tmp/probe-emitwarning.mjs" "$tmp/classify.mjs") 2> "$tmp/stderr")
+  rc=$?
+  set -e
+  err=$(cat "$tmp/stderr")
+  case "$err" in
+    *"EMITWARNING=restored"*) echo "✓ $1" ;;
+    *)
+      echo "✗ $1 — process.emitWarning was not restored (rc=$rc, stdout '$out'):"
+      printf '%s\n' "$err" | sed 's/^/    /'
+      failed=1
+      ;;
+  esac
+}
+printf '%s\n' "blocked:" "  - '**/.env*'" > "$tmp/repo/.github/risk-paths.yml"
+expect_restored "a clean run restores process.emitWarning after conversion"
+printf '%s\n' "[blocked]: ['**/.env*']" > "$tmp/repo/.github/risk-paths.yml"
+expect_restored "a run that captures a conversion warning and fails closed still restores process.emitWarning"
 
 exit "$failed"
