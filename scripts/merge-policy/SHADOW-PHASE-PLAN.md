@@ -2,6 +2,8 @@
 
 **Status:** PROPOSED. Merging this document is the freeze: the PR sequence below starts only after it lands, and any change of scope is a change to this file first.
 
+**Amended 2026-09-23:** Section 8 restarts Stage A after its first run. Where Section 8 differs from Sections 2 to 6, Section 8 governs.
+
 **Basis.** On 2026-09-17 the owner approved continuing the pilot toward a real trust boundary under three constraints: the smallest boundary that is real; shadow first, with enforcement a separate later decision on its own evidence; and explicit kill criteria stated up front. Every PR to this repository is manual click-merge, so the owner's clicks are budgeted like any other resource.
 
 **Evidence basis.** The v2 execution probe (techrecon `docs/audits/merge-policy-review-execution-v2-2026-09-17/OUTCOME.md`, run 35180767886) established that the data-only producer completes a structured review on a GitHub-hosted runner from a protected immutable tag with exact digests, and nothing more: not current-PR review, not identity or execution authentication, not intake or publication, not merge enforcement. All `file:line` references below are to this repository at `0a20fd7` (main on 2026-09-17) and were checked against the code, not the docs.
@@ -117,3 +119,33 @@ Each with a recommendation; the default applies if this document merges without 
 - The dispatch inputs are trusted because only the owner can dispatch a private repository's workflow; any broadening of Actions:write on the producer repo silently widens the boundary.
 - Live configuration this repository cannot verify (App permissions, control-repo protections, the existence of control documents) must be re-read before Stage A, as `TRANSPORT-PROBE.md:40-48` already requires.
 - The reviewer prompt and structured schema are unchanged from v2; one in three earlier live outputs exceeded the old caps; the new caps hold locally, but K3 will surface any new shape of provider failure.
+
+## 8. Amendment 1: Stage A restart (2026-09-23)
+
+**Run 1.** Stage A's first run, 2026-09-19 to 09-22, was 10 cycles on staging PRs #4, #5 and #6 under tags v3 and v4. Before any weekly triage evaluated it, the run tripped K3 on both clauses and brought K5 to its limit (#213, #214, #219, #220, #222). Only 2 of 8 successful producer runs recorded an intake, and the first four failed in a row on 09-19. The run, and the work it prompted, exposed the defects below. Every trip traces to one of them:
+
+| Found | Cause                                                                                  | Fix          |
+| ----- | -------------------------------------------------------------------------------------- | ------------ |
+| 09-19 | Artifact storage hosts rotate across more than the 8 allowed origins                   | #219         |
+| 09-19 | GitHub records a run's and its attempt's `updated_at` up to 1 s apart                  | #219         |
+| 09-21 | A test fixture froze time while the artifact client judged expiry on the real clock    | #219, #220   |
+| 09-21 | The driver validated download origins with its own, narrower rule                      | #219         |
+| 09-21 | The reviewer's output schema was looser than its validator (`invalid_finding`)         | #222, tag v4 |
+| 09-22 | The intake's 2 s read deadline against a 1.2 to 1.8 s live recheck (`adapter_timeout`) | #225         |
+| 09-22 | A transient network error on a post-write read retained an operation lock              | #225         |
+
+What the phase measures is not yet contradicted. Both receipts for the seeded defect reported it (one was admitted), as did all 16 local replays, and the clean PR passed both of its reviews; K1 needs 20 findings. The fixture defect broke only the self-tests, never a cycle. Reviews cost $0.008 to $0.043 each, against K2's $0.75 mean. K4 recorded no events. The first cycle's `invalid_target` was a setup step, not a defect; the runbook's step 6 now covers it. The run's log, dispatch records, packet record and triage go to techrecon `docs/audits/merge-policy-shadow-20260919/` (decision 8).
+
+**Decision.** Run 1 is parked at its first triage. Stage A restarts once #225 has merged and both open holds are reconciled by manual control-repo commits (decision 7):
+
+- staging PR #5's retained lock rolls forward to `completed`, because its ledger already holds the receipt the lock recorded;
+- staging PR #6's `failed` hold is cleared.
+
+**Changes for the restart.** Where these differ from Sections 2 to 6, they govern.
+
+- **Scope.** The intake's read deadline (10 s) and a bounded retry of the controller's idempotent GitHub reads move into this phase. The terminal `failed` hold stays an accepted operational limit, counted as an intervention.
+- **K3** counts from the restart. Run 1's interventions and intake failures are recorded, not carried forward.
+- **K5** allows 4 more owner click-merges attributable to this phase after this amendment merges: #225, PR-C and 2 in reserve. The date stays 2026-10-31.
+- **Stage B gate (decision 1):** 5 consecutive Stage A cycles on v4 with no intervention, counted from the restart.
+- **Evidence.** Receipts count only under the current authority digest, so run 1's v3 receipts already do not. PR #5's v4 receipt counts once its lock is reconciled.
+- **Decision 7.** A `reconcile-intake` command stays deferred. If the restart reaches 2 interventions in any week, it is built before the next cycle.
