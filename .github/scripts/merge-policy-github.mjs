@@ -118,12 +118,40 @@ export function parseDocument(bytes) {
   }
 }
 
+// Reads are idempotent, so a GET retries a transient failure (no HTTP status,
+// or 5xx) after each of these delays. A definite 4xx is an answer (404 means
+// missing) and every write is attempted once, as before. Staging run
+// 35819981851: one transient network error on the post-write readback
+// retained an operation lock that needed manual reconciliation.
+export const GITHUB_GET_RETRY_DELAYS_MS = Object.freeze([1000, 3000, 9000]);
+const sleepSync = (milliseconds) =>
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+
 export class GitHubAPI {
-  constructor({ run = execFileSync, env = process.env } = {}) {
+  constructor({
+    run = execFileSync,
+    env = process.env,
+    sleep = sleepSync,
+    retryDelaysMs = GITHUB_GET_RETRY_DELAYS_MS,
+  } = {}) {
     this.run = run;
     this.env = env;
+    this.sleep = sleep;
+    this.retryDelaysMs = retryDelaysMs;
   }
-  call(method, endpoint, body, { pages = false } = {}) {
+  call(method, endpoint, body, options = {}) {
+    const delays = method === "GET" ? this.retryDelaysMs : [];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return this.callOnce(method, endpoint, body, options);
+      } catch (failure) {
+        const transient = failure.status === null || failure.status >= 500;
+        if (!transient || attempt >= delays.length) throw failure;
+        this.sleep(delays[attempt]);
+      }
+    }
+  }
+  callOnce(method, endpoint, body, { pages = false } = {}) {
     const args = ["api", "--method", method, endpoint];
     if (pages) args.push("--paginate", "--slurp");
     if (body !== undefined) args.push("--input", "-");
