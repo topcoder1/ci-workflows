@@ -61,6 +61,8 @@ rules="$tmp/repo/.github/risk-paths.yml"
 failed=0
 nl='
 '
+tab=$(printf '\t')
+cr=$(printf '\r')
 
 # run_classifier <file...> — sets $rc, $out (stdout) and $err (stderr).
 run_classifier() {
@@ -101,6 +103,24 @@ expect_fail_closed() {
   fi
 }
 
+# expect_err_lacks <needle> <description> — the message from the LAST run must
+# not contain <needle>. An EMPTY message fails too: a check that passes on
+# silence proves nothing.
+expect_err_lacks() {
+  case "$err" in
+    "")
+      echo "✗ $2 — no stderr to check: the classifier printed no message at all"
+      failed=1
+      ;;
+    *"$1"*)
+      echo "✗ $2 — stderr unexpectedly contains '$1':"
+      printf '%s\n' "$err" | sed 's/^/    /'
+      failed=1
+      ;;
+    *) echo "✓ $2" ;;
+  esac
+}
+
 # expect_class <want> <description> <file...> — exit 0, <want> on stdout, and
 # nothing at all on stderr.
 expect_class() {
@@ -116,14 +136,15 @@ expect_class() {
   fi
 }
 
-# place <location> <raw> — write a rules file with ordinary entries in all four
+# place <location> <raw> — write a rules file with ordinary entries in all five
 # locations, then append ONE more entry, <raw> exactly as written (it may span
 # lines), to <location>'s list. Every rejected entry shape below is placed in
-# all four: a gating class (sensitive), a safe class (safe_test), an exclusion
-# list (exclude.sensitive) and always_review.
+# all five: both gating classes (blocked, sensitive), a safe class (safe_test),
+# an exclusion list (exclude.sensitive) and always_review.
 place() {
-  local s="" t="" x="" a=""
+  local b="" s="" t="" x="" a=""
   case "$1" in
+    blocked) b="  - $2" ;;
     sensitive) s="  - $2" ;;
     safe_test) t="  - $2" ;;
     exclude.sensitive) x="    - $2" ;;
@@ -134,7 +155,9 @@ place() {
       ;;
   esac
   {
-    printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - 'cmd/**'"
+    printf '%s\n' "blocked:" "  - '**/.env*'"
+    if [ -n "$b" ]; then printf '%s\n' "$b"; fi
+    printf '%s\n' "sensitive:" "  - 'cmd/**'"
     if [ -n "$s" ]; then printf '%s\n' "$s"; fi
     printf '%s\n' "safe_test:" "  - 'tests/**'"
     if [ -n "$t" ]; then printf '%s\n' "$t"; fi
@@ -239,10 +262,10 @@ expect_fail_closed "two unknown keys are both named in one message" \
 
 # 4. An entry that ends with '/' or starts with './' or '/' fails closed in
 #    every location, and so does one whose brace alternative has that shape.
-for where in sensitive safe_test exclude.sensitive always_review; do
+for where in blocked sensitive safe_test exclude.sensitive always_review; do
   place "$where" "'infra/'"
   expect_fail_closed "'infra/' under $where: fails closed on the trailing '/'" \
-    "entry \"infra/\" (under '$where:') ends with '/'" "matches no changed path" "'infra/**'"
+    "entry \"infra/\" (under '$where:') ends with '/'" "and the entry matches no changed path" "'infra/**'"
   place "$where" "'infra/**/'"
   expect_fail_closed "'infra/**/' under $where: fails closed on the trailing '/'" \
     "entry \"infra/**/\" (under '$where:') ends with '/'" "matches no changed path"
@@ -258,24 +281,45 @@ for where in sensitive safe_test exclude.sensitive always_review; do
   place "$where" "'{./infra,terraform}/**'"
   expect_fail_closed "'{./infra,terraform}/**' under $where: fails closed on a brace alternative's leading './'" \
     "entry \"{./infra,terraform}/**\" (under '$where:') starts with './'" "brace alternative \"./infra/**\""
+  # Its other alternative, 'cmd/**', does match: the message must not say the
+  # entry matches nothing. (Independent review of this change.)
+  place "$where" "'{,./}cmd/**'"
+  expect_fail_closed "'{,./}cmd/**' under $where: fails closed on its dead './' alternative alone" \
+    "entry \"{,./}cmd/**\" (under '$where:') starts with './'" "and that alternative matches no changed path"
+  expect_err_lacks "the entry matches no changed path" "'{,./}cmd/**' under $where: the whole entry is not called dead"
 done
 
 # 5. A pattern wrapped over lines fails closed in every location, in each
 #    spelling that folds: plain, single- and double-quoted, a two-line '>-' or
-#    '>' block, and a double-quoted line that ends in an ESCAPED backslash
-#    ('\\'), which is a literal '\', not a line join.
-for where in sensitive safe_test exclude.sensitive always_review; do
+#    '>' block, a double-quoted line that ends in an ESCAPED backslash ('\\'),
+#    which is a literal '\', not a line join, and a double-quoted line join
+#    with a space or tab typed before its '\' — YAML keeps that whitespace, so
+#    the lines still join with a space between them. (Independent review.)
+for where in blocked sensitive safe_test exclude.sensitive always_review; do
   for raw in "cmd/**${nl}        internal/**" \
     "'cmd/**${nl}        internal/**'" \
     "\"cmd/**${nl}        internal/**\"" \
     ">-${nl}        cmd/**${nl}        internal/**" \
     ">${nl}        cmd/**${nl}        internal/**" \
-    "\"cmd/\\\\${nl}        internal/**\""; do
+    "\"cmd/\\\\${nl}        internal/**\"" \
+    "\"cmd/** \\${nl}        internal/**\"" \
+    "\"cmd/**${tab}\\${nl}        internal/**\""; do
     place "$where" "$raw"
     expect_fail_closed "a wrapped entry under $where: fails closed — $(printf '%s' "$raw" | tr '\n' '|')" \
       "(under '$where:') is wrapped over" "ONE pattern"
   done
 done
+# A lone carriage return is a line break as well, and no changed path holds
+# one: a '"\r"' escape, or a '|-' block in a file with a stray CR. #229's
+# line-break check looked for '\n' only. (Independent review of this change.)
+for where in blocked sensitive safe_test exclude.sensitive always_review; do
+  place "$where" '"cmd/**\rsrc/**"'
+  expect_fail_closed "a '\\r' escape under $where: fails closed on the line break" \
+    "(under '$where:') contains a line break" "matches no changed path"
+done
+place sensitive "|-${nl}        cmd/**${cr}        internal/**"
+expect_fail_closed "a '|-' block holding a lone CR fails closed on the line break" \
+  "(under 'sensitive:') contains a line break"
 # A flow list that is missing a comma folds its two entries into one.
 printf '%s\n' "blocked:" "  - '**/.env*'" "safe_deps: [go.sum" "  package-lock.json]" > "$rules"
 expect_fail_closed "a flow list missing a comma ('[go.sum' / 'package-lock.json]') fails closed" \
@@ -305,6 +349,22 @@ printf '%s\n' "blocked:" "  - '**/.env*'" "  - &cls sensitive" "sensitive:" "  -
   "exclude:" "  ? *cls" "  : - cmd/**" "      x_test.go" > "$rules"
 expect_fail_closed "a wrapped entry under an alias key inside exclude: fails closed" \
   "entry \"cmd/** x_test.go\" (under 'exclude.sensitive:') is wrapped over"
+# Through an alias to the whole exclude: map.
+printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - 'cmd/**'" "sensitive_deploy_gated: &ex" \
+  "  sensitive:" "    - cmd/**" "        x_test.go" "exclude: *ex" > "$rules"
+expect_fail_closed "an alias to a whole exclude: map holding a wrapped entry fails closed" \
+  "entry \"cmd/** x_test.go\" (under 'exclude.sensitive:') is wrapped over"
+# A key repeated through an alias key: yaml checks only plain keys for
+# duplicates, so toJS() silently keeps the LAST list and the first gate is
+# gone ('cmd/**' here). (Independent review of this change.)
+printf '%s\n' "blocked:" "  - '**/.env*'" "  - &k sensitive" "sensitive:" "  - 'cmd/**'" "*k :" \
+  "  - 'docs/**'" > "$rules"
+expect_fail_closed "a class repeated through an alias key fails closed" \
+  "the top level repeats the key \"sensitive\""
+printf '%s\n' "blocked:" "  - '**/.env*'" "  - &k sensitive" "sensitive:" "  - 'cmd/**'" "exclude:" \
+  "  sensitive:" "    - 'cmd/**/*_test.go'" "  *k :" "    - 'cmd/**/*.md'" > "$rules"
+expect_fail_closed "an exclude: class repeated through an alias key fails closed" \
+  "'exclude:' repeats the key \"sensitive\""
 # A '<<' merge key copies another mapping's keys into this one — with an
 # explicit '!!merge' tag, or under '%YAML 1.1' — so a class list would come
 # from elsewhere in the file. It is refused wherever classify.mjs reads keys:

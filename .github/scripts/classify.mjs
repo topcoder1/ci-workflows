@@ -324,19 +324,26 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // every exclude: list, through aliases — and rejects a plain or quoted entry
 // whose text spans lines, and a '>' block of more than one content line. Two
 // spellings fold nothing and stay legal: a double-quoted line ending in an
-// escaped '\', which joins the lines with nothing between them, and a
-// one-line '>' or '|' block. A '|' block of several lines keeps its line
-// breaks, which the entry pass rejects.
+// escaped '\' right after its last character, which joins the lines with
+// nothing between them, and a one-line '>-' or '|-' block. (A one-line '>' or
+// '|' block keeps a trailing newline, and a '|' block of several lines keeps
+// its line breaks; the entry pass rejects both.)
 const deref = (n) => (isAlias(n) ? n.resolve(doc) : n);
 function isWrapped(n) {
 	const text = source.slice(n.range[0], n.range[1]);
 	if (n.type === 'PLAIN' || n.type === 'QUOTE_SINGLE') return /[\r\n]/.test(text);
 	if (n.type === 'QUOTE_DOUBLE') {
 		// A '\' escapes the character after it, so a line break is joined only
-		// when an odd run of backslashes precedes it; '\\' is a literal '\'.
+		// when an odd run of backslashes precedes it; '\\' is a literal '\'. The
+		// join adds nothing between the lines — but a space or tab typed before
+		// the '\' (a shell continuation habit) is kept, so those lines still join
+		// with whitespace between them. (Independent review of this guard.)
 		for (let i = 0; i < text.length; i++) {
-			if (text[i] === '\\') i += text.startsWith('\r\n', i + 1) ? 2 : 1;
-			else if (text[i] === '\r' || text[i] === '\n') return true;
+			if (text[i] === '\\') {
+				const join = text.startsWith('\r\n', i + 1) ? 2 : text[i + 1] === '\n' || text[i + 1] === '\r' ? 1 : 0;
+				if (join && (text[i - 1] === ' ' || text[i - 1] === '\t')) return true;
+				i += join || 1;
+			} else if (text[i] === '\r' || text[i] === '\n') return true;
 		}
 		return false;
 	}
@@ -352,7 +359,14 @@ function isWrapped(n) {
 // explicit '!!merge <<', or any '<<' under '%YAML 1.1' — copies another
 // mapping's pairs in, so a class list could come from anywhere in the file; no
 // rules file needs one, and it is refused rather than traced.
+//
+// A key repeated THROUGH an alias key is refused too: yaml reports a repeated
+// plain key as an error, but compares only plain keys, so '*k :' repeating
+// 'sensitive:' parses cleanly and toJS() keeps the LAST list — the gate under
+// the first silently disappears. (Independent review of this guard; main has
+// the same hole.)
 function pairsOf(map, where) {
+	const seen = new Set();
 	return map.items.map(({ key, value }) => {
 		const k = deref(key);
 		if (isScalar(k) && typeof k.value === 'symbol') {
@@ -362,7 +376,16 @@ function pairsOf(map, where) {
 					`the checks that read each entry's source. Write the keys out in full.`
 			);
 		}
-		return [isScalar(k) ? k.value : k, value];
+		const name = isScalar(k) ? k.value : k;
+		if (seen.has(String(name))) {
+			fail(
+				`${RULES_PATH}: ${where} repeats the key ${JSON.stringify(String(name))} through an alias key — ` +
+					`yaml checks only plain keys for repeats, and the later list silently replaces the ` +
+					`earlier one, so every pattern under the first is dropped. Merge them under one key.`
+			);
+		}
+		seen.add(String(name));
+		return [name, value];
 	});
 }
 const entryLists = [];
@@ -387,8 +410,8 @@ for (const [where, list] of entryLists) {
 					`into ONE pattern (a single line break becomes a space), not the list it looks like, ` +
 					`so it matches none of the paths its lines name. Give each pattern its own "- '…'" ` +
 					`line; in a '[…]' flow list, separate the entries with commas. To break one long ` +
-					`pattern, end the line inside double quotes with '\\', which joins the lines with ` +
-					`nothing between them.`
+					`pattern, end the line inside double quotes with '\\' right after its last ` +
+					`character, which joins the lines with nothing between them.`
 			);
 		}
 	}
@@ -481,7 +504,7 @@ function checkEntry(p, where) {
 				`it ("- '…'").`
 		);
 	}
-	if (p.includes('\n')) {
+	if (/[\r\n]/.test(p)) {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') contains a line break — ` +
 				`changed paths arrive one per line, so none contains one and the entry matches no ` +
@@ -517,7 +540,8 @@ function checkEntry(p, where) {
 				`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') ${shape}` +
 					(s === p ? '' : ` (brace alternative ${JSON.stringify(s)})`) +
 					` — changed paths are the repo-relative paths of files, so none ends with '/' or ` +
-					`starts with '/' or './', and the entry matches no changed path. ` +
+					`starts with '/' or './', and ${s === p ? 'the entry' : 'that alternative'} matches no ` +
+					`changed path. ` +
 					(s.endsWith('/')
 						? `In CODEOWNERS and .gitignore 'infra/' means everything under infra/; here that is 'infra/**'.`
 						: s.startsWith('./')
