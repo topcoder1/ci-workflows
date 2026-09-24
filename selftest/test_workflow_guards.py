@@ -926,6 +926,24 @@ def actionlint_pin_problems(text):
             "reference(s); the one allowed is the get_actionlint step's URL, "
             "the only fetch the hash covers)"
         )
+    # Nor may an action bring its own: an annotation wrapper such as
+    # reviewdog/action-actionlint runs a binary the hash never saw without
+    # naming rhysd/actionlint (Codex review round 5). So no action named
+    # after actionlint anywhere, and only the checkout beside the verified
+    # binary in its own job.
+    for job_id, job in workflow["jobs"].items():
+        uses_all = [job.get("uses")] + [s.get("uses") for s in job.get("steps") or []]
+        for uses in filter(None, uses_all):
+            if "actionlint" in uses.lower():
+                problems.append(
+                    f"`uses: {uses}` in job {job_id} runs its own actionlint, "
+                    "which the pinned hash never checked"
+                )
+            elif job_id == "actionlint" and not uses.startswith("actions/checkout@"):
+                problems.append(
+                    f"`uses: {uses}` in the actionlint job: only actions/checkout "
+                    "may run there, beside the hash-checked binary"
+                )
     for name, var, pin in (
         ("actionlint_version", "ACTIONLINT_VERSION", ACTIONLINT_PIN_VERSION),
         ("actionlint_sha256", "ACTIONLINT_SHA256", ACTIONLINT_PIN_SHA256),
@@ -1046,6 +1064,22 @@ _ACTIONLINT_UNPINNED = {
             "      - name: Run actionlint\n",
         ),
         "outside the pinned download",
+    ),
+    # Codex review round 5: an annotation wrapper runs its own actionlint
+    # without ever naming rhysd/actionlint.
+    "an action that brings its own actionlint": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - uses: reviewdog/action-actionlint@v1\n\n      - name: Run actionlint\n",
+        ),
+        "runs its own actionlint",
+    ),
+    "another action in the actionlint job": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - uses: actions/setup-go@v6\n\n      - name: Run actionlint\n",
+        ),
+        "only actions/checkout may run there",
     ),
 }
 
