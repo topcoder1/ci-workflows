@@ -334,7 +334,9 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 const deref = (n) => (isAlias(n) ? n.resolve(doc) : n);
 function isWrapped(n) {
 	const text = source.slice(n.range[0], n.range[1]);
-	if (n.type === 'PLAIN' || n.type === 'QUOTE_SINGLE') return /[\r\n]/.test(text);
+	// yaml breaks a line only at '\n' (or '\r\n'); a lone CR is content, and a
+	// pattern holding one can match a real path. (ci-workflows#231's evidence.)
+	if (n.type === 'PLAIN' || n.type === 'QUOTE_SINGLE') return text.includes('\n');
 	if (n.type === 'QUOTE_DOUBLE') {
 		// An escaped line break ('\' ending the line) joins the lines with
 		// nothing between them; any other line break folds into whitespace. The
@@ -346,11 +348,11 @@ function isWrapped(n) {
 		// pattern fits on one line. This replaced a scan of the source for the
 		// characters before each '\' that the independent review and Codex round
 		// 5 each showed an escape could slip past.
-		return /[\r\n]/.test(text) && /[\s\u0085]/.test(n.value);
+		return text.includes('\n') && /[\s\u0085]/.test(n.value);
 	}
 	if (n.type === 'BLOCK_FOLDED') {
 		// The first line is the '>' header; the rest is the content.
-		return text.split(/\r\n|\r|\n/).slice(1).filter((l) => l.trim() !== '').length > 1;
+		return text.split(/\r?\n/).slice(1).filter((l) => l.trim() !== '').length > 1;
 	}
 	return false;
 }
@@ -508,7 +510,7 @@ function checkEntry(p, where) {
 				`it ("- '…'").`
 		);
 	}
-	if (/[\r\n]/.test(p)) {
+	if (p.includes('\n')) {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') contains a line break — ` +
 				`changed paths arrive one per line, so none contains one and the entry matches no ` +

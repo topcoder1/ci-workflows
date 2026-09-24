@@ -338,17 +338,20 @@ for where in blocked sensitive safe_test exclude.sensitive always_review; do
       "(under '$where:') is wrapped over" "ONE pattern"
   done
 done
-# A lone carriage return is a line break as well, and no changed path holds
-# one: a '"\r"' escape, or a '|-' block in a file with a stray CR. #229's
-# line-break check looked for '\n' only. (Independent review of this change.)
-for where in blocked sensitive safe_test exclude.sensitive always_review; do
-  place "$where" '"cmd/**\rsrc/**"'
-  expect_fail_closed "a '\\r' escape under $where: fails closed on the line break" \
-    "(under '$where:') contains a line break" "matches no changed path"
+# A carriage return INSIDE a pattern is no line break to anyone. Changed paths
+# are split on '\n' and trimmed only at the ends, git allows a CR in a file
+# name, and yaml keeps a raw CR as content in every scalar style, so such a
+# pattern can match a real path and is not dead — the evidence that declined
+# the same finding on ci-workflows#231. Every spelling must load, not be read
+# as wrapped, and match the internal-CR path it names. A CR at either end is
+# padding, which the dead-entry guard rejects. (An earlier revision of this
+# change rejected all of these.)
+for raw in "cmd/**${cr}src/**" "'cmd/**${cr}src/**'" "\"cmd/**${cr}src/**\"" '"cmd/**\rsrc/**"' \
+  "|-${nl}    cmd/**${cr}src/**" ">-${nl}    cmd/**${cr}src/**"; do
+  printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" "  - $raw" > "$rules"
+  expect_class sensitive "an internal CR ($(printf '%s' "$raw" | tr '\r\n' '^|')) loads and matches a path with one" \
+    "cmd/foo${cr}src/bar.go"
 done
-place sensitive "|-${nl}        cmd/**${cr}        internal/**"
-expect_fail_closed "a '|-' block holding a lone CR fails closed on the line break" \
-  "(under 'sensitive:') contains a line break"
 # The trade-off, pinned: a double-quoted entry with a REAL interior space,
 # written over lines with an escaped join, is refused too — it fits on one line.
 place sensitive "\"docs/My Notes/\\${nl}        **\""
