@@ -887,10 +887,12 @@ def _get_actionlint_steps(workflow):
 def actionlint_pin_problems(text):
     """Return why lint.yml's actionlint download is not pinned ([] = pinned).
 
-    The static half of the guard: no floating fetch anywhere, and the exact
-    hardcoded pins, read from the PARSED workflow (the workflow_call input
-    defaults and the get_actionlint step's own env). A text search is not
-    enough: `UNUSED_ACTIONLINT_SHA256: ...` still contains the binding.
+    The static half of the guard: no floating fetch anywhere, the pinned
+    URL inside the tested step as the only rhysd/actionlint reference, and
+    the exact hardcoded pins, read from the PARSED workflow (the
+    workflow_call input defaults and the get_actionlint step's own env). A
+    text search is not enough: `UNUSED_ACTIONLINT_SHA256: ...` still
+    contains the binding.
     Whether the step ENFORCES the hash is behavior, so that half executes
     the step instead (test_actionlint_download_fails_closed).
     """
@@ -903,24 +905,27 @@ def actionlint_pin_problems(text):
         for needle, why in ACTIONLINT_FLOATING_FETCHES.items()
         if needle in code
     ]
-    # The checked download must be the ONLY way actionlint gets in. Any other
-    # reference, a second fetch or a docker:// image, runs bytes the hash
-    # never saw.
-    stray = code.replace(ACTIONLINT_TARBALL_URL, "").count("rhysd/actionlint")
-    if stray:
-        problems.append(
-            f"rhysd/actionlint is referenced {stray} time(s) outside the pinned "
-            "download; the hash covers only that one"
-        )
     workflow = yaml.safe_load(text)
     # PyYAML reads a bare `on:` key as the boolean True (YAML 1.1).
     inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
     steps = _get_actionlint_steps(workflow)
-    step_env = {}
+    step_env, step_run = {}, ""
     if len(steps) == 1:
         step_env = steps[0].get("env") or {}
+        step_run = steps[0].get("run") or ""
     else:
         problems.append("lint.yml needs exactly one step with id get_actionlint")
+    # The checked download must be the ONLY way actionlint gets in: one
+    # reference in the whole file, and it is the URL the tested step fetches.
+    # Any other, even a second fetch of that same URL (Codex review round 4)
+    # or a docker:// image, runs bytes the hash never saw.
+    refs = code.count("rhysd/actionlint")
+    if refs != 1 or ACTIONLINT_TARBALL_URL not in step_run:
+        problems.append(
+            f"rhysd/actionlint is referenced outside the pinned download ({refs} "
+            "reference(s); the one allowed is the get_actionlint step's URL, "
+            "the only fetch the hash covers)"
+        )
     for name, var, pin in (
         ("actionlint_version", "ACTIONLINT_VERSION", ACTIONLINT_PIN_VERSION),
         ("actionlint_sha256", "ACTIONLINT_SHA256", ACTIONLINT_PIN_SHA256),
@@ -1022,6 +1027,23 @@ _ACTIONLINT_UNPINNED = {
             "${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=",
             'docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest'
             " -color -shellcheck=",
+        ),
+        "outside the pinned download",
+    ),
+    # Codex review round 4: the SAME URL, fetched again by another step with
+    # no hash check, over the verified binary.
+    "a second, unchecked fetch of the pinned URL": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - name: Refresh actionlint\n"
+            "        env:\n"
+            '          ACTIONLINT_VERSION: "1.7.11"\n'
+            '        run: curl -fsSL "https://github.com/rhysd/actionlint/releases'
+            "/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}"
+            '_linux_amd64.tar.gz" | tar -xz -C "$RUNNER_TEMP/actionlint" actionlint\n'
+            "        shell: bash\n"
+            "\n"
+            "      - name: Run actionlint\n",
         ),
         "outside the pinned download",
     ),
