@@ -409,6 +409,25 @@ def test_zero_expected_fails(wheelhouse):
     assert rc != 0, out
 
 
+def test_absolute_gate_path_fails(wheelhouse):
+    """Repo-root-relative only: an absolute path could run a file outside the
+    checkout that the PR never touched (Codex P2)."""
+    rc, out = _run_action(
+        wheelhouse,
+        files=f"/tmp/{GATE_DIR}/test_delete_pins.py\n{GATE_DIR}/test_delete_sites_gated.py",
+    )
+    assert rc != 0 and "absolute" in out, out
+
+
+def test_dotdot_gate_path_fails(wheelhouse):
+    """A `..` segment could escape the checkout, same as an absolute path."""
+    rc, out = _run_action(
+        wheelhouse,
+        files=f"{GATE_DIR}/../regression/test_delete_pins.py\n{GATE_DIR}/test_delete_sites_gated.py",
+    )
+    assert rc != 0 and "'..'" in out, out
+
+
 def _executable_lines(run: str) -> str:
     """The run: block with shell comments removed, so a load-bearing flag left
     in a comment after being dropped from the command does not satisfy the

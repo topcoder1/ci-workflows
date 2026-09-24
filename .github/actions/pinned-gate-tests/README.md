@@ -128,8 +128,9 @@ Bumping the pin is a deliberate PR.
 
 ## Fail-closed contract
 
-Every failure path exits non-zero: empty/invalid inputs, files spanning two
-directories, a missing or deleted gate file, a gate-directory package, a
-name-shadow of a gate or helper module, a pytest exit of 1/2/4/5, and any count
-other than `expected`. Callers must treat a failure as a hard block — that is
-the whole point.
+Every failure path exits non-zero: empty/invalid inputs, a non-`.py` path, an
+absolute path or one with a `..` segment (repo-root-relative only), files
+spanning two directories, a missing or deleted gate file, a gate-directory
+package, a name-shadow of a gate or helper module, a pytest exit of 1/2/4/5,
+and any count other than `expected`. Callers must treat a failure as a hard
+block — that is the whole point.

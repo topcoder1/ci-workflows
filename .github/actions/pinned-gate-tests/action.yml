@@ -114,6 +114,17 @@ runs:
             *.py) ;;
             *) echo "::error::pinned-gate-tests: not a .py file: $f"; exit 1 ;;
           esac
+          # Repo-root-relative only: an absolute path or a `..` segment could
+          # point a "gate" at a file outside the checkout (one the PR does not
+          # touch), which would run instead of the real gate. The files input
+          # is caller-controlled and human-gated, but enforce the documented
+          # contract and fail closed.
+          case "$f" in
+            /*) echo "::error::pinned-gate-tests: gate path must be repo-root-relative, not absolute: $f"; exit 1 ;;
+          esac
+          case "/$f/" in
+            */../*) echo "::error::pinned-gate-tests: gate path must not contain a '..' segment: $f"; exit 1 ;;
+          esac
           if [ ! -f "$f" ]; then
             echo "::error::pinned-gate-tests: gate file not found: $f"
             exit 1
