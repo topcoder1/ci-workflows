@@ -39,6 +39,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_classify_list_shape.sh",
     "selftest/test_classify_negation_guard.sh",
     "selftest/test_classify_nocase.sh",
+    "selftest/test_classify_rules_shape_guard.sh",
     "selftest/test_claude_review_cost_guardrails.sh",
     "selftest/test_claude_review_lost_findings_guard.sh",
     "selftest/test_claude_review_max_turns_type.sh",
