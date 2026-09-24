@@ -321,9 +321,10 @@ for (const cls of [...PATTERN_CLASSES, 'always_review']) {
 // be told apart from a real interior space ('docs/My Notes/**'), which is why
 // the entry pass below cannot catch it: this guard reads the SOURCE of every
 // entry in the locations that pass covers — every class, always_review and
-// every exclude: list, through aliases — and rejects a plain or quoted entry
-// whose text spans lines, and a '>' block of more than one content line. Two
-// spellings fold nothing and stay legal: a double-quoted line ending in an
+// every exclude: list, through aliases — and rejects a plain or single-quoted
+// entry whose text spans lines, a double-quoted one written over lines whose
+// value holds any whitespace, and a '>' block of more than one content line.
+// Two spellings fold nothing and stay legal: a double-quoted line ending in an
 // escaped '\' right after its last character, which joins the lines with
 // nothing between them, and a one-line '>-' or '|-' block. (A one-line '>' or
 // '|' block keeps a trailing newline, and a '|' block of several lines keeps
@@ -333,26 +334,17 @@ function isWrapped(n) {
 	const text = source.slice(n.range[0], n.range[1]);
 	if (n.type === 'PLAIN' || n.type === 'QUOTE_SINGLE') return /[\r\n]/.test(text);
 	if (n.type === 'QUOTE_DOUBLE') {
-		// A '\' escapes the character after it, so a line break is joined only
-		// when an odd run of backslashes precedes it; '\\' is a literal '\'. The
-		// join adds nothing between the lines — but a space or tab typed before
-		// the '\' (a shell continuation habit) is kept, so those lines still join
-		// with whitespace between them. (Independent review of this guard.) A run
-		// of whitespace that starts a line is that line's indentation, which YAML
-		// strips, so a join chained over a line holding only '\' is legal.
-		// (Codex review round 4.)
-		for (let i = 0; i < text.length; i++) {
-			if (text[i] === '\\') {
-				const join = text.startsWith('\r\n', i + 1) ? 2 : text[i + 1] === '\n' || text[i + 1] === '\r' ? 1 : 0;
-				if (join) {
-					let j = i - 1;
-					while (text[j] === ' ' || text[j] === '\t') j--;
-					if (j < i - 1 && text[j] !== '\n' && text[j] !== '\r') return true;
-				}
-				i += join || 1;
-			} else if (text[i] === '\r' || text[i] === '\n') return true;
-		}
-		return false;
+		// An escaped line break ('\' ending the line) joins the lines with
+		// nothing between them; any other line break folds into whitespace. The
+		// VALUE tells the two apart however that whitespace was spelled — typed
+		// before the '\', or an escape such as '\t', '\x20', '\_' or '\N' (U+0085,
+		// which \s omits) on either side of it — so a double-quoted entry written
+		// over lines is rejected when its value holds any. A real interior space
+		// written over lines is refused with it; the fleet has none, and such a
+		// pattern fits on one line. This replaced a scan of the source for the
+		// characters before each '\' that the independent review and Codex round
+		// 5 each showed an escape could slip past.
+		return /[\r\n]/.test(text) && /[\s\u0085]/.test(n.value);
 	}
 	if (n.type === 'BLOCK_FOLDED') {
 		// The first line is the '>' header; the rest is the content.
@@ -367,11 +359,11 @@ function isWrapped(n) {
 // mapping's pairs in, so a class list could come from anywhere in the file; no
 // rules file needs one, and it is refused rather than traced.
 //
-// A key repeated THROUGH an alias key is refused too: yaml reports a repeated
-// plain key as an error, but compares only plain keys, so '*k :' repeating
-// 'sensitive:' parses cleanly and toJS() keeps the LAST list — the gate under
-// the first silently disappears. (Independent review of this guard; main has
-// the same hole.)
+// A key repeated in a way yaml does not report is refused too. yaml errors on
+// a repeated key only when both are the same scalar, so '*k :' repeating
+// 'sensitive:' (or 1 beside "1") parses cleanly, and toJS() keeps the LAST
+// list — the gate under the first silently disappears. (Independent review of
+// this guard; main has the same hole.)
 function pairsOf(map, where) {
 	const seen = new Set();
 	return map.items.map(({ key, value }) => {
@@ -386,9 +378,10 @@ function pairsOf(map, where) {
 		const name = isScalar(k) ? k.value : k;
 		if (seen.has(String(name))) {
 			fail(
-				`${RULES_PATH}: ${where} repeats the key ${JSON.stringify(String(name))} through an alias key — ` +
-					`yaml checks only plain keys for repeats, and the later list silently replaces the ` +
-					`earlier one, so every pattern under the first is dropped. Merge them under one key.`
+				`${RULES_PATH}: ${where} repeats the key ${JSON.stringify(String(name))} — yaml reports a ` +
+					`repeated key only when both are the same scalar, not an alias key ('*k :') or a ` +
+					`number beside a string (1 and "1"), and the later list silently replaces the earlier ` +
+					`one, so every pattern under the first is dropped. Merge them under one key.`
 			);
 		}
 		seen.add(String(name));
@@ -418,7 +411,9 @@ for (const [where, list] of entryLists) {
 					`so it matches none of the paths its lines name. Give each pattern its own "- '…'" ` +
 					`line; in a '[…]' flow list, separate the entries with commas. To break one long ` +
 					`pattern, end the line inside double quotes with '\\' right after its last ` +
-					`character, which joins the lines with nothing between them.`
+					`character, which joins the lines with nothing between them; a double-quoted entry ` +
+					`written over several lines must hold no whitespace at all, so a pattern with a ` +
+					`real space in it goes on one line.`
 			);
 		}
 	}

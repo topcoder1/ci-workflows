@@ -28,8 +28,9 @@
 #    space: '- cmd/**' + an indented 'internal/**' on the next line is ONE
 #    pattern, 'cmd/** internal/**', which matches neither path. The value
 #    cannot be told apart from a real interior space ('docs/My Notes/**'), so
-#    the check reads the SOURCE: a plain or quoted entry whose text spans lines
-#    is rejected, as is a '>' block of more than one content line. An escaped
+#    the check reads the SOURCE: a plain or single-quoted entry whose text spans
+#    lines is rejected, as is a double-quoted one written over lines whose value
+#    holds whitespace, and a '>' block of more than one content line. An escaped
 #    line join ('\' at the end of a double-quoted line) folds nothing and stays
 #    legal; a '|' block keeps its line breaks, which the dead-entry guard
 #    already rejects. The walk reads keys the way yaml's toJS() does, through
@@ -304,7 +305,11 @@ done
 #    which is a literal '\', not a line join, and a double-quoted line join
 #    with a space or tab typed before its '\' — YAML keeps that whitespace, so
 #    the lines still join with a space between them (independent review) —
-#    and so does an ESCAPED space ('\ '), even on a continuation line.
+#    and so does an ESCAPED space ('\ '), even on a continuation line, and
+#    whitespace spelled as an escape ('\x20', '\t', '\_', '\N') on either side
+#    of the join. A double-quoted entry written over several lines is judged on
+#    its VALUE: any whitespace in it means a line folded, however it was spelled.
+#    (Independent review and Codex review round 5 of this change.)
 for where in blocked sensitive safe_test exclude.sensitive always_review; do
   for raw in "cmd/**${nl}        internal/**" \
     "'cmd/**${nl}        internal/**'" \
@@ -315,7 +320,12 @@ for where in blocked sensitive safe_test exclude.sensitive always_review; do
     "\"cmd/** \\${nl}        internal/**\"" \
     "\"cmd/**${tab}\\${nl}        internal/**\"" \
     "\"cmd/**\\ \\${nl}        internal/**\"" \
-    "\"cmd/\\${nl}        \\ \\${nl}        internal/**\""; do
+    "\"cmd/\\${nl}        \\ \\${nl}        internal/**\"" \
+    "\"cmd/**\\x20\\${nl}        internal/**\"" \
+    "\"cmd/**\\t\\${nl}        internal/**\"" \
+    "\"cmd/**\\_\\${nl}        internal/**\"" \
+    "\"cmd/**\\N\\${nl}        internal/**\"" \
+    "\"cmd/**\\${nl}        \\ internal/**\""; do
     place "$where" "$raw"
     expect_fail_closed "a wrapped entry under $where: fails closed — $(printf '%s' "$raw" | tr '\n' '|')" \
       "(under '$where:') is wrapped over" "ONE pattern"
@@ -332,6 +342,11 @@ done
 place sensitive "|-${nl}        cmd/**${cr}        internal/**"
 expect_fail_closed "a '|-' block holding a lone CR fails closed on the line break" \
   "(under 'sensitive:') contains a line break"
+# The trade-off, pinned: a double-quoted entry with a REAL interior space,
+# written over lines with an escaped join, is refused too — it fits on one line.
+place sensitive "\"docs/My Notes/\\${nl}        **\""
+expect_fail_closed "a double-quoted entry with a real space, written over lines, fails closed" \
+  "entry \"docs/My Notes/**\" (under 'sensitive:') is wrapped over" "must hold no whitespace"
 # A flow list that is missing a comma folds its two entries into one.
 printf '%s\n' "blocked:" "  - '**/.env*'" "safe_deps: [go.sum" "  package-lock.json]" > "$rules"
 expect_fail_closed "a flow list missing a comma ('[go.sum' / 'package-lock.json]') fails closed" \
@@ -377,6 +392,12 @@ printf '%s\n' "blocked:" "  - '**/.env*'" "  - &k sensitive" "sensitive:" "  - '
   "  sensitive:" "    - 'cmd/**/*_test.go'" "  *k :" "    - 'cmd/**/*.md'" > "$rules"
 expect_fail_closed "an exclude: class repeated through an alias key fails closed" \
   "'exclude:' repeats the key \"sensitive\""
+# No alias needs to be involved: '1' beside '"1"' is a repeat to toJS() too,
+# and the message must not claim an alias. (Independent review of this change.)
+printf '%s\n' "blocked:" "  - '**/.env*'" "exclude:" "  1:" "    - 'a/**'" "  \"1\":" "    - 'b/**'" > "$rules"
+expect_fail_closed "'1:' beside '\"1\":' in exclude: fails closed as a repeat" \
+  "'exclude:' repeats the key \"1\""
+expect_err_lacks "through an alias key" "'1:' beside '\"1\":': the message does not claim an alias"
 # A '<<' merge key copies another mapping's keys into this one — with an
 # explicit '!!merge' tag, or under '%YAML 1.1' — so a class list would come
 # from elsewhere in the file. It is refused wherever classify.mjs reads keys:
@@ -456,6 +477,7 @@ safe_deps: ['go.sum',
   'package-lock.json']
 trivial:
   - docs/My Notes/**
+  - "docs/Team Notes/**"
 YAML
 for endings in LF CRLF; do
   if [ "$endings" = CRLF ]; then crlf "$rules"; fi
@@ -467,6 +489,7 @@ for endings in LF CRLF; do
   expect_class sensitive "$endings: a '.github/…' entry is not a './' entry" .github/actions/setup/action.yml
   expect_class safe_deps "$endings: a flow list spanning lines with its comma matches (package-lock.json)" package-lock.json
   expect_class trivial "$endings: a plain entry with an interior space matches" "docs/My Notes/a.md"
+  expect_class trivial "$endings: a one-line double-quoted entry with an interior space matches" "docs/Team Notes/a.md"
   expect_class blocked "$endings: an entry with a trailing comment matches (.env)" .env
 done
 
