@@ -262,8 +262,9 @@ jobs:
                and for a matched file listed there, read both paths together
                with \`git diff --ignore-submodules=none --find-renames=10% origin/${BASE_REF}...HEAD -- <old> <new>\`
                and verify the file at both paths. A move that rewrites most
-               of the file may not be listed there, so for a matched file the
-               PR deletes, also list the files the PR adds with
+               of the file may not be listed there, so for every matched file
+               at a path the PR removes, whether or not the listing pairs it,
+               also list the files the PR adds with
                \`git diff --ignore-submodules=none --no-renames --name-status --diff-filter=A origin/${BASE_REF}...HEAD\`
                and verify any that its code moved to.
             2. Identify the threat class (auth bypass, secret leak, migration data loss, billing logic change, etc.).

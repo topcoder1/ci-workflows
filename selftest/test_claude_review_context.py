@@ -230,7 +230,9 @@ class ReviewContextTests(unittest.TestCase):
         )
         (self.repo / ".gitmodules").write_text(section)
         self.git("add", ".gitmodules")
-        self.git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib")
+        self.git(
+            "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib"
+        )
         self.git("commit", "-qm", "base has a submodule")
         self.base = self.git("rev-parse", "HEAD").strip()
         (self.repo / ".gitmodules").write_text(section + "\tignore = all\n")

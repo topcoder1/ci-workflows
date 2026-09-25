@@ -132,7 +132,9 @@ def stage(repo, files):
             if (repo / path).is_file():
                 (repo / path).unlink()
         elif isinstance(content, Gitlink):
-            git(repo, "update-index", "--add", "--cacheinfo", f"160000,{content},{path}")
+            git(
+                repo, "update-index", "--add", "--cacheinfo", f"160000,{content},{path}"
+            )
         else:
             (repo / path).parent.mkdir(parents=True, exist_ok=True)
             (repo / path).write_text(content)
@@ -172,9 +174,7 @@ def pr_checkout(root, base_files, pr_files):
 @pytest.fixture
 def checkout(tmp_path):
     """The PR moves OLD to NEW and edits it."""
-    return pr_checkout(
-        tmp_path, {OLD: SOURCE}, {OLD: None, NEW: SOURCE + "# moved\n"}
-    )
+    return pr_checkout(tmp_path, {OLD: SOURCE}, {OLD: None, NEW: SOURCE + "# moved\n"})
 
 
 @pytest.fixture
