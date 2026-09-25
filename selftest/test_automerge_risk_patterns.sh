@@ -169,11 +169,14 @@ typo_control() {
 
 echo ""
 echo "Name-gated files — must match the SHIPPED list, and NOT a copy with the name misspelled:"
-typo_control compose cmopose 4 compose.yaml compose.override.yaml \
-  services/api/compose.yaml services/api/docker-compose.yml \
-  services/api/docker-compose.yaml \
+# One probe per corpus case these lines exist for, so narrowing a shipped line
+# to drop any of them (a .yml, a dotless suffix, an empty stem) fails here.
+typo_control compose cmopose 4 compose.yaml compose.yml compose.override.yaml \
+  compose.prod.yml services/api/compose.yaml services/api/docker-compose.yml \
+  services/api/docker-compose.yaml services/api/docker-compose-dev.yml \
   monitoring/docker-compose.monitoring.yml tests/integration/docker-compose.yml
-typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile
+typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile \
+  tests/.Dockerfile
 typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
 
 # --- main.go opt-out (risk_main_go=false) ---

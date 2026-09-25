@@ -176,6 +176,7 @@ RISKY: compose.override.yaml
 RISKY: compose.prod.yml
 RISKY: services/api/compose.yaml
 RISKY: services/api/docker-compose.yml
+RISKY: services/api/docker-compose-dev.yml
 RISKY: monitoring/docker-compose.monitoring.yml
 RISKY: tests/integration/docker-compose.yml
 RISKY: api.Dockerfile
