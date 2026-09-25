@@ -262,6 +262,21 @@ arbitrary helper scripts; that's a different kind of repo.
   that did not list it yet; npm skipped the optional dependency silently
   ("added 1 package") and the next step died on
   `Missing optional dependency @openai/codex-linux-x64`.
+- `test_review_lanes_base_attributes.py` — every review lane whose model
+  runs git in the PR checkout (the verifier, the adversarial pass, Codex)
+  must give that model `GIT_ATTR_SOURCE=<base sha>`, so `.gitattributes`
+  comes from the base: a path the PR itself marks `binary` or `-diff` still
+  reaches the model in full, and the base's own `-diff` keeps working.
+  Matches the claude-code-action steps whose allowlist grants git or a shell
+  (or that have none) and the steps running `codex review`/`exec` against a
+  hardcoded lane list; runs `git diff`, `git log -p` and `git show` in a
+  fixture merge checkout under each lane's model-step environment (negative
+  controls: the variable dropped, misspelled, or set to the head sha or the
+  base branch name); renders the verifier prompt and runs its diff command;
+  runs the Codex review step against a stub `codex`. Background: #244 closes the same gap in
+  `claude-review.yml`'s context step. GitHub's own diff (`gh pr diff`, the
+  files API) ignores `.gitattributes`, so a lane reading only that diff
+  needs nothing.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

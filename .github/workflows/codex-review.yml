@@ -214,6 +214,17 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          # Attributes come from the base commit, never from the PR. Codex
+          # reads the change with its own git commands in this checkout, and
+          # git takes .gitattributes from the checkout: a path the PR itself
+          # marks `binary` or `-diff` (that .gitattributes included) would
+          # reach Codex only as "Binary files ... differ". Codex's shell tool
+          # inherits this variable (shell_environment_policy defaults to
+          # inherit = "all"), so every git command it runs reads the base's
+          # attributes instead. #244 makes the same fix in claude-review.yml
+          # with `git --attr-source`. Pinned by
+          # selftest/test_review_lanes_base_attributes.py.
+          GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Make sure the base ref is fetched so Codex can diff against it.
