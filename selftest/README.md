@@ -144,6 +144,18 @@ arbitrary helper scripts; that's a different kind of repo.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
+- `test_verifier_changed_paths_renames.py` — runs
+  `verifier-on-high-risk.yml`'s shipped "Compute PR diff" step in a fixture
+  PR checkout where the PR renames a file: the path list the high-risk
+  classifier reads must name the old path as well as the new one. `git diff`
+  detects renames by default, and `--name-only` then prints only the new
+  path, so the step passes `--no-renames`. The classifier, fed the central
+  high-risk list by the shipped `extract-high-risk-globs` action, must then
+  match the old path. Negative control: the step without the flag lists only
+  the new path, and nothing matches. The verifier's per-file diff of that old
+  path shows only a deletion, so the test also renders the shipped prompt and
+  runs the commands it gives the model to list the PR's renames and read both
+  paths together; they must show the rename and the edit.
 - `test_prettier_symlink_filter.sh` — extracts the symlink filter from
   `lint.yml` / `prettier-autofix.yml`, runs it against a fixture tree,
   and asserts the two copies haven't drifted.
