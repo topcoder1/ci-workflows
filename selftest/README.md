@@ -155,7 +155,17 @@ arbitrary helper scripts; that's a different kind of repo.
   the new path, and nothing matches. The verifier's per-file diff of that old
   path shows only a deletion, so the test also renders the shipped prompt and
   runs the commands it gives the model to list the PR's renames and read both
-  paths together; they must show the rename and the edit.
+  paths together; they must show the rename and the edit. git also applies a
+  submodule's `ignore` setting from the checkout's `.gitmodules` (the PR's
+  own copy) to diffs between commits, so the step and every prompt command
+  pass `--ignore-submodules=none`: a submodule change the PR's `.gitmodules`
+  ignores must be listed, matched and shown to the model, and a submodule
+  the PR moves must be followed to its new path (negative controls: each
+  command without the flag). A move that rewrites most of a file falls under
+  git's default 50% similarity: the prompt's rename listing, at 10%, must
+  pair a move that kept two of ten functions (negative control: the default
+  threshold), and its added-files listing must name the new path of a move
+  that kept nothing.
 - `test_prettier_symlink_filter.sh` — extracts the symlink filter from
   `lint.yml` / `prettier-autofix.yml`, runs it against a fixture tree,
   and asserts the two copies haven't drifted.
