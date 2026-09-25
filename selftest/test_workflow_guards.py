@@ -5,11 +5,17 @@ repo's own PRs, so wrapping the .sh selftests here is what makes them
 CI-enforced rather than run-manually-only documentation.
 """
 
+import hashlib
+import io
+import os
 import pathlib
 import re
 import subprocess
+import tarfile
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -842,6 +848,474 @@ def test_lint_ruff_version_is_pinned():
         "the step must reject non-exact ruff_version values; a caller passing "
         "`0.15.*` would float to latest-matching while still looking pinned"
     )
+
+
+# The actionlint download is pinned by version AND by the release tarball's
+# SHA-256. Both pins are hardcoded here, not read back from lint.yml: a check
+# that took its expectations from the file under test would follow an edit
+# that re-floats the download, and pass. A deliberate bump edits these two
+# lines too, in the same PR.
+ACTIONLINT_PIN_VERSION = "1.7.12"
+ACTIONLINT_PIN_SHA256 = (
+    "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+)
+# The one hash-checked way in, as the step spells it.
+ACTIONLINT_TARBALL_URL = (
+    "https://github.com/rhysd/actionlint/releases/download/"
+    "v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+)
+# Fetches that resolve to something other than one fixed, checked artifact.
+ACTIONLINT_FLOATING_FETCHES = {
+    "raw.githubusercontent.com/rhysd/actionlint/": (
+        "fetches from a git ref of the actionlint repo: /main/ moves, and even "
+        "a tag can be re-pointed (its releases are not immutable)"
+    ),
+    "download-actionlint.bash": (
+        "runs upstream's installer, which installs the latest release unless "
+        "given a version, and verifies no checksum"
+    ),
+    "/releases/latest": "resolves to whichever release is newest",
+}
+
+
+def _get_actionlint_steps(workflow):
+    return [
+        s
+        for s in workflow["jobs"]["actionlint"]["steps"]
+        if s.get("id") == "get_actionlint"
+    ]
+
+
+def actionlint_pin_problems(text):
+    """Return why lint.yml's actionlint download is not pinned ([] = pinned).
+
+    The static half of the guard: no floating fetch anywhere, the pinned
+    URL inside the tested step as the only rhysd/actionlint reference, and
+    the exact hardcoded pins, read from the PARSED workflow (the
+    workflow_call input defaults and the get_actionlint step's own env). A
+    text search is not enough: `UNUSED_ACTIONLINT_SHA256: ...` still
+    contains the binding.
+    Whether the step ENFORCES the hash is behavior, so that half executes
+    the step instead (test_actionlint_download_fails_closed).
+    """
+    # Comments go first, so prose describing the old fetch cannot trip this.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    problems = [
+        f"{needle}: {why}"
+        for needle, why in ACTIONLINT_FLOATING_FETCHES.items()
+        if needle in code
+    ]
+    workflow = yaml.safe_load(text)
+    # PyYAML reads a bare `on:` key as the boolean True (YAML 1.1).
+    inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
+    steps = _get_actionlint_steps(workflow)
+    step_env, step_run = {}, ""
+    if len(steps) == 1:
+        step_env = steps[0].get("env") or {}
+        step_run = steps[0].get("run") or ""
+    else:
+        problems.append("lint.yml needs exactly one step with id get_actionlint")
+    # The checked download must be the ONLY way actionlint gets in: one
+    # reference in the whole file, and it is the URL the tested step fetches.
+    # Any other, even a second fetch of that same URL (Codex review round 4)
+    # or a docker:// image, runs bytes the hash never saw.
+    refs = code.count("rhysd/actionlint")
+    if refs != 1 or ACTIONLINT_TARBALL_URL not in step_run:
+        problems.append(
+            f"rhysd/actionlint is referenced outside the pinned download ({refs} "
+            "reference(s); the one allowed is the get_actionlint step's URL, "
+            "the only fetch the hash covers)"
+        )
+    # Nor may an action bring its own: an annotation wrapper such as
+    # reviewdog/action-actionlint runs a binary the hash never saw without
+    # naming rhysd/actionlint (Codex review round 5). So no action named
+    # after actionlint anywhere, and only the checkout beside the verified
+    # binary in its own job.
+    for job_id, job in workflow["jobs"].items():
+        uses_all = [job.get("uses")] + [s.get("uses") for s in job.get("steps") or []]
+        for uses in filter(None, uses_all):
+            if "actionlint" in uses.lower():
+                problems.append(
+                    f"`uses: {uses}` in job {job_id} runs its own actionlint, "
+                    "which the pinned hash never checked"
+                )
+            elif job_id == "actionlint" and not uses.startswith("actions/checkout@"):
+                problems.append(
+                    f"`uses: {uses}` in the actionlint job: only actions/checkout "
+                    "may run there, beside the hash-checked binary"
+                )
+    # And what runs must be what was verified: the actionlint job invokes the
+    # get_actionlint output, and no run step in any job runs an actionlint of
+    # its own. The independent review of this guard got `pipx run
+    # actionlint-py`, a brew install and a pip install past every rule above.
+    # This matches the LITERAL expression: routing the path through `env:`
+    # (say ACTIONLINT_BIN) runs the same binary but trips both messages, so a
+    # refactor like that updates this rule too.
+    exe = "${{ steps.get_actionlint.outputs.executable }}"
+    invoked = False
+    for job_id, job in workflow["jobs"].items():
+        for step in job.get("steps") or []:
+            if step.get("id") == "get_actionlint" or "run" not in step:
+                continue
+            body = "\n".join(
+                line
+                for line in step["run"].splitlines()
+                if not line.lstrip().startswith("#")
+            )
+            if job_id == "actionlint":
+                invoked |= exe in body
+            if "actionlint" in body.replace(exe, "").lower():
+                problems.append(
+                    f"step {step.get('name')!r} in job {job_id} runs an actionlint "
+                    f"other than {exe}"
+                )
+    if not invoked:
+        problems.append(f"no step runs the verified binary ({exe})")
+    for name, var, pin in (
+        ("actionlint_version", "ACTIONLINT_VERSION", ACTIONLINT_PIN_VERSION),
+        ("actionlint_sha256", "ACTIONLINT_SHA256", ACTIONLINT_PIN_SHA256),
+    ):
+        default = (inputs.get(name) or {}).get("default")
+        if default != pin:
+            problems.append(f"input {name} must default to {pin!r}, not {default!r}")
+        # The same literal as the step's fallback: on this repo's own
+        # self-test events the `inputs` context is null.
+        binding = f"${{{{ inputs.{name} || '{pin}' }}}}"
+        if step_env.get(var) != binding:
+            problems.append(
+                f"{var} must be bound in the get_actionlint step's env as `{binding}`"
+            )
+    return problems
+
+
+def test_lint_actionlint_is_pinned_by_version_and_checksum():
+    """lint.yml must install one fixed, checksum-verified actionlint.
+
+    Until 2026-09-24 the step ran upstream's download-actionlint.bash,
+    fetched from rhysd/actionlint's main branch: whatever that branch said,
+    installing whatever it called the latest release, verifying nothing.
+    lint.yml is a reusable the fleet calls @main, so an upstream compromise
+    or a breaking actionlint release would have run in every caller's lint
+    job at once.
+
+    The version alone is not the pin. actionlint's releases are not
+    immutable, so a tag or an asset can be replaced under an unchanged
+    version; the tarball's SHA-256 is what freezes the bytes. The version is
+    exact x.y.z like ruff_version (test_lint_ruff_version_is_pinned), and an
+    override must bring its own hash.
+    """
+    problems = actionlint_pin_problems((WORKFLOWS_DIR / "lint.yml").read_text())
+    assert not problems, "lint.yml's actionlint download is not pinned:\n  " + (
+        "\n  ".join(problems)
+    )
+
+
+# The pre-pin step, verbatim from lint.yml before 2026-09-24.
+_ACTIONLINT_PRE_PIN_STEP = (
+    "      - name: Download actionlint\n"
+    "        id: get_actionlint\n"
+    "        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint"
+    "/main/scripts/download-actionlint.bash)\n"
+    "        shell: bash\n"
+)
+
+
+def _actionlint_step(text):
+    start = text.index("      - name: Download actionlint\n")
+    return text[start : text.index("      - name: Run actionlint\n", start)]
+
+
+# Each shape: (an edit to lint.yml, what the scanner must report for it).
+_ACTIONLINT_UNPINNED = {
+    "the pre-pin step (installer from main, latest release)": (
+        lambda t: t.replace(_actionlint_step(t), _ACTIONLINT_PRE_PIN_STEP),
+        "raw.githubusercontent.com/rhysd/actionlint/",
+    ),
+    "the installer fetched from a version tag": (
+        lambda t: t.replace(
+            _actionlint_step(t),
+            _ACTIONLINT_PRE_PIN_STEP.replace("/main/", "/v1.7.12/").replace(
+                ".bash)", ".bash) 1.7.12"
+            ),
+        ),
+        "download-actionlint.bash",
+    ),
+    "the latest-release asset": (
+        lambda t: t.replace(
+            "releases/download/v${ACTIONLINT_VERSION}/"
+            "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz",
+            "releases/latest/download/actionlint_linux_amd64.tar.gz",
+        ),
+        "/releases/latest",
+    ),
+    "a wildcard in the self-test fallback": (
+        lambda t: t.replace(f"|| '{ACTIONLINT_PIN_VERSION}' }}}}", "|| '1.7.*' }}"),
+        "ACTIONLINT_VERSION must be bound",
+    ),
+    "the input default moved off the pin": (
+        # 0.0.0, never a plausible next pin, so a real bump cannot turn this
+        # edit into a no-op. (Independent review.)
+        lambda t: t.replace(f'default: "{ACTIONLINT_PIN_VERSION}"', 'default: "0.0.0"'),
+        "input actionlint_version must default",
+    ),
+    # Codex review round 3: a substring check still found the binding here,
+    # while the step itself would die on an unbound $ACTIONLINT_SHA256.
+    "the hash bound under another env name": (
+        lambda t: t.replace(
+            "          ACTIONLINT_SHA256: ${{",
+            "          UNUSED_ACTIONLINT_SHA256: ${{",
+        ),
+        "ACTIONLINT_SHA256 must be bound",
+    ),
+    "the verified binary swapped for upstream's image": (
+        lambda t: t.replace(
+            "${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=",
+            'docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest'
+            " -color -shellcheck=",
+        ),
+        "outside the pinned download",
+    ),
+    # Codex review round 4: the SAME URL, fetched again by another step with
+    # no hash check, over the verified binary.
+    "a second, unchecked fetch of the pinned URL": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - name: Refresh actionlint\n"
+            "        env:\n"
+            '          ACTIONLINT_VERSION: "1.7.11"\n'
+            '        run: curl -fsSL "https://github.com/rhysd/actionlint/releases'
+            "/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}"
+            '_linux_amd64.tar.gz" | tar -xz -C "$RUNNER_TEMP/actionlint" actionlint\n'
+            "        shell: bash\n"
+            "\n"
+            "      - name: Run actionlint\n",
+        ),
+        "outside the pinned download",
+    ),
+    # Codex review round 5: an annotation wrapper runs its own actionlint
+    # without ever naming rhysd/actionlint.
+    "an action that brings its own actionlint": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - uses: reviewdog/action-actionlint@v1\n\n      - name: Run actionlint\n",
+        ),
+        "runs its own actionlint",
+    ),
+    "another action in the actionlint job": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - uses: actions/setup-go@v6\n\n      - name: Run actionlint\n",
+        ),
+        "only actions/checkout may run there",
+    ),
+    # Independent review of this guard: nothing tied what RUNS to what was
+    # verified. `pipx run --spec` is how this same file runs ruff.
+    "another actionlint run beside the verified one": (
+        lambda t: t.replace(
+            "      - name: Run actionlint\n",
+            "      - run: pipx run actionlint-py -color\n\n"
+            "      - name: Run actionlint\n",
+        ),
+        "runs an actionlint other than",
+    ),
+    "the verified binary never runs": (
+        lambda t: t.replace(
+            "${{ steps.get_actionlint.outputs.executable }}", "pipx run actionlint-py"
+        ),
+        "no step runs the verified binary",
+    ),
+    "a floating actionlint in another job": (
+        lambda t: t.replace(
+            "  draft-gate-triggers:\n",
+            "  workflow-lint:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: pipx run actionlint-py -color\n"
+            "\n"
+            "  draft-gate-triggers:\n",
+        ),
+        "in job workflow-lint runs an actionlint other than",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "edit,expected", _ACTIONLINT_UNPINNED.values(), ids=_ACTIONLINT_UNPINNED.keys()
+)
+def test_actionlint_pin_scanner_rejects_every_unpinned_shape(edit, expected):
+    """The static guard must not go vacuous.
+
+    Each shape re-floats the download while leaving the rest of lint.yml
+    intact. The first is the exact form the guard replaced.
+    """
+    text = (WORKFLOWS_DIR / "lint.yml").read_text()
+    broken = edit(text)
+    assert broken != text, (
+        "this edit no longer changes lint.yml — re-point it at the current step"
+    )
+    problems = actionlint_pin_problems(broken)
+    assert any(expected in p for p in problems), (
+        f"the scanner no longer reports {expected!r} for this shape: {problems}"
+    )
+
+
+def _actionlint_download_script():
+    workflow = yaml.safe_load((WORKFLOWS_DIR / "lint.yml").read_text())
+    (step,) = _get_actionlint_steps(workflow)
+    return step["run"]
+
+
+_FAKE_ACTIONLINT = b"#!/bin/sh\necho fake actionlint\n"
+
+
+def _fake_actionlint_tarball():
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        member = tarfile.TarInfo("actionlint")
+        member.size = len(_FAKE_ACTIONLINT)
+        member.mode = 0o755
+        tar.addfile(member, io.BytesIO(_FAKE_ACTIONLINT))
+    return buf.getvalue()
+
+
+# Stands in for curl: records the URL it was asked for, then serves the
+# tarball at $SERVED to wherever -o points.
+_CURL_SHIM = """#!/bin/bash
+out= url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+printf '%s\\n' "$url" >> "$REQUESTED"
+cp "$SERVED" "$out"
+"""
+
+
+def _run_actionlint_download(workdir, script, version, sha256, tarball):
+    """Run the step's script as `shell: bash` does, with curl faked."""
+    shim = workdir / "bin"
+    shim.mkdir(parents=True)
+    (shim / "curl").write_text(_CURL_SHIM)
+    (shim / "curl").chmod(0o755)
+    (workdir / "served.tar.gz").write_bytes(tarball)
+    runner_temp = workdir / "runner_temp"
+    runner_temp.mkdir()
+    github_output = workdir / "github_output"
+    github_output.write_text("")
+    requested = workdir / "requested"
+    (workdir / "step.sh").write_text(script)
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "step.sh"],
+        cwd=workdir,
+        env={
+            "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(github_output),
+            "ACTIONLINT_VERSION": version,
+            "ACTIONLINT_SHA256": sha256,
+            "SERVED": str(workdir / "served.tar.gz"),
+            "REQUESTED": str(requested),
+        },
+        capture_output=True,
+        text=True,
+    )
+    return SimpleNamespace(
+        rc=proc.returncode,
+        log=proc.stdout + proc.stderr,
+        output=github_output.read_text(),
+        requested=requested.read_text().splitlines() if requested.exists() else [],
+        binary=runner_temp / "actionlint" / "actionlint",
+    )
+
+
+def test_actionlint_download_fails_closed(tmp_path):
+    """The step must hand on only a tarball that matches the SHA-256.
+
+    Codex review round 2 on this guard's first draft: a static check that
+    the step compares against "$ACTIONLINT_SHA256" still passed with
+    `[ "$ACTIONLINT_SHA256" != "$ACTIONLINT_SHA256" ]`, which never fires, so
+    a replaced tarball would have run. Enforcement is behavior, so this
+    executes lint.yml's own step, with curl faked, and judges what it does.
+    """
+    script = _actionlint_download_script()
+    tarball = _fake_actionlint_tarball()
+
+    # Positive control first. The served bytes match, so the step must pass;
+    # a harness that could never pass (a missing tool, a shim not on PATH)
+    # would otherwise make every must-fail case below pass vacuously.
+    ok = _run_actionlint_download(
+        tmp_path / "match",
+        script,
+        ACTIONLINT_PIN_VERSION,
+        hashlib.sha256(tarball).hexdigest(),
+        tarball,
+    )
+    assert ok.rc == 0, ok.log
+    assert ok.requested == [
+        "https://github.com/rhysd/actionlint/releases/download/"
+        f"v{ACTIONLINT_PIN_VERSION}/actionlint_{ACTIONLINT_PIN_VERSION}"
+        "_linux_amd64.tar.gz"
+    ]
+    assert ok.output == f"executable={ok.binary}\n"
+    assert ok.binary.read_bytes() == _FAKE_ACTIONLINT
+
+    # A replaced asset: the pinned version, but not the pinned bytes.
+    bad = _run_actionlint_download(
+        tmp_path / "mismatch",
+        script,
+        ACTIONLINT_PIN_VERSION,
+        ACTIONLINT_PIN_SHA256,
+        tarball,
+    )
+    assert bad.rc != 0, "a tarball that does not match the SHA-256 must fail"
+    assert "executable=" not in bad.output
+    assert not bad.binary.exists(), "a mismatched tarball must not be extracted"
+
+    # Not exact x.y.z: rejected before anything is fetched.
+    for i, version in enumerate(("1.7.*", "latest", f"{ACTIONLINT_PIN_VERSION}\nx")):
+        run = _run_actionlint_download(
+            tmp_path / f"version{i}", script, version, ACTIONLINT_PIN_SHA256, tarball
+        )
+        assert run.rc != 0 and run.requested == [], (
+            f"actionlint_version {version!r} must be rejected before any download"
+        )
+
+
+# Fail-open versions of the step. Each keeps every string the static guard
+# checks, so only the behavioral guard can catch it.
+_FAIL_OPEN_EDITS = {
+    "compares the pin with itself (Codex round 2)": (
+        '[ "$got" != "$ACTIONLINT_SHA256" ]',
+        '[ "$ACTIONLINT_SHA256" != "$ACTIONLINT_SHA256" ]',
+    ),
+    "a mismatch only warns": ("  exit 1\nfi\ntar -xzf", "  true\nfi\ntar -xzf"),
+}
+
+
+@pytest.mark.parametrize(
+    "old,new", _FAIL_OPEN_EDITS.values(), ids=_FAIL_OPEN_EDITS.keys()
+)
+def test_actionlint_download_harness_sees_a_fail_open_step(tmp_path, old, new):
+    """The behavioral guard must not go vacuous either: with the hash check
+    disarmed, the harness has to watch a mismatched tarball get through."""
+    script = _actionlint_download_script()
+    assert old in script, "this edit no longer applies — re-point it at the step"
+    tarball = _fake_actionlint_tarball()
+    run = _run_actionlint_download(
+        tmp_path,
+        script.replace(old, new),
+        ACTIONLINT_PIN_VERSION,
+        ACTIONLINT_PIN_SHA256,
+        tarball,
+    )
+    assert run.rc == 0 and run.binary.is_file(), run.log
+
+
 def test_sticky_comment_action_steps_are_nonfatal():
     """A sticky-comment ACTION step is reporting, not the gate.
 
