@@ -179,6 +179,23 @@ typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile \
   tests/.Dockerfile
 typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
 
+# The shipped list must still leave each near-miss alone, so WIDENING a
+# shipped line (a `.*` that crosses `/`, a dropped anchor) fails here too,
+# with this file's copy untouched. Hardcoded, like the probes above.
+echo ""
+echo "Name-gated near-misses — the SHIPPED list must NOT match these:"
+for p in docs/docker-compose-guide.md docs/compose.md composer.yaml recompose.yml \
+  services/docker-compose/x.yml docs/compose.examples/example.yml \
+  docs/api.Dockerfile.md tests/regression/test_dockerfile_model_deps_pinned.py \
+  src/CODEOWNERS docs/team/CODEOWNERS docs/CODEOWNERS.md; do
+  if matches_in "$shipped" "$p"; then
+    echo "  ✗ $p (FAILED — the shipped list must NOT match this near-miss)"
+    failed=$((failed + 1))
+  else
+    echo "  ✓ $p"
+  fi
+done
+
 # --- main.go opt-out (risk_main_go=false) ---
 # Mirrors the runtime filter in claude-author-automerge.yml: when a Go-monorepo
 # caller sets risk_main_go=false, the main.go pattern is dropped so dev-tool
