@@ -164,8 +164,10 @@ arbitrary helper scripts; that's a different kind of repo.
   command without the flag). A move that rewrites most of a file falls under
   git's default 50% similarity: the prompt's rename listing, at 10%, must
   pair a move that kept two of ten functions (negative control: the default
-  threshold), and its added-files listing must name the new path of a move
-  that kept nothing.
+  threshold). For a matched file the PR removes, the prompt's changed-paths
+  listing must name where its code went: a new file after a move that kept
+  nothing, or a file that already existed, which git never pairs as a rename
+  (negative control: the listing limited to added files).
 - `test_prettier_symlink_filter.sh` — extracts the symlink filter from
   `lint.yml` / `prettier-autofix.yml`, runs it against a fixture tree,
   and asserts the two copies haven't drifted.

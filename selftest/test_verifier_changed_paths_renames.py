@@ -33,9 +33,12 @@ passes --ignore-submodules=none.
    flag.
 6. A move that rewrites most of the file, which git's default 50% similarity
    does not pair: the prompt's rename listing, at 10%, pairs a move that kept
-   two of ten functions (negative control: the listing at the default), and
-   for a matched file the PR deletes, its added-files listing names even a
-   move that kept nothing, which no other command in the prompt names.
+   two of ten functions (negative control: the listing at the default).
+7. For a matched file the PR removes, the prompt's changed-paths listing names
+   where its code went when no other command in the prompt does: a new file
+   after a move that kept nothing, or a file that already existed, which git
+   never pairs as a rename destination (negative control: the listing limited
+   to added files).
 """
 
 import os
@@ -53,6 +56,8 @@ CLASSIFIER = ROOT / "scripts" / "verifier-classify-diff.sh"
 
 OLD = "src/auth/session.py"  # matches the central high-risk list
 NEW = "src/misc/helpers.py"  # matches none of it
+EXISTING = "src/misc/utils.py"  # in the base already; matches none of it
+EXISTING_SOURCE = "def existing():\n    return None\n\n"
 # Ten functions of one length, and ten rewritten ones of the same length that
 # share no line with them.
 FUNCTIONS = [f"def check_{n}(token):\n    return token == {n}\n\n" for n in range(10)]
@@ -200,6 +205,16 @@ def submodule_move(tmp_path):
             LINK: None,
             MOVED_LINK: Gitlink(BEFORE),
         },
+    )
+
+
+@pytest.fixture
+def move_into_existing(tmp_path):
+    """The PR deletes OLD and moves its functions, unchanged, into EXISTING."""
+    return pr_checkout(
+        tmp_path,
+        {OLD: "".join(FUNCTIONS), EXISTING: EXISTING_SOURCE},
+        {OLD: None, EXISTING: EXISTING_SOURCE + "".join(FUNCTIONS)},
     )
 
 
@@ -377,22 +392,24 @@ def render_prompt(checkout, tmp_path, matched):
 
 # What tells apart the other commands the prompt hands the model.
 COMMAND_MARKERS = {
-    "renames": "--diff-filter=R",
-    "pair": "<old> <new>",
-    "added": "--diff-filter=A",
+    "renames": lambda command: "--diff-filter=R" in command,
+    "pair": lambda command: "<old> <new>" in command,
+    "changed": lambda command: (
+        "--name-status" in command and "--diff-filter" not in command
+    ),
 }
 
 
 def prompt_command(prompt, kind):
     """The prompt's one command of `kind`: the per-file diff, the rename
-    listing, the paired diff, or the added-files listing."""
+    listing, the paired diff, or the changed-paths listing."""
     if kind == "per_file":
         found = re.findall(r"Read the diff for that file via Bash: `([^`]+)`", prompt)
     else:
         found = [
             command
             for command in re.findall(r"`(git diff [^`]*)`", prompt)
-            if COMMAND_MARKERS[kind] in command
+            if COMMAND_MARKERS[kind](command)
         ]
     assert len(found) == 1, f"expected one {kind} command in the prompt: {found}"
     return found[0]
@@ -444,13 +461,13 @@ def test_verifier_prompt_follows_a_submodule_the_pr_moves(submodule_move, tmp_pa
     renames = prompt_command(prompt, "renames")
     pair = prompt_command(prompt, "pair")
     pair = pair.replace("<old>", LINK).replace("<new>", MOVED_LINK)
-    added = prompt_command(prompt, "added")
+    changed = prompt_command(prompt, "changed")
     assert model_git(repo, renames) == f"R100\t{LINK}\t{MOVED_LINK}\n"
     shown = model_git(repo, pair)
     assert f"rename from {LINK}\nrename to {MOVED_LINK}\n" in shown, shown
-    assert model_git(repo, added) == f"A\t{MOVED_LINK}\n"
+    assert model_git(repo, changed) == f"M\t.gitmodules\nD\t{LINK}\nA\t{MOVED_LINK}\n"
     # Negative controls: without the flag, none of them names MOVED_LINK.
-    for command in (renames, pair, added):
+    for command in (renames, pair, changed):
         assert MOVED_LINK not in model_git(repo, without_flag(command)), command
 
 
@@ -473,15 +490,35 @@ def test_verifier_prompt_pairs_a_move_that_rewrites_most_of_the_file(
     assert model_git(repo, default) == ""
 
 
-def test_verifier_prompt_lists_what_the_pr_adds_for_a_matched_file_it_deletes(
+def test_verifier_prompt_lists_what_the_pr_changes_for_a_matched_file_it_removes(
     full_rewrite, tmp_path
 ):
     # A move that kept none of the file pairs at no threshold the listing
     # uses: the per-file diff shows a deletion and the rename listing is
-    # empty, so neither names NEW. The added-files listing does.
+    # empty, so neither names NEW. The changed-paths listing does.
     repo, _ = full_rewrite
     prompt = render_prompt(full_rewrite, tmp_path, OLD)
     alone = model_git(repo, prompt_command(prompt, "per_file").replace("<file>", OLD))
     assert "deleted file mode" in alone and NEW not in alone, alone
     assert model_git(repo, prompt_command(prompt, "renames")) == ""
-    assert model_git(repo, prompt_command(prompt, "added")) == f"A\t{NEW}\n"
+    assert model_git(repo, prompt_command(prompt, "changed")) == f"D\t{OLD}\nA\t{NEW}\n"
+
+
+def test_verifier_prompt_finds_code_moved_into_a_file_that_already_existed(
+    move_into_existing, tmp_path
+):
+    # git pairs a removed file only with an added one, so code moved into a
+    # file the base already has is no rename, however much of it matches.
+    repo, _ = move_into_existing
+    prompt = render_prompt(move_into_existing, tmp_path, OLD)
+    alone = model_git(repo, prompt_command(prompt, "per_file").replace("<file>", OLD))
+    assert "deleted file mode" in alone and EXISTING not in alone, alone
+    assert model_git(repo, prompt_command(prompt, "renames")) == ""
+    changed = prompt_command(prompt, "changed")
+    assert model_git(repo, changed) == f"D\t{OLD}\nM\t{EXISTING}\n"
+    # Negative control: the listing limited to added files names nothing.
+    added_only, count = re.subn(
+        r"--name-status\b", "--name-status --diff-filter=A", changed
+    )
+    assert count == 1, changed
+    assert model_git(repo, added_only) == ""
