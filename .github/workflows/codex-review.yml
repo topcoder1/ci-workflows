@@ -156,18 +156,18 @@ jobs:
           # file markers) the old `gh pr diff | awk` pass computed, without
           # fetching a diff body subject to the same 20k-line cap.
           lines=$(gh pr view "$PR" --json additions,deletions --jq '.additions + .deletions')
-          {
-            echo "files<<__FILES_EOF__"
-            echo "$files"
-            echo "__FILES_EOF__"
-            echo "lines=$lines"
-          } >> "$GITHUB_OUTPUT"
+          # The gate reads the path list from a file, not the environment:
+          # Linux will not start a process with a single environment string
+          # over 128 KiB, and a PR near the listing cap, or half that when
+          # every rename is listed twice, exceeds it.
+          printf '%s\n' "$files" > "${RUNNER_TEMP:?RUNNER_TEMP is not set}/codex-gate-paths.txt"
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
           echo "Diff: $lines lines across $(echo "$files" | wc -l | tr -d ' ') path(s), rename sources included"
 
       - name: Codex cost gate
         id: gate
         env:
-          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+          CHANGED_FILES_FILE: ${{ runner.temp }}/codex-gate-paths.txt
           DIFF_LINES: ${{ steps.diff.outputs.lines }}
           SIZE_THRESHOLD: "30"
         run: node .github/scripts/codex-gate.mjs

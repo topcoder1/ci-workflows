@@ -2,7 +2,13 @@
 // should actually invoke `codex review`, or skip to save API spend.
 //
 // Inputs (from env):
-//   CHANGED_FILES      newline-separated list of files in the PR diff
+//   CHANGED_FILES_FILE path to a file listing the PR's paths, one per line.
+//                      codex-review.yml passes the list this way: Linux will
+//                      not start a process with a single environment string
+//                      over 128 KiB, and a large PR's list exceeds that.
+//   CHANGED_FILES      newline-separated list of files in the PR diff; read
+//                      only when CHANGED_FILES_FILE is unset (workflow YAML
+//                      from before the file handoff still passes this)
 //   DIFF_LINES         total +/- lines in the PR diff
 //   SIZE_THRESHOLD     skip if lines < threshold (default 30)
 //   GITHUB_OUTPUT      (optional) — write KEY=VALUE here for downstream steps
@@ -35,7 +41,11 @@ try {
   ({ minimatch } = await import('minimatch'));
 }
 
-const files = (process.env.CHANGED_FILES || '')
+const files = (
+  process.env.CHANGED_FILES_FILE
+    ? readFileSync(process.env.CHANGED_FILES_FILE, 'utf8')
+    : process.env.CHANGED_FILES || ''
+)
   .split('\n')
   .map((s) => s.trim())
   .filter(Boolean);

@@ -11,12 +11,14 @@
 # The step's bash is EXTRACTED from the workflow and executed against a stub
 # `gh` that answers each call by running the step's OWN --jq filter over
 # gh-shaped JSON, so a wrong filter or a missing --paginate changes the answer
-# the way the real API would. The step's `files` and `lines` outputs are then
-# handed to the REAL codex-gate.mjs, wired as the "Codex cost gate" step wires
-# them. Every expected verdict is hardcoded. Pins:
+# the way the real API would. The step's path-list file and `lines` output are
+# then handed to the REAL codex-gate.mjs, wired as the "Codex cost gate" step
+# wires them. Every expected verdict is hardcoded. Pins:
 #
 #   1. A rename whose source matches always_review, with 5 changed lines,
-#      runs Codex (the gate's small-diff skip would otherwise apply).
+#      runs Codex (the gate's small-diff skip would otherwise apply). Sources
+#      are added to the list, not swapped in for it: a modified always_review
+#      file beside an unlisted rename still runs.
 #   2. Negative control: a rename with neither end listed skips as a small
 #      diff, so case 1 cannot pass by running Codex on every rename.
 #   3. Mutation controls: the same step with its rename read cut out, and with
@@ -31,6 +33,8 @@
 #      appended after the count, so 2999 entries with a rename are classified,
 #      while a listing of 3000 still fails closed.
 #   7. A rename past the first page (per_page=100) still reaches the gate.
+#   8. A path list over 128 KiB (Linux's cap on one environment string)
+#      reaches the gate whole.
 #
 # Run from the repo root:
 #   bash selftest/test_codex_review_rename_sources.sh
@@ -41,17 +45,27 @@ failed=0
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 
-# The chain below feeds the step's outputs to the gate the way the workflow
-# does. If the gate stopped reading them, this test would exercise a path
-# production no longer takes, so pin that wiring first.
-wf_code=$(grep -vE '^[[:space:]]*#' "$WF" || true)
+# The chain below hands the step's results to the gate the way the workflow
+# does: the path list as a file in the runner's temp dir (CHANGED_FILES_FILE),
+# the line count as a step output. If that wiring changed, this test would
+# exercise a path production no longer takes, so pin it first. The list must
+# not travel in the environment: Linux refuses to start a process with any
+# single environment string over 128 KiB, and a large PR's list is bigger
+# (case 8).
+gate_env=$(awk '
+  /^[[:space:]]*id: gate[[:space:]]*$/ { in_step = 1; next }
+  in_step && /^      - name:/ { exit }
+  in_step { print }
+' "$WF" | grep -vE '^[[:space:]]*#' || true)
+handoff=$(sed -n 's/^[[:space:]]*CHANGED_FILES_FILE: \${{ runner\.temp }}\/\([A-Za-z0-9._-]*\)[[:space:]]*$/\1/p' <<<"$gate_env")
 # shellcheck disable=SC2016 # literal ${{ }} expressions, matched verbatim
-if grep -qF 'CHANGED_FILES: ${{ steps.diff.outputs.files }}' <<<"$wf_code" \
-  && grep -qF 'DIFF_LINES: ${{ steps.diff.outputs.lines }}' <<<"$wf_code"; then
-  echo "✓ the cost gate reads the diff step's files and lines outputs"
+if [ -n "$handoff" ] \
+  && ! grep -qE '^[[:space:]]*CHANGED_FILES:' <<<"$gate_env" \
+  && grep -qF 'DIFF_LINES: ${{ steps.diff.outputs.lines }}' <<<"$gate_env"; then
+  echo "✓ the cost gate reads the path list from the runner temp file '$handoff' and the diff step's line count"
 else
-  echo "✗ $WF no longer feeds steps.diff.outputs.files/lines to the cost gate — this test no longer models it"
-  failed=1
+  echo "✗ $WF's cost gate must take CHANGED_FILES_FILE under runner.temp and DIFF_LINES from the diff step, with no CHANGED_FILES env — this test no longer models it"
+  exit 1
 fi
 
 # The step's run block, de-indented: from its `run: |` to the next step.
@@ -94,7 +108,7 @@ fi
 # The gate runs from the caller's checkout, where risk-paths.yml sits beside
 # the gate script and the vendored deps it imports (fetched by an earlier
 # step into .github/scripts/).
-mkdir -p "$T/repo/.github/scripts" "$T/state" "$T/bin"
+mkdir -p "$T/repo/.github/scripts" "$T/state" "$T/bin" "$T/rt"
 cp .github/scripts/codex-gate.mjs .github/scripts/classifier-deps.mjs "$T/repo/.github/scripts/"
 cat > "$T/repo/.github/risk-paths.yml" <<'YAML'
 always_review:
@@ -150,13 +164,15 @@ files_fixture() {
 }
 
 RENAME_FAILS=0
-# run_step <script> <additions> <deletions> — resets RENAME_FAILS.
+# run_step <script> <additions> <deletions> — resets RENAME_FAILS. The job's
+# temp dir is $T/rt, so the step's path-list file lands at $T/rt/$handoff.
 run_step() {
   : > "$T/ghout"
+  rm -f "$T/rt/$handoff"
   echo 0 > "$T/state/rename_calls"
   set +e
   LOG=$(cd "$T/repo" && PATH="$T/bin:$PATH" GH_TOKEN=stub PR=7 GITHUB_REPOSITORY=acme/fixture \
-    GITHUB_OUTPUT="$T/ghout" STUB_FILES_JSON="$T/files.json" STUB_STATE="$T/state" \
+    GITHUB_OUTPUT="$T/ghout" RUNNER_TEMP="$T/rt" STUB_FILES_JSON="$T/files.json" STUB_STATE="$T/state" \
     STUB_RENAME_FAILS="$RENAME_FAILS" STUB_ADDITIONS="$2" STUB_DELETIONS="$3" \
     bash "$1" 2>&1 < /dev/null)
   RC=$?
@@ -164,18 +180,10 @@ run_step() {
   RENAME_FAILS=0
 }
 
-# The step's `files` output, read up to the delimiter the step declared.
-out_files() {
-  awk '
-    !d && /^files<</ { d = substr($0, 8); next }
-    d && $0 == d { exit }
-    d { print }
-  ' "$T/ghout"
-}
-
-# expect_gate <description> <want should_run> — the gate on the step's outputs.
-# SIZE_THRESHOLD is what the workflow passes. GITHUB_STEP_SUMMARY is
-# redirected so a run under Actions does not append to the real summary.
+# expect_gate <description> <want should_run> — the gate on the step's results,
+# passed as the gate step passes them. SIZE_THRESHOLD is what the workflow
+# passes. GITHUB_STEP_SUMMARY is redirected so a run under Actions does not
+# append to the real summary.
 expect_gate() {
   local lines got gate_rc gate_log
   if [ "$RC" -ne 0 ]; then
@@ -187,7 +195,7 @@ expect_gate() {
   lines=$(sed -n 's/^lines=//p' "$T/ghout")
   : > "$T/gateout"
   set +e
-  gate_log=$(cd "$T/repo" && CHANGED_FILES="$(out_files)" DIFF_LINES="$lines" SIZE_THRESHOLD=30 \
+  gate_log=$(cd "$T/repo" && CHANGED_FILES_FILE="$T/rt/$handoff" DIFF_LINES="$lines" SIZE_THRESHOLD=30 \
     GITHUB_OUTPUT="$T/gateout" GITHUB_STEP_SUMMARY="$T/summary" \
     node .github/scripts/codex-gate.mjs 2>&1 < /dev/null)
   gate_rc=$?
@@ -204,10 +212,10 @@ expect_gate() {
 
 # expect_fail_closed <description> <log needle>
 expect_fail_closed() {
-  if [ "$RC" -ne 0 ] && [ ! -s "$T/ghout" ] && grep -q "$2" <<<"$LOG"; then
+  if [ "$RC" -ne 0 ] && [ ! -s "$T/ghout" ] && [ ! -e "$T/rt/$handoff" ] && grep -q "$2" <<<"$LOG"; then
     echo "✓ $1"
   else
-    echo "✗ $1 — want a nonzero rc, no outputs and '$2' in the log; got rc=$RC. Output:"
+    echo "✗ $1 — want a nonzero rc, no outputs, no path-list file and '$2' in the log; got rc=$RC. Output:"
     printf '%s\n' "$LOG" | sed 's/^/    /'
     failed=1
   fi
@@ -226,6 +234,10 @@ expect_gate "a 5-line change to an always_review file runs" true
 printf '%s\n' 'src/auth/session.py=>src/misc/session.py' | files_fixture
 run_step "$T/step.sh" 3 2
 expect_gate "a 5-line rename out of an always_review path runs" true
+
+printf '%s\n' 'src/auth/session.py' 'src/misc/a.py=>src/misc/b.py' | files_fixture
+run_step "$T/step.sh" 3 2
+expect_gate "a modified always_review file beside an unlisted rename runs" true
 
 # 2. Negative control: neither end is listed.
 printf '%s\n' 'src/misc/old.py=>src/misc/session.py' | files_fixture
@@ -274,6 +286,24 @@ if [ "$unpaginated_ok" = 1 ]; then
   run_step "$T/step-rename-read-unpaginated.sh" 3 2
   expect_gate "control: an unpaginated rename read misses it and skips" false
 fi
+
+# 8. A path list over 128 KiB, Linux's limit on one environment string, still
+#    reaches the gate whole. 1500 long-path renames list 3000 paths. The only
+#    always_review path is the last rename's source, which comes last in the
+#    list, and pure renames change 0 lines, so the gate runs only if the end
+#    of the list arrived. The size check keeps the fixture honest.
+{ seq 1 1499 | awk '{ printf "src/legacy/components/widget%05d/index.tsx=>packages/app/src/components/widget%05d/index.tsx\n", $1, $1 }'
+  echo 'src/auth/session.py=>packages/app/src/session.py'; } | files_fixture
+run_step "$T/step.sh" 0 0
+size=0
+[ -e "$T/rt/$handoff" ] && size=$(wc -c < "$T/rt/$handoff" | tr -d ' ')
+if [ "$size" -gt 131072 ]; then
+  echo "✓ the 1500-rename fixture's path list is over 128 KiB ($size bytes)"
+else
+  echo "✗ the 1500-rename fixture's path list is $size bytes, not over 128 KiB — it no longer tests the limit"
+  failed=1
+fi
+expect_gate "a path list over 128 KiB reaches the gate whole" true
 
 echo ""
 if [ "$failed" -ne 0 ]; then

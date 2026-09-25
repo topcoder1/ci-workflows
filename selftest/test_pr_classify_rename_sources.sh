@@ -16,7 +16,9 @@
 # Every expected class is hardcoded. Pins:
 #
 #   1. A rename whose source is blocked or sensitive, and whose destination is
-#      trivial, classifies as the source's class.
+#      trivial, classifies as the source's class. Sources are added to the
+#      list, not swapped in for it: a modified blocked file beside a docs
+#      rename still classifies blocked.
 #   2. Negative control: a rename with neither end gated stays trivial, so
 #      case 1 cannot pass by gating every rename.
 #   3. Mutation controls: the same step with its rename read cut out, and with
@@ -29,6 +31,8 @@
 #      appended after the count, so 2999 entries with a rename are classified,
 #      while a listing of 3000 still fails closed.
 #   6. A rename past the first page (per_page=100) is still classified.
+#   7. A path list over 128 KiB (Linux's cap on one environment string) is
+#      classified whole: the step pipes the list to the classifier.
 #
 # Run from the repo root:
 #   bash selftest/test_pr_classify_rename_sources.sh
@@ -186,6 +190,10 @@ printf '%s\n' 'src/billing/rates.py=>docs/archive/rates.py' | files_fixture
 run_step "$T/step.sh"
 expect_class "a rename from a sensitive path to docs/ classifies sensitive" sensitive
 
+printf '%s\n' 'src/auth/login.py' 'docs/old.md=>docs/new.md' | files_fixture
+run_step "$T/step.sh"
+expect_class "a modified blocked file beside a docs rename classifies blocked" blocked
+
 # 2. Negative control: neither end is gated.
 printf '%s\n' 'docs/old-guide.md=>docs/guide.md' | files_fixture
 run_step "$T/step.sh"
@@ -227,6 +235,24 @@ if [ "$unpaginated_ok" = 1 ]; then
   run_step "$T/step-rename-read-unpaginated.sh"
   expect_class "control: an unpaginated rename read misses it (trivial)" trivial
 fi
+
+# 7. A path list over 128 KiB is classified whole. 1500 long-path renames into
+#    docs/ list 3000 paths. The only blocked path is the last rename's source,
+#    which comes last in the list, so the class is blocked only if the end of
+#    the list reached the classifier. Linux refuses to start a process with an
+#    environment string over 128 KiB, so a list handed over in the environment
+#    would fail here on a Linux runner.
+{ seq 1 1499 | awk '{ printf "packages/app/src/components/widget%05d/index.tsx=>docs/archive/components/widget%05d/index.tsx\n", $1, $1 }'
+  echo 'src/auth/session.md=>docs/archive/session.md'; } | files_fixture
+fixture_bytes=$(jq -r '.[] | .filename, (.previous_filename // empty)' "$T/files.json" | wc -c | tr -d ' ')
+if [ "$fixture_bytes" -gt 131072 ]; then
+  echo "✓ the 1500-rename fixture's path list is over 128 KiB ($fixture_bytes bytes)"
+else
+  echo "✗ the 1500-rename fixture's path list is $fixture_bytes bytes, not over 128 KiB — it no longer tests the limit"
+  failed=1
+fi
+run_step "$T/step.sh"
+expect_class "a path list over 128 KiB is classified whole" blocked
 
 echo ""
 if [ "$failed" -ne 0 ]; then
