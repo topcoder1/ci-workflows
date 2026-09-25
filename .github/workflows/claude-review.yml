@@ -343,7 +343,7 @@ jobs:
         # Code native binary, causing every Claude Review across the fleet to
         # fail with "Claude Code native binary not found". See ci-workflows#37.
         # Restore to @v1 (or a fresh SHA) once upstream ships a fix.
-        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        uses: anthropics/claude-code-action@cfc3eb22bfed5c26ef66e3223c982af27e4524de # v1.0.231
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Use the verified pin; otherwise the action installs its own CLI version.
