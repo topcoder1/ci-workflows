@@ -199,6 +199,8 @@ SAFE: docs/compose.md
 SAFE: composer.yaml
 SAFE: recompose.yml
 SAFE: docs/api.Dockerfile.md
+# The dot before Dockerfile is literal: a name that merely ends in it is not one.
+SAFE: tests/fixtures/not-a-Dockerfile
 SAFE: tests/regression/test_dockerfile_model_deps_pinned.py
 
 # ── RISKY: CI/CD ───────────────────────────────────────────────────────────
@@ -345,8 +347,13 @@ SAFE: docs/auth.md
 #     It was SAFE here before, with nesting left to per-repo patterns, and
 #     that left 5 fleet compose files gated by nothing.
 #   - A non-compose file under `docker/` (e.g. docker/README.md) stays SAFE.
+#   - The root and `docker/` rules' `.*` still spans directories, as the
+#     policy lists state; since the any-depth rule now covers every file NAME
+#     they used to pin, only these two paths prove those lines still work.
 RISKY: deploy/local/docker-compose.yml
 RISKY: services/api/docker-compose.yaml
+RISKY: docker-compose/stacks/prod.yml
+RISKY: services/docker/docker-compose/stacks/prod.yml
 SAFE: docker/README.md
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
