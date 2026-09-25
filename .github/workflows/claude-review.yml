@@ -246,13 +246,12 @@ jobs:
           # and rename inference; every changed path remains represented.
           # The PR's own .gitattributes must not decide what the review sees:
           # with them, a path marked `binary` or `-diff` (that .gitattributes
-          # included) arrives only as "Binary files ... differ". --attr-source
-          # (the empty tree) makes git read none of them, and --text prints
-          # every file's content, even one git still calls binary. Real
-          # binaries arrive as raw bytes; index.tsv gives each file's starting
-          # line in diff.patch, so the review can read around them.
+          # included) arrives only as "Binary files ... differ", and files.tsv
+          # lists it as binary. --attr-source (the empty tree) makes git read
+          # none of them. Real binaries keep their one-line summary, so the
+          # patch stays bounded by the PR's text.
           empty_tree="$(git hash-object -t tree /dev/null)"
-          git --attr-source="$empty_tree" --no-pager diff --no-ext-diff --no-textconv --text --no-renames --full-index \
+          git --attr-source="$empty_tree" --no-pager diff --no-ext-diff --no-textconv --no-renames --full-index \
             "$BASE_SHA...$HEAD_SHA" -- > "$context_dir/diff.patch"
           git --attr-source="$empty_tree" --no-pager diff --no-ext-diff --no-textconv --no-renames --numstat \
             "$BASE_SHA...$HEAD_SHA" -- > "$context_dir/files.tsv"

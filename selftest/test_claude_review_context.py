@@ -122,7 +122,6 @@ class ReviewContextTests(unittest.TestCase):
             "diff",
             "--no-ext-diff",
             "--no-textconv",
-            "--text",
             "--no-renames",
             "--full-index",
             f"{self.base}...{self.head}",
@@ -161,9 +160,14 @@ class ReviewContextTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "attributes that hide files")
         self.head = self.git("rev-parse", "HEAD").strip()
-        # Control: without --text these paths never reach the patch.
+        # Control: git honouring the PR's attributes keeps these paths out.
         plain = self.git(
-            "--no-pager", "diff", "--no-ext-diff", "--no-textconv", f"{self.base}...{self.head}", "--"
+            "--no-pager",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            f"{self.base}...{self.head}",
+            "--",
         )
         self.assertIn("Binary files", plain)
         self.assertNotIn("setting_marker", plain)
@@ -172,7 +176,12 @@ class ReviewContextTests(unittest.TestCase):
         context = self.context()
         patch = (context / "diff.patch").read_text()
         self.assertNotIn("Binary files", patch)
-        for line in ("setting_marker = 1", "nested_marker = 2", "*.cfg -diff", "* binary"):
+        for line in (
+            "setting_marker = 1",
+            "nested_marker = 2",
+            "*.cfg -diff",
+            "* binary",
+        ):
             self.assertIn(line, patch)
         for row in (context / "files.tsv").read_text().splitlines():
             added, deleted, _path = row.split("\t", 2)
@@ -187,8 +196,9 @@ class ReviewContextTests(unittest.TestCase):
         self.assertEqual(len(numstat), 1)
         for command in patch + numstat:
             self.assertIn('git --attr-source="$empty_tree" --no-pager diff', command)
-        # --text: the patch prints each file's content, never a binary summary.
-        self.assertIn(" --text ", patch[0])
+        # No --text: real binaries keep their one-line summary, so the patch
+        # stays bounded by the PR's text however large its binaries are.
+        self.assertNotIn("--text", patch[0])
         self.assertIn('empty_tree="$(git hash-object -t tree /dev/null)"', commands)
 
     def test_repository_diff_programs_are_not_executed(self):
