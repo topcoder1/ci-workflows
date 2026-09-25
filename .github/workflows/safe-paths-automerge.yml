@@ -216,14 +216,14 @@ jobs:
           # docs/legal/aup.md to docs/archive/aup.md — which removes the
           # policy from its canonical location — reads as a plain docs/**
           # change and auto-merges. Match the override against BOTH ends of
-          # every rename, and the safe globs and tier 2 below as well: a
-          # rename source is a path the PR removes, so moving src/worker.py
-          # into docs/archive/ must be judged the way removing src/worker.py
-          # is. Deliberately a separate request rather than folding both
-          # fields into the `changed` listing above: the 3000-file cap below
-          # counts that listing's entries, one per changed file, and a
-          # source is not an entry of its own. Counting sources there would
-          # fail closed on a listable PR (2999 files plus a rename).
+          # every rename. Tier 2 and the renames_safe check below read the
+          # sources too: a rename source is a path the PR removes, so moving
+          # src/worker.py into docs/archive/ must not arm here. Deliberately
+          # a separate request rather than folding both fields into the
+          # `changed` listing above: the 3000-file cap below counts that
+          # listing's entries, one per changed file, and the safe-glob loop
+          # reads changed files alone so that a diff whose only unsafe path
+          # is a rename source still reaches tiers 2 and 3.
           renamed_from=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[] | select(.previous_filename) | .previous_filename')
 
@@ -287,8 +287,9 @@ jobs:
             exit 0
           fi
 
-          # Every changed path AND every rename source (see renamed_from
-          # above); the cap above counted the listing alone.
+          # Changed files only, deliberately. Rename sources are checked
+          # after tier 2 (renames_safe below), not here: a diff whose only
+          # unsafe path is a rename source must still reach tiers 2 and 3.
           unsafe_files=""
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -304,7 +305,7 @@ jobs:
             if [ "$matched" -eq 0 ]; then
               unsafe_files="$unsafe_files$f"$'\n'
             fi
-          done <<< "$(printf '%s\n%s\n' "$changed" "$renamed_from")"
+          done <<< "$changed"
 
           if [ -n "$unsafe_files" ]; then
             echo "all_safe=0" >> "$GITHUB_OUTPUT"
@@ -379,6 +380,36 @@ jobs:
                 printf '%s' "$annotated"
                 exit 0
               fi
+            fi
+
+            # renames_safe: every rename's OLD path must be safe-by-glob too
+            # before this workflow arms (the enable step requires '1'). A
+            # rename source is a path the PR removes; the same change listed
+            # as a removal plus an addition fails the loop above. Checked
+            # here, after tier 2, so a risk-tier or caller-gated source still
+            # yields the tier-2/tier-3 hold the revoke step acts on.
+            unsafe_sources=""
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              matched=0
+              while IFS= read -r p; do
+                p="${p#"${p%%[![:space:]]*}"}"
+                [ -z "$p" ] && continue
+                if echo "$f" | grep -Eq "$p"; then
+                  matched=1
+                  break
+                fi
+              done <<< "$all_globs"
+              if [ "$matched" -eq 0 ]; then
+                unsafe_sources="$unsafe_sources$f"$'\n'
+              fi
+            done <<< "$renamed_from"
+            if [ -n "$unsafe_sources" ]; then
+              echo "renames_safe=0" >> "$GITHUB_OUTPUT"
+              echo "Not arming — a renamed file's old path is outside the safe paths:"
+              printf '%s' "$unsafe_sources"
+            else
+              echo "renames_safe=1" >> "$GITHUB_OUTPUT"
             fi
 
             echo "all_safe=1" >> "$GITHUB_OUTPUT"
@@ -625,8 +656,11 @@ jobs:
       # the bypass the tier exists to stop (codex round 1 P1).
       #
       # Scoped to `all_safe == '1'`, which is what keeps it from fighting a
-      # sibling: in that branch this workflow is the one that arms, so there
-      # is no other workflow's decision to override. A hard failure of the
+      # sibling: in that branch every changed file is safe-by-glob, so this
+      # workflow is the one that arms. The exception is renames_safe == '0'
+      # (a rename's old path is not safe-by-glob): the arm is withheld there,
+      # but tier 3 still judges the diff and its error fails closed here
+      # like any other. A hard failure of the
       # `classify` step itself is deliberately NOT covered — all_safe is
       # then unknown, the diff may carry source files, and revoking would
       # disarm a sibling's legitimate arm on a PR this workflow never had a
@@ -699,10 +733,13 @@ jobs:
       # step leaves the output an empty string, which `!= '1'` reads as
       # permission to arm. Every path through that step writes hold
       # explicitly, so requiring '0' costs nothing and is the only form that
-      # stays fail-closed if the step ever stops running.
+      # stays fail-closed if the step ever stops running. `renames_safe ==
+      # '1'` on the same terms: every rename's old path must be safe-by-glob
+      # as well (see the classify step), and a missing output does not arm.
       - name: Enable auto-merge
         if: >-
           steps.classify.outputs.all_safe == '1' &&
+          steps.classify.outputs.renames_safe == '1' &&
           steps.classifier_hold.outputs.hold == '0'
         env:
           # The caller's PAT, so the merge is user-attributed: GitHub then
