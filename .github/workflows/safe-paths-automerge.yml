@@ -388,6 +388,10 @@ jobs:
             # as a removal plus an addition fails the loop above. Checked
             # here, after tier 2, so a risk-tier or caller-gated source still
             # yields the tier-2/tier-3 hold the revoke step acts on.
+            # renames_safe=0 itself is a defer verdict, like the loop's: it
+            # withholds this workflow's arm and revokes nothing, because a
+            # sibling may legitimately arm the same diff (claude-author-
+            # automerge arms a `standard` move of src/ into docs/).
             unsafe_sources=""
             while IFS= read -r f; do
               [ -z "$f" ] && continue
