@@ -182,11 +182,13 @@ RISKY: api.Dockerfile
 RISKY: docker/proxy.Dockerfile
 # The stem may be empty: `docker build -f tests/.Dockerfile` works too.
 RISKY: tests/.Dockerfile
-# Still SAFE: a file that only NAMES one, and each anchor's near-miss (PHP's
-# composer config, a `recompose` file, a doc about a suffix-style Dockerfile).
-# The any-depth compose rule matches a file NAME, so a file inside a
-# docker-compose/ directory is not gated by it; no fleet repo has one.
+# Still SAFE: a file that only NAMES one, and each anchor's near-miss (a
+# composer.yaml, a `recompose` file, a doc about a suffix-style Dockerfile).
+# The any-depth compose rules match a file NAME, so a file inside a
+# docker-compose/ or compose.*/ directory is not gated by them; no fleet repo
+# has either.
 SAFE: services/docker-compose/x.yml
+SAFE: docs/compose.examples/example.yml
 SAFE: docs/docker-compose-guide.md
 SAFE: docs/compose.md
 SAFE: composer.yaml

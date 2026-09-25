@@ -1263,8 +1263,14 @@ jobs:
             changed=$(printf '%s\n%s' "$changed" "$renamed_from")
           fi
           # Risk-tier glob patterns (kept in sync with global CLAUDE.md policy).
-          # If you add a category, also update every list that names them, all
-          # in topcoder1/dotclaude: the CLAUDE.md policy block,
+          # Change a pattern in every copy at once: this block,
+          # safe-paths-automerge.yml's tier-2 list, the mirror in
+          # selftest/test_automerge_risk_patterns.sh, and HIGH_RISK_PATTERNS in
+          # topcoder1/dotclaude templates/ci-workflows/scripts/bb-automerge.py
+          # (its corpus selftest runs on workstations only, not in CI), with
+          # RISKY and SAFE cases in selftest/risk_patterns_corpus.txt. If you add
+          # a category, also update every list that names them, all in
+          # topcoder1/dotclaude: the CLAUDE.md policy block,
           # docs/reference/pr-policy.md (the unabridged list),
           # templates/ci-workflows/README.md §2, and
           # templates/ci-workflows/scripts/install-automerge-policy.sh.

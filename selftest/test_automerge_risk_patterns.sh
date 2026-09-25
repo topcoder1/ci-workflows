@@ -113,13 +113,28 @@ for p in "${SAFE[@]}"; do
 done
 
 # --- Name-gated files: typo negative controls (2026-09-25) ---
-# The corpus proves the list gates compose files, suffix-style Dockerfiles and
-# CODEOWNERS. This proves each verdict comes from a line naming that file, and
-# can FAIL: misspell the name in a copy of the list, and every probe must then
-# stop matching. If one still matches, another pattern (^deploy/.*, say) is
-# carrying it, and the corpus entry proves nothing about these lines. The
-# probes are HARDCODED on purpose: a probe read back out of the list under
-# test agrees with that list no matter what it says.
+# The corpus proves this file's copy of the list gates compose files,
+# suffix-style Dockerfiles and CODEOWNERS. These controls run against the
+# SHIPPED patterns= block instead, read from claude-author-automerge.yml, so
+# narrowing those lines in both workflows (with this copy untouched) fails
+# here too. Each verdict must come from a line naming the file, and can FAIL:
+# misspell the name in a copy of the list, and every probe must then stop
+# matching. If one still matches, another pattern (^deploy/.*, say) is
+# carrying it. The probes are HARDCODED on purpose: a probe read back out of
+# the list under test agrees with that list no matter what it says.
+shipped=$(python3 - "$(dirname "$0")/../.github/workflows/claude-author-automerge.yml" <<'PY'
+import re, sys
+m = re.search(r"^ +patterns='(.*?)'\n", open(sys.argv[1]).read(), re.S | re.M)
+if not m:
+    sys.exit("could not locate the patterns= block in claude-author-automerge.yml")
+print("\n".join(l.lstrip() for l in m.group(1).splitlines() if l.strip()))
+PY
+) || shipped=""
+if [ -z "$shipped" ]; then
+  echo "  ✗ could not read the shipped patterns= block (FAILED)"
+  failed=$((failed + 1))
+fi
+
 matches_in() {
   local list=$1 f=$2 pat
   while IFS= read -r pat; do
@@ -134,28 +149,29 @@ matches_in() {
 typo_control() {
   local name=$1 typo=$2 lines=$3 copy p
   shift 3
-  copy="$(printf '%s\n' "$patterns" | sed "s/$name/$typo/g")"
+  copy="$(printf '%s\n' "$shipped" | sed "s/$name/$typo/g")"
   # Sanity: the typo rewrote exactly the lines naming the file. Rewriting
   # none would let every check below pass vacuously.
-  if [ "$(printf '%s\n' "$patterns" | grep -c "$name")" != "$lines" ] || \
+  if [ "$(printf '%s\n' "$shipped" | grep -c "$name")" != "$lines" ] || \
      [ -n "$(printf '%s\n' "$copy" | grep -F "$name" || true)" ]; then
     echo "  ✗ the typo did not rewrite exactly the $lines '$name' patterns (FAILED)"
     failed=$((failed + 1))
   fi
   for p in "$@"; do
-    if matches_in "$patterns" "$p" && ! matches_in "$copy" "$p"; then
+    if matches_in "$shipped" "$p" && ! matches_in "$copy" "$p"; then
       echo "  ✓ $p"
     else
-      echo "  ✗ $p (FAILED — must match the list and NOT the copy with '$name' misspelled)"
+      echo "  ✗ $p (FAILED — must match the shipped list and NOT the copy with '$name' misspelled)"
       failed=$((failed + 1))
     fi
   done
 }
 
 echo ""
-echo "Name-gated files — must match the list, and NOT a copy with the name misspelled:"
+echo "Name-gated files — must match the SHIPPED list, and NOT a copy with the name misspelled:"
 typo_control compose cmopose 4 compose.yaml compose.override.yaml \
   services/api/compose.yaml services/api/docker-compose.yml \
+  services/api/docker-compose.yaml \
   monitoring/docker-compose.monitoring.yml tests/integration/docker-compose.yml
 typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile
 typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
