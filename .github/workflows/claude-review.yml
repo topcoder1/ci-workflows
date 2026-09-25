@@ -249,7 +249,7 @@ jobs:
           # .gitattributes included) arrives only as "Binary files ...
           # differ", and files.tsv lists it as binary. --attr-source reads
           # them from the base instead, so what the base already declares
-          # keeps working. Needs git 2.40+; an older git rejects the option.
+          # keeps working. Needs git 2.41+; an older git rejects the option.
           git --attr-source="$BASE_SHA" --no-pager diff --no-ext-diff --no-textconv --no-renames --full-index \
             "$BASE_SHA...$HEAD_SHA" -- > "$context_dir/diff.patch"
           git --attr-source="$BASE_SHA" --no-pager diff --no-ext-diff --no-textconv --no-renames --numstat \
