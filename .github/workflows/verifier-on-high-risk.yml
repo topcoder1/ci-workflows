@@ -284,6 +284,17 @@ jobs:
         id: verifier
         continue-on-error: true # keep the workflow running so we can post the check-run with FAILURE conclusion
         uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        # Attributes come from the base commit, never from the PR. The model
+        # reads each file with `git diff` in the PR checkout, and git takes
+        # .gitattributes from that checkout: a path the PR itself marks
+        # `binary` or `-diff` (that .gitattributes included) would print only
+        # as "Binary files ... differ". GIT_ATTR_SOURCE (git 2.41+) points
+        # every git command the model runs at the base's attributes instead,
+        # so what the base already declares still applies. #244 makes the
+        # same fix in claude-review.yml with `git --attr-source`. Pinned by
+        # selftest/test_review_lanes_base_attributes.py.
+        env:
+          GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.prompt.outputs.text }}

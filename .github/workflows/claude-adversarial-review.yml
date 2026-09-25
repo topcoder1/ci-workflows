@@ -40,6 +40,15 @@ jobs:
         # Pinned to v1.0.112 (2026-05-04) — see claude-review.yml for context
         # (ci-workflows#37: v1.0.113/.114 regression breaks the setup step).
         uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        # Attributes come from the base commit, never from the PR. `gh pr diff`
+        # is GitHub's server-side diff, which ignores .gitattributes, but the
+        # allowlisted `git log` prints patches too (-p), and git takes
+        # .gitattributes from this checkout: a path the PR itself marks
+        # `binary` or `-diff` would print there only as "Binary files ...
+        # differ". GIT_ATTR_SOURCE points git at the base's attributes
+        # instead. Pinned by selftest/test_review_lanes_base_attributes.py.
+        env:
+          GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
