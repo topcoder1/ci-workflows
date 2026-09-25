@@ -115,9 +115,8 @@ class ReviewContextTests(unittest.TestCase):
         result = self.run_step()
         self.assertEqual(result.returncode, 0, result.stderr)
         context = self.context()
-        empty_tree = self.git("hash-object", "-t", "tree", "/dev/null").strip()
         expected = self.git(
-            f"--attr-source={empty_tree}",
+            f"--attr-source={self.base}",
             "--no-pager",
             "diff",
             "--no-ext-diff",
@@ -187,7 +186,38 @@ class ReviewContextTests(unittest.TestCase):
             added, deleted, _path = row.split("\t", 2)
             self.assertTrue(added.isdigit() and deleted.isdigit(), row)
 
-    def test_both_diff_commands_ignore_the_prs_attributes(self):
+    def test_the_bases_own_attributes_still_apply(self):
+        # What the base already declares keeps working: its `-diff` on
+        # lockfiles still keeps their churn out of the review, while a
+        # `-diff` the PR adds for its own file does nothing.
+        (self.repo / ".gitattributes").write_text("*.lock -diff\n")
+        (self.repo / "deps.lock").write_text("lock_marker = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "base declares lockfiles -diff")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        (self.repo / "deps.lock").write_text("lock_marker = 2\n")
+        with (self.repo / ".gitattributes").open("a") as attributes:
+            attributes.write("*.cfg -diff\n")
+        (self.repo / "settings.cfg").write_text("setting_marker = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "PR edits a lockfile and hides its own file")
+        self.head = self.git("rev-parse", "HEAD").strip()
+        result = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = self.context()
+        patch = (context / "diff.patch").read_text()
+        self.assertIn("Binary files a/deps.lock and b/deps.lock differ", patch)
+        self.assertNotIn("lock_marker", patch)
+        self.assertIn("setting_marker = 1", patch)
+        self.assertIn("+*.cfg -diff", patch)
+        rows = {
+            row.split("\t", 2)[2]: row.split("\t", 2)[:2]
+            for row in (context / "files.tsv").read_text().splitlines()
+        }
+        self.assertEqual(rows["deps.lock"], ["-", "-"])
+        self.assertEqual(rows["settings.cfg"], ["1", "0"])
+
+    def test_both_diff_commands_read_attributes_from_the_base(self):
         # Joined continuation lines: one entry per shell command.
         commands = self.step["run"].replace("\\\n", " ").splitlines()
         patch = [c for c in commands if 'diff.patch"' in c and " diff " in c]
@@ -195,11 +225,10 @@ class ReviewContextTests(unittest.TestCase):
         self.assertEqual(len(patch), 1)
         self.assertEqual(len(numstat), 1)
         for command in patch + numstat:
-            self.assertIn('git --attr-source="$empty_tree" --no-pager diff', command)
+            self.assertIn('git --attr-source="$BASE_SHA" --no-pager diff', command)
         # No --text: real binaries keep their one-line summary, so the patch
         # stays bounded by the PR's text however large its binaries are.
         self.assertNotIn("--text", patch[0])
-        self.assertIn('empty_tree="$(git hash-object -t tree /dev/null)"', commands)
 
     def test_repository_diff_programs_are_not_executed(self):
         marker = self.directory / "unexpected-execution"

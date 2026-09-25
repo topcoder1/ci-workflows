@@ -244,16 +244,15 @@ jobs:
           context_dir=$(mktemp -d "$GITHUB_WORKSPACE/.claude-review-context.XXXXXX")
           # Compare committed blobs only. Disable both executable diff paths
           # and rename inference; every changed path remains represented.
-          # The PR's own .gitattributes must not decide what the review sees:
-          # with them, a path marked `binary` or `-diff` (that .gitattributes
-          # included) arrives only as "Binary files ... differ", and files.tsv
-          # lists it as binary. --attr-source (the empty tree) makes git read
-          # none of them. Real binaries keep their one-line summary, so the
-          # patch stays bounded by the PR's text.
-          empty_tree="$(git hash-object -t tree /dev/null)"
-          git --attr-source="$empty_tree" --no-pager diff --no-ext-diff --no-textconv --no-renames --full-index \
+          # Attributes come from the base commit, never from the PR. With the
+          # PR's own .gitattributes, a path it marks `binary` or `-diff` (that
+          # .gitattributes included) arrives only as "Binary files ...
+          # differ", and files.tsv lists it as binary. --attr-source reads
+          # them from the base instead, so what the base already declares
+          # keeps working. Needs git 2.40+; an older git rejects the option.
+          git --attr-source="$BASE_SHA" --no-pager diff --no-ext-diff --no-textconv --no-renames --full-index \
             "$BASE_SHA...$HEAD_SHA" -- > "$context_dir/diff.patch"
-          git --attr-source="$empty_tree" --no-pager diff --no-ext-diff --no-textconv --no-renames --numstat \
+          git --attr-source="$BASE_SHA" --no-pager diff --no-ext-diff --no-textconv --no-renames --numstat \
             "$BASE_SHA...$HEAD_SHA" -- > "$context_dir/files.tsv"
           awk '/^diff --git / { print NR "\t" $0 }' "$context_dir/diff.patch" > "$context_dir/index.tsv"
           printf 'base=%s\nhead=%s\n' "$BASE_SHA" "$HEAD_SHA" > "$context_dir/source.txt"
