@@ -24,8 +24,8 @@ on:
           inherit` is a silent no-op across orgs. A run Dependabot triggers
           reads ONLY the caller repo's Dependabot secret store, so the PAT
           must be stored there too (gh secret set AUTOMERGE_PAT --app
-          dependabot). Without a user PAT the arm still happens, on
-          GITHUB_TOKEN, with a warning annotation.
+          dependabot). Without it the arm still happens, on GITHUB_TOKEN,
+          with a warning annotation.
         required: false
     # GITHUB_TOKEN is automatically passed to reusable workflows; no need to declare.
 
@@ -178,29 +178,18 @@ jobs:
         # the claude-author/safe-paths gates refuse over (#217) does not apply,
         # and refusing would stop auto-merge in every caller not yet provisioned
         # (44 of 46 on 2026-09-25). It warns instead, so the fallback is never
-        # silent. The /user probe is #217's: the PAT must also BE a user
-        # credential. Pinned by selftest/test_dependabot_pat_warning.sh.
+        # silent. Only the GITHUB_TOKEN fallback warns. There is no GET /user
+        # probe as in #217: another App token's merge still fires push
+        # workflows, and a PAT that reaches this step has already listed the
+        # PR's commits in `authorship`, so a failed /user read would claim a
+        # suppression that is not happening. Pinned by
+        # selftest/test_dependabot_pat_warning.sh.
         run: |
           set -euo pipefail
-          warn() {
-            msg="$1 GitHub attributes the merge to github-actions[bot] and runs no push workflows (CI, deploys) for it. Fix: map automerge_pat to the repo's AUTOMERGE_PAT secret explicitly in the caller (secrets: inherit passes nothing to a reusable owned by another account), and store that user PAT where a Dependabot-triggered run can read it: gh secret set AUTOMERGE_PAT --app dependabot --repo ${GITHUB_REPOSITORY}"
+          if [ "$USING_PAT" != "1" ]; then
+            msg="No automerge_pat reached this workflow, so this PR is armed with GITHUB_TOKEN: GitHub attributes the merge to github-actions[bot] and runs no push workflows (CI, deploys) for it. Fix: map automerge_pat to the repo's AUTOMERGE_PAT secret explicitly in the caller (secrets: inherit passes nothing to a reusable owned by another account), and store that user PAT where a Dependabot-triggered run can read it: gh secret set AUTOMERGE_PAT --app dependabot --repo ${GITHUB_REPOSITORY}"
             echo "::warning::$msg"
             echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          }
-          if [ "$USING_PAT" != "1" ]; then
-            warn "No automerge_pat reached this workflow, so this PR is armed with GITHUB_TOKEN."
-          else
-            arm_as=""
-            for _ in 1 2 3; do
-              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
-                break
-              fi
-              arm_as=""
-              sleep 2
-            done
-            if [ -z "$arm_as" ]; then
-              warn "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
-            fi
           fi
           gh pr merge --auto "--${METHOD}" --match-head-commit "$HEAD_SHA" "$PR_URL"
         env:
