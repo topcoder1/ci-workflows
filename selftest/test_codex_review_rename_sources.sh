@@ -51,7 +51,9 @@ trap 'rm -rf "$T"' EXIT
 # exercise a path production no longer takes, so pin it first. The list must
 # not travel in the environment: Linux refuses to start a process with any
 # single environment string over 128 KiB, and a large PR's list is bigger
-# (case 8).
+# (case 8). The run line is pinned exactly too: this test starts node itself,
+# so a run line that read the file back into the environment would otherwise
+# go unnoticed.
 gate_env=$(awk '
   /^[[:space:]]*id: gate[[:space:]]*$/ { in_step = 1; next }
   in_step && /^      - name:/ { exit }
@@ -61,10 +63,11 @@ handoff=$(sed -n 's/^[[:space:]]*CHANGED_FILES_FILE: \${{ runner\.temp }}\/\([A-
 # shellcheck disable=SC2016 # literal ${{ }} expressions, matched verbatim
 if [ -n "$handoff" ] \
   && ! grep -qE '^[[:space:]]*CHANGED_FILES:' <<<"$gate_env" \
-  && grep -qF 'DIFF_LINES: ${{ steps.diff.outputs.lines }}' <<<"$gate_env"; then
+  && grep -qF 'DIFF_LINES: ${{ steps.diff.outputs.lines }}' <<<"$gate_env" \
+  && grep -qxE '[[:space:]]*run: node \.github/scripts/codex-gate\.mjs[[:space:]]*' <<<"$gate_env"; then
   echo "✓ the cost gate reads the path list from the runner temp file '$handoff' and the diff step's line count"
 else
-  echo "✗ $WF's cost gate must take CHANGED_FILES_FILE under runner.temp and DIFF_LINES from the diff step, with no CHANGED_FILES env — this test no longer models it"
+  echo "✗ $WF's cost gate must take CHANGED_FILES_FILE under runner.temp and DIFF_LINES from the diff step, with no CHANGED_FILES env, and run 'node .github/scripts/codex-gate.mjs' as is — this test no longer models it"
   exit 1
 fi
 

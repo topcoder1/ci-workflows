@@ -7,8 +7,9 @@
 //                      not start a process with a single environment string
 //                      over 128 KiB, and a large PR's list exceeds that.
 //   CHANGED_FILES      newline-separated list of files in the PR diff; read
-//                      only when CHANGED_FILES_FILE is unset (workflow YAML
-//                      from before the file handoff still passes this)
+//                      only when CHANGED_FILES_FILE is unset or empty
+//                      (workflow YAML from before the file handoff still
+//                      passes this)
 //   DIFF_LINES         total +/- lines in the PR diff
 //   SIZE_THRESHOLD     skip if lines < threshold (default 30)
 //   GITHUB_OUTPUT      (optional) — write KEY=VALUE here for downstream steps
