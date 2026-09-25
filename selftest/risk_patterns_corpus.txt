@@ -181,6 +181,7 @@ RISKY: monitoring/docker-compose.monitoring.yml
 RISKY: tests/integration/docker-compose.yml
 RISKY: api.Dockerfile
 RISKY: docker/proxy.Dockerfile
+RISKY: tests/images/api-prod.Dockerfile
 # The stem may be empty: `docker build -f tests/.Dockerfile` works too.
 RISKY: tests/.Dockerfile
 # Still SAFE: a file that only NAMES one, and each anchor's near-miss (a
@@ -190,6 +191,9 @@ RISKY: tests/.Dockerfile
 # has either.
 SAFE: services/docker-compose/x.yml
 SAFE: docs/compose.examples/example.yml
+# The name must START with docker-compose (or be compose.*): a fixture named
+# after one is an ordinary file, and the (^|/) anchor keeps it out.
+SAFE: tests/fixtures/invalid-docker-compose.yml
 SAFE: docs/docker-compose-guide.md
 SAFE: docs/compose.md
 SAFE: composer.yaml

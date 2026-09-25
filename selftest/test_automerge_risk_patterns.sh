@@ -176,7 +176,7 @@ typo_control compose cmopose 4 compose.yaml compose.yml compose.override.yaml \
   services/api/docker-compose.yaml services/api/docker-compose-dev.yml \
   monitoring/docker-compose.monitoring.yml tests/integration/docker-compose.yml
 typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile \
-  tests/.Dockerfile
+  tests/.Dockerfile tests/images/api-prod.Dockerfile
 typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
 
 # The shipped list must still leave each near-miss alone, so WIDENING a
@@ -186,6 +186,7 @@ echo ""
 echo "Name-gated near-misses — the SHIPPED list must NOT match these:"
 for p in docs/docker-compose-guide.md docs/compose.md composer.yaml recompose.yml \
   services/docker-compose/x.yml docs/compose.examples/example.yml \
+  tests/fixtures/invalid-docker-compose.yml \
   docs/api.Dockerfile.md tests/regression/test_dockerfile_model_deps_pinned.py \
   src/CODEOWNERS docs/team/CODEOWNERS docs/CODEOWNERS.md; do
   if matches_in "$shipped" "$p"; then
