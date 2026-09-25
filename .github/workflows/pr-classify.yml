@@ -120,10 +120,25 @@ jobs:
             echo "::error::PR changes 3000+ files — file listing is truncated, cannot classify. Merge manually."
             exit 1
           fi
+          # A rename is listed under its new path only; the old path is in
+          # `.previous_filename`. Classify both ends, as the automerge lanes
+          # do: classify.mjs returns the highest-priority class across all
+          # paths, so an added path can only move the class toward gating.
+          # Appended after the count above, which caps the listing endpoint,
+          # not the path list. Fails closed: a rename source that cannot be
+          # read is a path that cannot be classified.
+          renamed_from=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || {
+            echo "::error::could not list PR rename sources after 3 attempts — cannot classify (fail closed). Re-run when the API recovers."
+            exit 1
+          }
+          if [ -n "$renamed_from" ]; then
+            changed=$(printf '%s\n%s' "$changed" "$renamed_from")
+          fi
           class=$(echo "$changed" | node .github/scripts/classify.mjs)
           echo "class=$class" >> "$GITHUB_OUTPUT"
           echo "Computed risk class: $class"
-          echo "Changed files:"
+          echo "Classified paths (changed files, then any rename sources):"
           # shellcheck disable=SC2001 # multiline indent — sed is clearer than ${var//.../...}
           echo "$changed" | sed 's/^/  /'
 

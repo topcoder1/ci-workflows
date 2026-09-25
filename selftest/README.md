@@ -108,6 +108,18 @@ arbitrary helper scripts; that's a different kind of repo.
   Each run case has a control that differs only in the match and must skip.
   The first selftest to execute `codex-gate.mjs` at all (gap raised on
   whois-api-llc/wxa_webcat#1612).
+- `test_pr_classify_rename_sources.sh` / `test_codex_review_rename_sources.sh`
+  — the files API lists a rename under its new path only, with the old one
+  in `.previous_filename`. `pr-classify.yml`'s compute step and
+  `codex-review.yml`'s diff step now pass both paths to their classifier,
+  like the automerge lanes. Each test runs the shipped step against a stub
+  `gh` that applies the step's own `--jq` filter to gh-shaped JSON, then the
+  real `classify.mjs` or `codex-gate.mjs`. Pins: a rename out of a gated or
+  `always_review` path keeps that verdict; the docs/tests-only skip covers
+  the old path too; an unreadable rename listing fails closed; the
+  3000-entry cap counts the listing only; a rename on page 2 is still read.
+  Controls: a rename with neither end gated stays benign, and the step with
+  its rename read cut out, or unpaginated, reverts to the benign verdict.
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
