@@ -26,8 +26,11 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 (^|/)naf(/|\.(py|go|ts|js)$)
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
+(^|/)[^/]+\.Dockerfile$
 ^docker-compose.*\.ya?ml$
 (^|/)docker/docker-compose.*\.ya?ml$
+(^|/)docker-compose[^/]*\.ya?ml$
+(^|/)compose(\.[^/]*)?\.ya?ml$
 ^\.github/workflows/.*
 ^templates/ci-workflows/.*
 ^\.github/actions?/.*
@@ -35,6 +38,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 (^|/)action\.ya?ml$
 ^\.github/dependabot\.ya?ml$
 ^\.github/risk-paths\.yml$
+^(docs/)?CODEOWNERS$
 ^\.github/CODEOWNERS$
 ^infra/iam/.*
 ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
@@ -107,6 +111,54 @@ for p in "${SAFE[@]}"; do
     echo "  ✓ $p"
   fi
 done
+
+# --- Name-gated files: typo negative controls (2026-09-25) ---
+# The corpus proves the list gates compose files, suffix-style Dockerfiles and
+# CODEOWNERS. This proves each verdict comes from a line naming that file, and
+# can FAIL: misspell the name in a copy of the list, and every probe must then
+# stop matching. If one still matches, another pattern (^deploy/.*, say) is
+# carrying it, and the corpus entry proves nothing about these lines. The
+# probes are HARDCODED on purpose: a probe read back out of the list under
+# test agrees with that list no matter what it says.
+matches_in() {
+  local list=$1 f=$2 pat
+  while IFS= read -r pat; do
+    pat="${pat#"${pat%%[![:space:]]*}"}"
+    [ -z "$pat" ] && continue
+    echo "$f" | grep -Eq "$pat" && return 0
+  done <<< "$list"
+  return 1
+}
+
+# typo_control <name> <misspelling> <lines naming it> <probe>...
+typo_control() {
+  local name=$1 typo=$2 lines=$3 copy p
+  shift 3
+  copy="$(printf '%s\n' "$patterns" | sed "s/$name/$typo/g")"
+  # Sanity: the typo rewrote exactly the lines naming the file. Rewriting
+  # none would let every check below pass vacuously.
+  if [ "$(printf '%s\n' "$patterns" | grep -c "$name")" != "$lines" ] || \
+     [ -n "$(printf '%s\n' "$copy" | grep -F "$name" || true)" ]; then
+    echo "  ✗ the typo did not rewrite exactly the $lines '$name' patterns (FAILED)"
+    failed=$((failed + 1))
+  fi
+  for p in "$@"; do
+    if matches_in "$patterns" "$p" && ! matches_in "$copy" "$p"; then
+      echo "  ✓ $p"
+    else
+      echo "  ✗ $p (FAILED — must match the list and NOT the copy with '$name' misspelled)"
+      failed=$((failed + 1))
+    fi
+  done
+}
+
+echo ""
+echo "Name-gated files — must match the list, and NOT a copy with the name misspelled:"
+typo_control compose cmopose 4 compose.yaml compose.override.yaml \
+  services/api/compose.yaml services/api/docker-compose.yml \
+  monitoring/docker-compose.monitoring.yml tests/integration/docker-compose.yml
+typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile
+typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
 
 # --- main.go opt-out (risk_main_go=false) ---
 # Mirrors the runtime filter in claude-author-automerge.yml: when a Go-monorepo

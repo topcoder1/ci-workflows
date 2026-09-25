@@ -159,6 +159,35 @@ RISKY: docker-compose.yml
 RISKY: docker-compose.staging.yml
 RISKY: docker/docker-compose.la.yml
 RISKY: docker/docker-compose.prod.yml
+# Gated by NAME at any depth since 2026-09-25, like Dockerfile, main.go and
+# action.yml: Compose v2's default names (compose.yaml, compose.override.yaml
+# and dotted variants), a docker-compose*.yml outside the root, docker/ and
+# deploy/, and the suffix-style <name>.Dockerfile. A scan of all 144 non-empty
+# fleet repos found no compose.yaml, one *.Dockerfile, and 10 compose files
+# nested outside those dirs, each part of a prod, staging or monitoring stack.
+# 5 of them, in 3 repos running these automerge lanes, were gated by nothing:
+# the regex missed them, and those repos' risk-paths.yml globs match only the
+# root (minimatch's bare `*` does not cross `/`). wxa_webcat#736 was that
+# case: it changed monitoring/docker-compose.monitoring.yml, was labelled
+# risk:standard, and auto-merged 27 seconds after it was marked ready.
+RISKY: compose.yaml
+RISKY: compose.yml
+RISKY: compose.override.yaml
+RISKY: compose.prod.yml
+RISKY: services/api/compose.yaml
+RISKY: services/api/docker-compose.yml
+RISKY: monitoring/docker-compose.monitoring.yml
+RISKY: tests/integration/docker-compose.yml
+RISKY: api.Dockerfile
+RISKY: docker/proxy.Dockerfile
+# Still SAFE: a file that only NAMES one, and each anchor's near-miss (PHP's
+# composer config, a `recompose` file, a doc about a suffix-style Dockerfile).
+SAFE: docs/docker-compose-guide.md
+SAFE: docs/compose.md
+SAFE: composer.yaml
+SAFE: recompose.yml
+SAFE: docs/api.Dockerfile.md
+SAFE: tests/regression/test_dockerfile_model_deps_pinned.py
 
 # ── RISKY: CI/CD ───────────────────────────────────────────────────────────
 RISKY: .github/workflows/ci.yml
@@ -166,6 +195,17 @@ RISKY: .github/workflows/deploy.yml
 RISKY: .github/workflows/lint.yml
 RISKY: .github/risk-paths.yml
 RISKY: .github/CODEOWNERS
+# GitHub reads CODEOWNERS from .github/, then the root, then docs/, and the
+# first one it finds wins. A repo with no .github/CODEOWNERS takes its owners
+# from the root or docs/ copy, and until 2026-09-25 neither was gated.
+# docs/CODEOWNERS is also safe-by-glob, so in safe-paths-automerge.yml the
+# tier-2 hold is what stops it. All 11 fleet CODEOWNERS files sit in .github/
+# today. Still SAFE: any other location, which GitHub never reads.
+RISKY: CODEOWNERS
+RISKY: docs/CODEOWNERS
+SAFE: src/CODEOWNERS
+SAFE: docs/team/CODEOWNERS
+SAFE: docs/CODEOWNERS.md
 
 # ── RISKY: fleet CI templates (2026-07-16 gap — dotclaude#157) ─────────────
 # The caller templates + fleet automation under templates/ci-workflows/ are the
@@ -288,12 +328,13 @@ SAFE: docs/auth.md
 #     `docker/docker-compose.la.yml` auto-armed a Claude PR — the old
 #     `^docker-compose` anchor missed the `docker/` prefix).
 #   - `deploy/local/docker-compose.yml` IS gated (matches `^deploy/.*`).
-#   - `services/api/docker-compose.yaml` is NOT gated globally (arbitrary
-#     nesting outside `docker/`/`deploy/`/`infra/`). Repos that nest compose
-#     files elsewhere should add an explicit HIGH_RISK_PATTERNS entry + RISKY: here.
+#   - `services/api/docker-compose.yaml` IS gated since 2026-09-25: a compose
+#     file now matches at any depth (see the containers + compose section).
+#     It was SAFE here before, with nesting left to per-repo patterns, and
+#     that left 5 fleet compose files gated by nothing.
 #   - A non-compose file under `docker/` (e.g. docker/README.md) stays SAFE.
 RISKY: deploy/local/docker-compose.yml
-SAFE: services/api/docker-compose.yaml
+RISKY: services/api/docker-compose.yaml
 SAFE: docker/README.md
 SAFE: stripe/webhooks.ts
 SAFE: src/stripe/client.go
@@ -359,12 +400,11 @@ RISKY: .github/scripts/classify.mjs
 RISKY: .github/ci/action.yml
 RISKY: ci/my-action/action.yaml
 RISKY: action.yml
-# Accepted gap (house style, cf. the arbitrary-nested compose-file SAFE entries
-# above): a HELPER file (index.js, run.sh) beside an action in an arbitrary
-# NON-.github dir is not gated globally — repos that place actions there add an
-# explicit pattern. The action.yml/.yaml itself IS gated everywhere; only the
-# loose siblings in exotic locations are the residual. A plain index.js is
-# normal app code, correctly non-risk.
+# Accepted gap: a HELPER file (index.js, run.sh) beside an action in an
+# arbitrary NON-.github dir is not gated globally — repos that place actions
+# there add an explicit pattern. The action.yml/.yaml itself IS gated
+# everywhere; only the loose siblings in exotic locations are the residual.
+# A plain index.js is normal app code, correctly non-risk.
 SAFE: ci/my-action/index.js
 # Lookalikes that must NOT match the action-def filename rule (anchored on (^|/)):
 SAFE: src/redux/reaction.yaml
