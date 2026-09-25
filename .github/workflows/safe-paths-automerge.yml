@@ -662,9 +662,10 @@ jobs:
       # Scoped to `all_safe == '1'`, which is what keeps it from fighting a
       # sibling: in that branch every changed file is safe-by-glob, so this
       # workflow is the one that arms. The exception is renames_safe == '0'
-      # (a rename's old path is not safe-by-glob): the arm is withheld there,
-      # but tier 3 still judges the diff and its error fails closed here
-      # like any other. A hard failure of the
+      # (a rename's old path is not safe-by-glob): the arm is withheld there
+      # and a sibling may hold a legitimate one, yet a tier-3 error still
+      # revokes, failing closed as on main, where such a diff read
+      # all_safe=1 and armed here. A hard failure of the
       # `classify` step itself is deliberately NOT covered — all_safe is
       # then unknown, the diff may carry source files, and revoking would
       # disarm a sibling's legitimate arm on a PR this workflow never had a

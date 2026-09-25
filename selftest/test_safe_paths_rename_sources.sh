@@ -71,10 +71,27 @@ step_if() {
     f { print }
   ' "$WF" | grep -vE '^[[:space:]]*#' || true
 }
-if grep -qF "steps.classify.outputs.renames_safe == '1'" <<<"$(step_if 'Enable auto-merge')"; then
-  echo "✓ the enable step arms only when renames_safe == '1'"
+# The enable step's whole `if:` expression, whitespace collapsed, compared
+# exactly: a substring check would also pass `... == '1' || ...`, which arms
+# whenever tier 3 clears the diff.
+enable_if=$(step_if 'Enable auto-merge' \
+  | sed -e 's/^[[:space:]]*if:[[:space:]]*//' -e 's/^[>|][-+]\{0,1\}[[:space:]]*$//' \
+  | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
+want_if="steps.classify.outputs.all_safe == '1' && steps.classify.outputs.renames_safe == '1' && steps.classifier_hold.outputs.hold == '0'"
+if [ "$enable_if" = "$want_if" ]; then
+  echo "✓ the enable step arms only when all_safe, renames_safe and tier 3 all clear the diff"
 else
-  echo "✗ the enable step does not require renames_safe == '1' — an unsafe old path would arm"
+  echo "✗ the enable step's condition is '$enable_if', want '$want_if' — an unsafe old path could arm"
+  failed=1
+fi
+# renames_safe=0 is a defer verdict: a sibling may legitimately arm the same
+# diff, so the revoke step must not act on it. Change this pin only together
+# with a revoke design that cannot disarm a sibling's arm.
+revoke_if=$(step_if 'Revoke auto-merge')
+if grep -q 'always()' <<<"$revoke_if" && ! grep -q 'renames_safe' <<<"$revoke_if"; then
+  echo "✓ the revoke step does not act on renames_safe (a defer verdict)"
+else
+  echo "✗ the revoke step's condition reads renames_safe, or could not be read — a sibling's legitimate arm could be revoked"
   failed=1
 fi
 tier3_ifs="$(step_if 'Setup Node')$(step_if 'Check the caller')"
