@@ -97,7 +97,11 @@ jobs:
           # NUL-delimited so paths containing newlines/control chars stay
           # as one record and CANNOT spoof additional matches by being
           # split on a converted newline.
-          git diff -z --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-paths.z
+          # --no-renames: with rename detection (porcelain git's default),
+          # --name-only lists a renamed file under its new path only, and
+          # the classifier must see the old path as well. Pinned by
+          # selftest/test_verifier_changed_paths_renames.py.
+          git diff -z --no-renames --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-paths.z
           # Validate each NUL-delimited record BEFORE writing the
           # newline-delimited output the classifier consumes. Whitelist:
           # [A-Za-z0-9._/-] (no whitespace, no quotes, no shell metachars).
@@ -248,6 +252,12 @@ jobs:
 
           For each matched file, do EVIDENCE-BASED verification:
             1. Read the diff for that file via Bash: \`git diff origin/${BASE_REF}...HEAD -- <file>\`.
+               That path-scoped diff shows a renamed file only as a deletion
+               at its old path or an addition at its new one. List the PR's
+               renames with \`git diff --find-renames --name-status --diff-filter=R origin/${BASE_REF}...HEAD\`,
+               and for a matched file listed there, read both paths together
+               with \`git diff --find-renames origin/${BASE_REF}...HEAD -- <old> <new>\`
+               and verify the file at both paths.
             2. Identify the threat class (auth bypass, secret leak, migration data loss, billing logic change, etc.).
             3. Run read-only verification commands (git inspection, grep, file reads) that probe whether the change is safe.
             4. Record the command + truncated output (≤500 chars per command) in your transcript.
