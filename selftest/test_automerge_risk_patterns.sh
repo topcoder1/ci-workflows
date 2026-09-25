@@ -26,7 +26,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 (^|/)naf(/|\.(py|go|ts|js)$)
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
-(^|/)[^/]+\.Dockerfile$
+(^|/)[^/]*\.Dockerfile$
 ^docker-compose.*\.ya?ml$
 (^|/)docker/docker-compose.*\.ya?ml$
 (^|/)docker-compose[^/]*\.ya?ml$

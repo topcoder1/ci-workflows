@@ -188,7 +188,7 @@ jobs:
           (^|/)naf(/|\.(py|go|ts|js)$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
-          (^|/)[^/]+\.Dockerfile$
+          (^|/)[^/]*\.Dockerfile$
           ^docker-compose.*\.ya?ml$
           (^|/)docker/docker-compose.*\.ya?ml$
           (^|/)docker-compose[^/]*\.ya?ml$
