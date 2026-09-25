@@ -64,6 +64,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_ruff_ruleset_warning.sh",
     "selftest/test_safe_paths_classifier_hold.sh",
     "selftest/test_safe_paths_output_injection.sh",
+    "selftest/test_safe_paths_rename_sources.sh",
     "selftest/test_safe_paths_risk_tier_hold.sh",
     "selftest/test_safe_paths_unsafe_overrides.sh",
     # These two shipped unlisted (#152 and #160) and ran in CI never —

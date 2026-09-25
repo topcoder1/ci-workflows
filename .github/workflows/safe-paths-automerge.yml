@@ -216,13 +216,14 @@ jobs:
           # docs/legal/aup.md to docs/archive/aup.md — which removes the
           # policy from its canonical location — reads as a plain docs/**
           # change and auto-merges. Match the override against BOTH ends of
-          # every rename. Deliberately a separate request rather than folding
-          # both fields into the `changed` listing above: that listing feeds
-          # the 3000-file cap and the safe-glob loop, and a previous_filename
-          # must never be counted there (it is not a changed file, and a
-          # rename INTO docs/legal/ would otherwise be judged on its old
-          # path). Kept override-only so the existing listing keeps its
-          # exact, separately-pinned semantics.
+          # every rename, and the safe globs and tier 2 below as well: a
+          # rename source is a path the PR removes, so moving src/worker.py
+          # into docs/archive/ must be judged the way removing src/worker.py
+          # is. Deliberately a separate request rather than folding both
+          # fields into the `changed` listing above: the 3000-file cap below
+          # counts that listing's entries, one per changed file, and a
+          # source is not an entry of its own. Counting sources there would
+          # fail closed on a listable PR (2999 files plus a rename).
           renamed_from=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[] | select(.previous_filename) | .previous_filename')
 
@@ -286,6 +287,8 @@ jobs:
             exit 0
           fi
 
+          # Every changed path AND every rename source (see renamed_from
+          # above); the cap above counted the listing alone.
           unsafe_files=""
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -301,7 +304,7 @@ jobs:
             if [ "$matched" -eq 0 ]; then
               unsafe_files="$unsafe_files$f"$'\n'
             fi
-          done <<< "$changed"
+          done <<< "$(printf '%s\n%s\n' "$changed" "$renamed_from")"
 
           if [ -n "$unsafe_files" ]; then
             echo "all_safe=0" >> "$GITHUB_OUTPUT"
