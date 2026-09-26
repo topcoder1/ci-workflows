@@ -26,8 +26,11 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 (^|/)naf(/|\.(py|go|ts|js)$)
 (^|/)main\.go$
 (^|/)Dockerfile(\..*)?$
+(^|/)[^/]*\.Dockerfile$
 ^docker-compose.*\.ya?ml$
 (^|/)docker/docker-compose.*\.ya?ml$
+(^|/)docker-compose[^/]*\.ya?ml$
+(^|/)compose(\.[^/]*)?\.ya?ml$
 ^\.github/workflows/.*
 ^templates/ci-workflows/.*
 ^\.github/actions?/.*
@@ -35,6 +38,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 (^|/)action\.ya?ml$
 ^\.github/dependabot\.ya?ml$
 ^\.github/risk-paths\.yml$
+^(docs/)?CODEOWNERS$
 ^\.github/CODEOWNERS$
 ^infra/iam/.*
 ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
@@ -102,6 +106,93 @@ echo "Safe paths (must NOT match):"
 for p in "${SAFE[@]}"; do
   if matches "$p"; then
     echo "  ✗ $p (FAILED — should NOT have matched)"
+    failed=$((failed + 1))
+  else
+    echo "  ✓ $p"
+  fi
+done
+
+# --- Name-gated files: typo negative controls (2026-09-25) ---
+# The corpus proves this file's copy of the list gates compose files,
+# suffix-style Dockerfiles and CODEOWNERS. These controls run against the
+# SHIPPED patterns= block instead, read from claude-author-automerge.yml, so
+# narrowing those lines in both workflows (with this copy untouched) fails
+# here too. Each verdict must come from a line naming the file, and can FAIL:
+# misspell the name in a copy of the list, and every probe must then stop
+# matching. If one still matches, another pattern (^deploy/.*, say) is
+# carrying it. The probes are HARDCODED on purpose: a probe read back out of
+# the list under test agrees with that list no matter what it says.
+shipped=$(python3 - "$(dirname "$0")/../.github/workflows/claude-author-automerge.yml" <<'PY'
+import re, sys
+m = re.search(r"^ +patterns='(.*?)'\n", open(sys.argv[1]).read(), re.S | re.M)
+if not m:
+    sys.exit("could not locate the patterns= block in claude-author-automerge.yml")
+print("\n".join(l.lstrip() for l in m.group(1).splitlines() if l.strip()))
+PY
+) || shipped=""
+if [ -z "$shipped" ]; then
+  echo "  ✗ could not read the shipped patterns= block (FAILED)"
+  failed=$((failed + 1))
+fi
+
+matches_in() {
+  local list=$1 f=$2 pat
+  while IFS= read -r pat; do
+    pat="${pat#"${pat%%[![:space:]]*}"}"
+    [ -z "$pat" ] && continue
+    echo "$f" | grep -Eq "$pat" && return 0
+  done <<< "$list"
+  return 1
+}
+
+# typo_control <name> <misspelling> <lines naming it> <probe>...
+typo_control() {
+  local name=$1 typo=$2 lines=$3 copy p
+  shift 3
+  copy="$(printf '%s\n' "$shipped" | sed "s/$name/$typo/g")"
+  # Sanity: the typo rewrote exactly the lines naming the file. Rewriting
+  # none would let every check below pass vacuously.
+  if [ "$(printf '%s\n' "$shipped" | grep -c "$name")" != "$lines" ] || \
+     [ -n "$(printf '%s\n' "$copy" | grep -F "$name" || true)" ]; then
+    echo "  ✗ the typo did not rewrite exactly the $lines '$name' patterns (FAILED)"
+    failed=$((failed + 1))
+  fi
+  for p in "$@"; do
+    if matches_in "$shipped" "$p" && ! matches_in "$copy" "$p"; then
+      echo "  ✓ $p"
+    else
+      echo "  ✗ $p (FAILED — must match the shipped list and NOT the copy with '$name' misspelled)"
+      failed=$((failed + 1))
+    fi
+  done
+}
+
+echo ""
+echo "Name-gated files — must match the SHIPPED list, and NOT a copy with the name misspelled:"
+# One probe per corpus case these lines exist for, so narrowing a shipped line
+# to drop any of them (a .yml, a dotless suffix, an empty stem) fails here.
+typo_control compose cmopose 4 compose.yaml compose.yml compose.override.yaml \
+  compose.prod.yml services/api/compose.yaml services/api/docker-compose.yml \
+  services/api/docker-compose.yaml services/api/docker-compose-dev.yml \
+  monitoring/docker-compose.monitoring.yml tests/integration/docker-compose.yml \
+  docker-compose/stacks/prod.yml services/docker/docker-compose/stacks/prod.yml
+typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile \
+  tests/.Dockerfile tests/images/api-prod.Dockerfile
+typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
+
+# The shipped list must still leave each near-miss alone, so WIDENING a
+# shipped line (a `.*` that crosses `/`, a dropped anchor) fails here too,
+# with this file's copy untouched. Hardcoded, like the probes above.
+echo ""
+echo "Name-gated near-misses — the SHIPPED list must NOT match these:"
+for p in docs/docker-compose-guide.md docs/compose.md composer.yaml recompose.yml \
+  services/docker-compose/x.yml docs/compose.examples/example.yml \
+  tests/fixtures/invalid-docker-compose.yml \
+  docs/api.Dockerfile.md tests/fixtures/not-a-Dockerfile \
+  tests/regression/test_dockerfile_model_deps_pinned.py \
+  src/CODEOWNERS docs/team/CODEOWNERS docs/CODEOWNERS.md; do
+  if matches_in "$shipped" "$p"; then
+    echo "  ✗ $p (FAILED — the shipped list must NOT match this near-miss)"
     failed=$((failed + 1))
   else
     echo "  ✓ $p"

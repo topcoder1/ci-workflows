@@ -193,6 +193,22 @@ run_case "rename-auth-out" 0 risk-tier-hold "web/tests/e2e/misc/signup2.spec.ts"
 RENAMED_FROM="web/tests/e2e/kb/old.spec.ts"
 run_case "rename-benign" 1 - "web/tests/e2e/kb/new.spec.ts"
 
+# 6b. Name-gated files under docs/ or tests/ (2026-09-25). Compose files,
+#     suffix-style Dockerfiles and CODEOWNERS are gated by name, so a copy in
+#     a safe tree is safe-by-glob and risk-tier at once, and only this hold
+#     stops the arm. docs/CODEOWNERS matters most: GitHub reads it when a repo
+#     has no .github/ or root copy, so a docs-only diff could change who must
+#     review every other file.
+run_case "risk-codeowners-docs" 0 risk-tier-hold "docs/CODEOWNERS"
+run_case "risk-compose-tests" 0 risk-tier-hold "tests/integration/docker-compose.yml"
+run_case "risk-compose-v2-docs" 0 risk-tier-hold "docs/examples/compose.yaml"
+run_case "risk-dockerfile-suffix-tests" 0 risk-tier-hold "tests/e2e/e2e.Dockerfile"
+# Tier 2, not tier 1: the bypass label releases it, like the pricing case.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-codeowners" 1 - "docs/CODEOWNERS"
+# Boundary: a doc that only names the file still auto-merges.
+run_case "safe-codeowners-doc" 1 - "docs/codeowners-guide.md"
+
 # 7. DRIFT GUARD. The tier-2 list is a verbatim copy of the sibling gate's
 #    `patterns=` block. If they diverge, the two gates disagree about what
 #    is risky and this whole fix silently develops holes.

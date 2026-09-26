@@ -188,8 +188,11 @@ jobs:
           (^|/)naf(/|\.(py|go|ts|js)$)
           (^|/)main\.go$
           (^|/)Dockerfile(\..*)?$
+          (^|/)[^/]*\.Dockerfile$
           ^docker-compose.*\.ya?ml$
           (^|/)docker/docker-compose.*\.ya?ml$
+          (^|/)docker-compose[^/]*\.ya?ml$
+          (^|/)compose(\.[^/]*)?\.ya?ml$
           ^\.github/workflows/.*
           ^templates/ci-workflows/.*
           ^\.github/actions?/.*
@@ -197,6 +200,7 @@ jobs:
           (^|/)action\.ya?ml$
           ^\.github/dependabot\.ya?ml$
           ^\.github/risk-paths\.yml$
+          ^(docs/)?CODEOWNERS$
           ^\.github/CODEOWNERS$
           ^infra/iam/.*
           ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
@@ -336,8 +340,9 @@ jobs:
             # holds — same rename-bypass reasoning as tier 1.
             #
             # One `grep -E -f` pass rather than the nested per-pattern loop
-            # used above: tier 1 is a single pattern, tier 2 is 34, and at
-            # the 3000-file cap the nested form would fork ~100k greps.
+            # used above: tier 1 is a single pattern, tier 2 is the whole
+            # risk-tier list, and at the 3000-file cap the nested form would
+            # fork over 100k greps.
             # Matching FILES is all the decision needs; the per-pattern
             # attribution below runs only over the (few) hits, so the log
             # stays as actionable as the sibling's blocked-PR comment.
