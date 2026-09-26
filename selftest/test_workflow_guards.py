@@ -690,7 +690,10 @@ def test_scoped_git_credential_gated_and_scrubbed(workflow):
     # and a least-privilege GIT_DEPS_PAT (fine-grained read-only) wins over
     # the fleet-wide AUTOMERGE_PAT when forwarded.
     assert 'CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"' in text, workflow
-    assert "secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT" in text, workflow
+    # ...and AUTOMERGE_PAT is never the fallback on a Dependabot-triggered run
+    # (evaluated in test_git_deps_credential_dependabot.py).
+    guarded = "(github.actor != 'dependabot[bot]' && secrets.AUTOMERGE_PAT)"
+    assert f"secrets.GIT_DEPS_PAT || {guarded}" in text, workflow
 
     # (c) Every install branch (test_command / uv / pip fallback) scrubs the
     # credential, and each test invocation is LOCALLY preceded by a scrub
