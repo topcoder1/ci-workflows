@@ -99,9 +99,13 @@ jobs:
           # split on a converted newline.
           # --no-renames: with rename detection (porcelain git's default),
           # --name-only lists a renamed file under its new path only, and
-          # the classifier must see the old path as well. Pinned by
+          # the classifier must see the old path as well.
+          # --ignore-submodules=none: git applies a submodule's `ignore`
+          # setting from the checkout's .gitmodules, the PR's own copy, even
+          # between two commits, and `ignore = all` would leave that
+          # submodule's change out of the list. Both pinned by
           # selftest/test_verifier_changed_paths_renames.py.
-          git diff -z --no-renames --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-paths.z
+          git diff -z --no-renames --ignore-submodules=none --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-paths.z
           # Validate each NUL-delimited record BEFORE writing the
           # newline-delimited output the classifier consumes. Whitelist:
           # [A-Za-z0-9._/-] (no whitespace, no quotes, no shell metachars).
@@ -251,13 +255,19 @@ jobs:
           --- END_UNTRUSTED_MATCHES ---
 
           For each matched file, do EVIDENCE-BASED verification:
-            1. Read the diff for that file via Bash: \`git diff origin/${BASE_REF}...HEAD -- <file>\`.
+            1. Read the diff for that file via Bash: \`git diff --ignore-submodules=none origin/${BASE_REF}...HEAD -- <file>\`.
                That path-scoped diff shows a renamed file only as a deletion
                at its old path or an addition at its new one. List the PR's
-               renames with \`git diff --find-renames --name-status --diff-filter=R origin/${BASE_REF}...HEAD\`,
+               renames with \`git diff --ignore-submodules=none --find-renames=10% --name-status --diff-filter=R origin/${BASE_REF}...HEAD\`,
                and for a matched file listed there, read both paths together
-               with \`git diff --find-renames origin/${BASE_REF}...HEAD -- <old> <new>\`
-               and verify the file at both paths.
+               with \`git diff --ignore-submodules=none --find-renames=10% origin/${BASE_REF}...HEAD -- <old> <new>\`
+               and verify the file at both paths. A move that rewrites most
+               of the file may not be listed there, and code can also move
+               into a file that already exists, so for every matched file at
+               a path the PR removes, whether or not the listing pairs it,
+               also list every path the PR changes with
+               \`git diff --ignore-submodules=none --no-renames --name-status origin/${BASE_REF}...HEAD\`
+               and verify any that its code moved to.
             2. Identify the threat class (auth bypass, secret leak, migration data loss, billing logic change, etc.).
             3. Run read-only verification commands (git inspection, grep, file reads) that probe whether the change is safe.
             4. Record the command + truncated output (≤500 chars per command) in your transcript.

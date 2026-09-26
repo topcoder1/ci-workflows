@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -54,7 +55,7 @@ class ReviewContextTests(unittest.TestCase):
             text=True,
         )
 
-    def run_step(self, base=None, head=None):
+    def run_step(self, base=None, head=None, script=None):
         environment = dict(
             os.environ,
             BASE_SHA=base or self.base,
@@ -63,7 +64,7 @@ class ReviewContextTests(unittest.TestCase):
             GITHUB_OUTPUT=str(self.output),
         )
         return subprocess.run(
-            ["bash", "-c", self.step["run"]],
+            ["bash", "-c", script or self.step["run"]],
             cwd=self.repo,
             env=environment,
             capture_output=True,
@@ -216,6 +217,64 @@ class ReviewContextTests(unittest.TestCase):
         }
         self.assertEqual(rows["deps.lock"], ["-", "-"])
         self.assertEqual(rows["settings.cfg"], ["1", "0"])
+
+    def commit_submodule_bump(self):
+        # git applies a submodule's `ignore` setting from the checkout's
+        # .gitmodules, the PR's own copy, to a diff between two commits too.
+        # Here the PR moves a submodule to another commit and sets
+        # `ignore = all` for it.
+        section = (
+            '[submodule "lib"]\n'
+            "\tpath = vendor/lib\n"
+            "\turl = https://example.test/lib.git\n"
+        )
+        (self.repo / ".gitmodules").write_text(section)
+        self.git("add", ".gitmodules")
+        self.git(
+            "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib"
+        )
+        self.git("commit", "-qm", "base has a submodule")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        (self.repo / ".gitmodules").write_text(section + "\tignore = all\n")
+        self.git("add", ".gitmodules")
+        self.git("update-index", "--cacheinfo", f"160000,{'2' * 40},vendor/lib")
+        self.git("commit", "-qm", "PR moves it and sets ignore = all")
+        self.head = self.git("rev-parse", "HEAD").strip()
+
+    def test_a_submodule_the_prs_gitmodules_ignores_reaches_the_review(self):
+        self.commit_submodule_bump()
+        result = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = self.context()
+        self.assertIn(
+            f"-Subproject commit {'1' * 40}\n+Subproject commit {'2' * 40}\n",
+            (context / "diff.patch").read_text(),
+        )
+        self.assertEqual(
+            (context / "files.tsv").read_text(),
+            "1\t0\t.gitmodules\n1\t1\tvendor/lib\n",
+        )
+        self.assertIn(
+            "\tdiff --git a/vendor/lib b/vendor/lib\n",
+            (context / "index.tsv").read_text(),
+        )
+
+    def test_without_the_flag_the_prs_gitmodules_hides_the_submodule(self):
+        # Negative control: both diff commands without --ignore-submodules=none.
+        self.commit_submodule_bump()
+        script, count = re.subn(
+            r"(?m)^(\s*git\b[^\n]*?) --ignore-submodules=none\b",
+            r"\1",
+            self.step["run"],
+        )
+        self.assertEqual(count, 2)
+        result = self.run_step(script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = self.context()
+        patch = (context / "diff.patch").read_text()
+        self.assertNotIn("diff --git a/vendor/lib", patch)
+        self.assertNotIn("Subproject commit", patch)
+        self.assertEqual((context / "files.tsv").read_text(), "1\t0\t.gitmodules\n")
 
     def test_both_diff_commands_read_attributes_from_the_base(self):
         # Joined continuation lines: one entry per shell command.
