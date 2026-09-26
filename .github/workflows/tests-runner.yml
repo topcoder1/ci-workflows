@@ -274,6 +274,14 @@ jobs:
         #     over AUTOMERGE_PAT, so theft in the residual window yields
         #     read-only access to a couple of repos rather than the fleet
         #     automerge credential.
+        #   - Never AUTOMERGE_PAT on a Dependabot-triggered run (2026-09-25).
+        #     Such a run reads only the repo's Dependabot secret store, and once
+        #     AUTOMERGE_PAT lives there (so dependabot-auto-merge.yml can arm as
+        #     a user), `uv sync` would hand the fleet-wide write PAT to the
+        #     install code of the very versions the PR bumped. A read-only
+        #     GIT_DEPS_PAT is still used; a repo with private git deps stores
+        #     one in its Dependabot store. github.actor stays dependabot[bot] on
+        #     a re-run, so re-running cannot unlock it.
         # Rewrites are limited to the two fleet orgs, topcoder1 and
         # whois-api-llc, so the PAT never applies to clones of third-party
         # orgs.
@@ -287,8 +295,9 @@ jobs:
           # push to the default branch — schedule / workflow_dispatch /
           # feature-branch pushes run unreviewed code and need the explicit
           # input just like PRs. "Not a PR" is not the same as "trusted".
-          CROSS_ORG_PAT: ${{ ((github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || secrets.AUTOMERGE_PAT) || '' }}
+          CROSS_ORG_PAT: ${{ ((github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || inputs.use_pat_for_git_deps) && (secrets.GIT_DEPS_PAT || (github.actor != 'dependabot[bot]' && secrets.AUTOMERGE_PAT)) || '' }}
           PAT_FORWARDED: ${{ secrets.GIT_DEPS_PAT != '' || secrets.AUTOMERGE_PAT != '' }}
+          DEPENDABOT_RUN: ${{ github.actor == 'dependabot[bot]' }}
         run: |
           set -euo pipefail
           CROSS_ORG_GITCONFIG="$RUNNER_TEMP/cross-org-gitconfig"
@@ -300,6 +309,8 @@ jobs:
               url."https://x-access-token:${CROSS_ORG_PAT}@github.com/whois-api-llc/".insteadOf \
               "https://github.com/whois-api-llc/"
             echo "==> Wrote scoped insteadOf config for topcoder1/* and whois-api-llc/* (scrubbed before the default test run)"
+          elif [[ "$DEPENDABOT_RUN" == "true" && "$PAT_FORWARDED" == "true" ]]; then
+            echo "::notice::Dependabot-triggered run: AUTOMERGE_PAT is never materialized for git deps here, because the bumped packages' install code could read it. A repo with private git-URL deps needs a read-only GIT_DEPS_PAT in its Dependabot secret store: gh secret set GIT_DEPS_PAT --app dependabot."
           elif [[ "$PAT_FORWARDED" == "true" ]]; then
             echo "::notice::AUTOMERGE_PAT is forwarded but not materialized on pull_request runs unless the caller sets use_pat_for_git_deps: true. Repos with private git-URL deps need that input; repos without them should stop forwarding the secret."
           else
