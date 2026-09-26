@@ -1051,3 +1051,70 @@ test("no comparison data reaches the output schema", async () => {
   for (const path of ["src/check.mjs", "src/new.mjs", "lib/a.mjs", "lib/z.mjs"])
     assert.ok(!text.includes(path), path);
 });
+
+test("an unrecognised top-level response field is accepted only when null (staging run 36049558488)", async () => {
+  // On 2026-09-24 the Messages API began returning a top-level
+  // `diagnostics: null` on every response, within the same API version. The
+  // strict envelope refused every review as invalid_response.
+  for (const extra of [
+    { diagnostics: null },
+    { diagnostics: null, a_future_field: null },
+  ]) {
+    const result = await client(async () =>
+      response({ ...envelope(), ...extra }),
+    ).review(fixture());
+    assert.deepEqual(result.review, clean);
+  }
+  // A non-null surprise still fails closed.
+  for (const value of [{}, { cache: "hit" }, "", "x", 0, false, []]) {
+    await rejects(
+      client(async () =>
+        response({ ...envelope(), diagnostics: value }),
+      ).review(fixture()),
+      "invalid_response",
+    );
+  }
+  // Mixing a null extra field with a non-null one fails, in either order.
+  for (const extra of [
+    { diagnostics: null, a_future_field: {} },
+    { a_future_field: {}, diagnostics: null },
+  ]) {
+    await rejects(
+      client(async () => response({ ...envelope(), ...extra })).review(
+        fixture(),
+      ),
+      "invalid_response",
+    );
+  }
+  // Known optional fields keep their own rules: non-null is incomplete, not
+  // an unrecognised field.
+  for (const extra of [
+    { stop_details: { type: "refusal" } },
+    { container: { id: "container_1" } },
+  ]) {
+    await rejects(
+      client(async () => response({ ...envelope(), ...extra })).review(
+        fixture(),
+      ),
+      "incomplete_review",
+    );
+  }
+  // Every required field stays required, refused by the envelope itself.
+  for (const field of [
+    "id",
+    "type",
+    "role",
+    "model",
+    "content",
+    "stop_reason",
+    "stop_sequence",
+    "usage",
+  ]) {
+    const missing = envelope();
+    delete missing[field];
+    await rejects(
+      client(async () => response(missing)).review(fixture()),
+      "invalid_response",
+    );
+  }
+});
