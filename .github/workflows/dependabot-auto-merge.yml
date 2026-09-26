@@ -21,7 +21,11 @@ on:
           caller repo's push workflows (CI, deploys) fire on bot merges —
           GITHUB_TOKEN-attributed merges trigger nothing (GitHub recursion
           guard). Cross-org callers MUST map this explicitly; `secrets:
-          inherit` is a silent no-op across orgs.
+          inherit` is a silent no-op across orgs. A run Dependabot triggers
+          reads ONLY the caller repo's Dependabot secret store, so the PAT
+          must be stored there too (gh secret set AUTOMERGE_PAT --app
+          dependabot). Without it the arm still happens, on GITHUB_TOKEN,
+          with a warning annotation.
         required: false
     # GITHUB_TOKEN is automatically passed to reusable workflows; no need to declare.
 
@@ -164,11 +168,36 @@ jobs:
         # older run then reaches this step and arms the now-human-touched PR.
         # Bound to the SHA, that arm is refused because the head has moved.
         # (Codex round-2 P1. Same idiom as claude-author-automerge.yml.)
-        run: gh pr merge --auto --${{ inputs.merge_method }} --match-head-commit "$HEAD_SHA" "$PR_URL"
+        #
+        # Attribution warning (2026-09-25). GitHub attributes an auto-merge to
+        # whoever ARMED it and runs no push workflow for a merge attributed to
+        # github-actions[bot], so an arm without the caller's user PAT merges
+        # with CI and deploys on main silently skipped: whois-api-llc/wxa_vpn's
+        # deploy.yml missed 42 Dependabot bumps that way. This step still arms
+        # then. Dependabot deletes its own branch, so the stranded-branch hazard
+        # the claude-author/safe-paths gates refuse over (#217) does not apply,
+        # and refusing would stop auto-merge in every caller not yet provisioned
+        # (44 of 46 on 2026-09-25). It warns instead, so the fallback is never
+        # silent. Only the GITHUB_TOKEN fallback warns. There is no GET /user
+        # probe as in #217: another App token's merge still fires push
+        # workflows, and a PAT that reaches this step has already listed the
+        # PR's commits in `authorship`, so a failed /user read would claim a
+        # suppression that is not happening. Pinned by
+        # selftest/test_dependabot_pat_warning.sh.
+        run: |
+          set -euo pipefail
+          if [ "$USING_PAT" != "1" ]; then
+            msg="No automerge_pat reached this workflow, so this PR is armed with GITHUB_TOKEN: GitHub attributes the merge to github-actions[bot] and runs no push workflows (CI, deploys) for it. Fix: map automerge_pat to the repo's AUTOMERGE_PAT secret explicitly in the caller (secrets: inherit passes nothing to a reusable owned by another account), and store that user PAT where a Dependabot-triggered run can read it: gh secret set AUTOMERGE_PAT --app dependabot --repo ${GITHUB_REPOSITORY}"
+            echo "::warning::$msg"
+            echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+          gh pr merge --auto "--${METHOD}" --match-head-commit "$HEAD_SHA" "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          METHOD: ${{ inputs.merge_method }}
           GH_TOKEN: ${{ secrets.automerge_pat || secrets.GITHUB_TOKEN }}
+          USING_PAT: ${{ secrets.automerge_pat != '' && '1' || '0' }}
 
   # The counterweight: withdraw an arm granted by an earlier run once the PR
   # stops being the thing that was armed. The gate above only prevents NEW

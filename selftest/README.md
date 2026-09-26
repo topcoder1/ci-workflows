@@ -158,6 +158,21 @@ arbitrary helper scripts; that's a different kind of repo.
   enabler path (a typo that would be silent in production); structural pins
   hold one arm call site per workflow and keep `automerge_pat`
   `required: false`.
+- `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
+  without the PAT, since Dependabot deletes its own branch and refusing would
+  stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
+  makes the merge github-actions[bot]'s, and GitHub runs no push workflow for
+  it: whois-api-llc/wxa_vpn's deploy.yml skipped 42 Dependabot bumps
+  (2026-07-23..09-25), and a 2026-09-25 sweep found `AUTOMERGE_PAT` in the
+  Dependabot secret store of 2 of 46 callers. Runs the extracted arm step
+  against a stub `gh`. Pins: no PAT gives a `::warning::` (plus a
+  step-summary line) naming `gh secret set AUTOMERGE_PAT --app dependabot`,
+  and the PR is still armed exactly once, head-bound; a PAT arms silently
+  with no `GET /user` probe (another App token's merge still fires push
+  workflows, so a failed probe would misdiagnose); a failed arm still fails
+  the step. A negative control neutralizes the warning. Structural pins: the
+  run block is `${{ }}`-free, there is one arm call site, and `automerge_pat`
+  stays `required: false`.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
