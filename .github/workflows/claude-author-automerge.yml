@@ -66,6 +66,13 @@ name: Claude-author Auto-merge (reusable)
 #       PRs whose only change was .github/dependabot.yml auto-merged because
 #       the .github/ globs covered workflows/ but not the sibling
 #       automation-config and composite-action/script surfaces.
+#     - .gitattributes at any depth. A `-diff` attribute (git's `binary`
+#       macro implies it) makes `git log -p` print "Binary files ... differ"
+#       for the paths it names, and git-mode gitleaks skips those diffs. CI
+#       checks out the PR's own tree, so a PR that adds `* -diff` can hide
+#       secrets in any commit, its own included, from a REQUIRED gitleaks
+#       check; a nested copy does the same for its subtree. Lesson
+#       2026-09-24, measured on gitleaks 8.21.2 and 8.30.1.
 #     - ML serving/model-promotion: ml/predictor.py (live scoring path),
 #       ml/retrain.py (model-promotion gate). Lesson 2026-06-02: a serving-path
 #       fix auto-merged because ml/ had no risk glob; now explicitly matched.
@@ -1285,6 +1292,7 @@ jobs:
           ^\.github/dependabot\.ya?ml$
           ^\.github/risk-paths\.yml$
           ^\.github/CODEOWNERS$
+          (^|/)\.gitattributes$
           ^infra/iam/.*
           ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
           ^infra/nginx.*

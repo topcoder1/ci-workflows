@@ -129,6 +129,23 @@ run_case "risk-session-dir" 0 risk-tier-hold "web/tests/e2e/session/expiry.spec.
 run_case "risk-billing-dir" 0 risk-tier-hold "web/tests/e2e/checkout/pay.spec.ts"
 # A .sql fixture under tests/ is safe-by-glob but risk-tier by content.
 run_case "risk-sql-fixture" 0 risk-tier-hold "tests/fixtures/seed.sql"
+# .gitattributes (2026-09-24). A `-diff` or `binary` attribute makes `git log
+# -p` print "Binary files ... differ", and git-mode gitleaks skips those
+# diffs. So a copy nested in a safe tree can hide the secrets beneath it from
+# the scan while the diff stays 100% docs/tests: the scan goes green, and
+# without the hold this workflow arms.
+run_case "risk-gitattributes-docs" 0 risk-tier-hold "docs/.gitattributes"
+run_case "risk-gitattributes-tests" 0 risk-tier-hold \
+  "tests/fixtures/.gitattributes" "tests/fixtures/config.json"
+# The root copy is not safe-by-glob, so claude-author-automerge's regex gates
+# it, until a caller's extra_safe_globs sweeps it in. A glob that treats git's
+# dotfiles as housekeeping is the plausible shape.
+export EXTRA_GLOBS='(^|/)\.git[^/]*$'
+run_case "risk-gitattributes-via-extra-glob" 0 risk-tier-hold ".gitattributes"
+# Control for the case above: the same glob still arms a plain .gitignore, so
+# the hold comes from the .gitattributes pattern, not from the glob.
+run_case "extra-glob-arms-gitignore" 1 - ".gitignore"
+export EXTRA_GLOBS=""
 # An ADR amendment is 100% docs — safe-by-glob — and exactly the diff the
 # tier-2 hold must catch (wxa-graph gap, 2026-08-27; wxa-graph#477).
 run_case "risk-adr-amendment" 0 risk-tier-hold "docs/decisions/ADR-0003-cluster-algorithm.md"
@@ -163,6 +180,10 @@ run_case "bypass-releases-pricing" 1 - "docs/marketing/pricing-block-handoff.md"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
+# .gitattributes is tier-2 too: a label click on a PR that edits it is a human
+# deciding on that edit. Like the pricing case above, this pins the TIER.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitattributes" 1 - "docs/.gitattributes"
 
 # 3. Tier 1 is absolute — the label does not release customer-facing legal
 #    wording. A label click is not evidence anyone read the clause.

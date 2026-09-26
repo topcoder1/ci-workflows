@@ -198,6 +198,7 @@ jobs:
           ^\.github/dependabot\.ya?ml$
           ^\.github/risk-paths\.yml$
           ^\.github/CODEOWNERS$
+          (^|/)\.gitattributes$
           ^infra/iam/.*
           ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
           ^infra/nginx.*
@@ -336,7 +337,7 @@ jobs:
             # holds — same rename-bypass reasoning as tier 1.
             #
             # One `grep -E -f` pass rather than the nested per-pattern loop
-            # used above: tier 1 is a single pattern, tier 2 is 34, and at
+            # used above: tier 1 is a single pattern, tier 2 is 37, and at
             # the 3000-file cap the nested form would fork ~100k greps.
             # Matching FILES is all the decision needs; the per-pattern
             # attribution below runs only over the (few) hits, so the log

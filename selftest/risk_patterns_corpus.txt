@@ -167,6 +167,32 @@ RISKY: .github/workflows/lint.yml
 RISKY: .github/risk-paths.yml
 RISKY: .github/CODEOWNERS
 
+# ── RISKY: .gitattributes — it can blind git-mode gitleaks (2026-09-24) ────
+# A `-diff` attribute (git's `binary` macro implies it) makes `git log -p`
+# print "Binary files ... differ" for the paths it names, and gitleaks in git
+# mode skips those diffs. CI checks out the PR's own tree, so a PR that adds
+# `* -diff` can hide secrets in any commit, its own included, from the scan,
+# and a REQUIRED gitleaks check goes green. Measured on gitleaks
+# 8.21.2 and 8.30.1: one finding became zero for a root `a.txt -diff`, a root
+# `* binary`, and a nested sub/.gitattributes holding `* -diff`. A nested copy
+# governs its own subtree, hence the (^|/) anchor. Under docs/ or tests/ it is
+# also safe-by-glob, so safe-paths-automerge.yml's tier-2 hold is what stops
+# it there (selftest/test_safe_paths_risk_tier_hold.sh).
+RISKY: .gitattributes
+RISKY: sub/.gitattributes
+RISKY: docs/.gitattributes
+RISKY: tests/fixtures/.gitattributes
+# Still SAFE: on a case-sensitive filesystem git reads only that exact name.
+# Measured: the same `* -diff` in .gitattributes.bak or docs/gitattributes.md
+# leaves the finding in place. A template like GitHub's Python.gitattributes is
+# never read either; it also pins the (^|/) anchor. Case-sensitive on purpose:
+# every fleet gitleaks job runs on ubuntu-latest. On a case-insensitive
+# filesystem (macOS, Windows) git also honours .GITATTRIBUTES, so a job moved
+# to such a runner needs a case-insensitive rule.
+SAFE: docs/gitattributes.md
+SAFE: .gitattributes.bak
+SAFE: docs/examples/Python.gitattributes
+
 # ── RISKY: fleet CI templates (2026-07-16 gap — dotclaude#157) ─────────────
 # The caller templates + fleet automation under templates/ci-workflows/ are the
 # SOURCE of every repo's .github/workflows/*.yml. A Claude PR editing them

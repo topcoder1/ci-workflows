@@ -36,6 +36,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 ^\.github/dependabot\.ya?ml$
 ^\.github/risk-paths\.yml$
 ^\.github/CODEOWNERS$
+(^|/)\.gitattributes$
 ^infra/iam/.*
 ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
 ^infra/nginx.*
