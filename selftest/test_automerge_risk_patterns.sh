@@ -11,12 +11,16 @@
 set -euo pipefail
 
 # Mirror the patterns block from .github/workflows/claude-author-automerge.yml.
-# Keep these in lock-step — if you edit one, edit the other.
+# Keep these in lock-step — if you edit one, edit the other. The mirror drift
+# guard at the bottom of this file fails when they differ.
 patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|jwt|mfa|totp|webauthn|passkey)(/|\.(py|go|ts|tsx|js|jsx)$|$)
 ^(.*/)?secret[s]?(/|\.(py|go|ts|tsx|js|jsx)$|$)
 ^(.*/)?\.env($|\..*)
 ^(.*/)?keychain.*
 ^(.*/)?credentials.*
+(^|/)\.gitleaks(\.(json|toml|yaml|yml|properties|props|prop|hcl|tfvars|dotenv|env|ini))?(/|$)
+(^|/)gitleaks\.toml$
+(^|/)\.gitleaksignore$
 ^(.*/)?migrations(/|$)
 .*\.sql$
 ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
@@ -159,6 +163,84 @@ for p in "internal/auth/security.go" "Dockerfile" "db/migrations/001.sql" "inter
     failed=$((failed + 1))
   fi
 done
+
+# --- gitleaks config: typo negative control (2026-09-24) ---
+# The corpus proves the list above gates gitleaks' config and ignore files.
+# This proves those verdicts come from the three gitleaks lines and can FAIL:
+# misspell `gitleaks` in a copy of the list, and every path below must then
+# stop matching. If one still matches, a different pattern is carrying it, and
+# the corpus entry proves nothing about the gitleaks lines. The probe paths are
+# HARDCODED on purpose — a probe read back out of the list under test agrees
+# with that list no matter what it says (see test_classify_env_globs.sh case 3).
+gitleaks_paths=(.gitleaks.toml sub/.gitleaks.toml .gitleaks.json services/api/.gitleaks.json
+  .gitleaks.toml/.keep .gitleaks.yaml .gitleaks .gitleaks/config.toml
+  gitleaks.toml .github/gitleaks.toml .gitleaksignore services/api/.gitleaksignore)
+patterns_typo="$(printf '%s\n' "$patterns" | sed 's/gitleaks/gitlaeks/g')"
+
+matches_typo() {
+  local f=$1 pat
+  while IFS= read -r pat; do
+    pat="${pat#"${pat%%[![:space:]]*}"}"
+    [ -z "$pat" ] && continue
+    echo "$f" | grep -Eq "$pat" && return 0
+  done <<< "$patterns_typo"
+  return 1
+}
+
+echo ""
+echo "gitleaks typo negative control — must match the list, and NOT a copy with 'gitleaks' misspelled:"
+# Sanity: the mutation rewrote exactly the three gitleaks lines. Rewriting
+# none would let every check below pass vacuously.
+if [ "$(printf '%s\n' "$patterns" | grep -c 'gitleaks')" != "3" ] || \
+   [ -n "$(printf '%s\n' "$patterns_typo" | grep -F 'gitleaks' || true)" ]; then
+  echo "  ✗ the typo did not rewrite exactly the three gitleaks patterns (FAILED)"
+  failed=$((failed + 1))
+fi
+for p in "${gitleaks_paths[@]}"; do
+  if matches "$p" && ! matches_typo "$p"; then
+    echo "  ✓ $p"
+  else
+    echo "  ✗ $p (FAILED — must match the list and NOT the typo'd copy)"
+    failed=$((failed + 1))
+  fi
+done
+
+# --- Mirror drift guard ---
+# Every case above runs against the hardcoded COPY at the top of this file,
+# never against the workflow. test_safe_paths_risk_tier_hold.sh pins
+# safe-paths' tier-2 copy to claude-author-automerge.yml, but nothing pinned
+# this one. So a pattern narrowed in both workflow copies, or one added here
+# and never shipped, passed every corpus case while the shipped gate stayed
+# open. Compare this list line for line with the shipped patterns= block.
+echo ""
+echo "Mirror drift guard — this list must equal claude-author-automerge.yml's patterns= block:"
+if ! MIRROR="$patterns" python3 - "$(dirname "$0")/../.github/workflows/claude-author-automerge.yml" <<'PY'
+import os, re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"^ +patterns='(.*?)'\n", text, re.S | re.M)
+if not m:
+    sys.exit("  could not locate the patterns=' block in claude-author-automerge.yml")
+# Strip leading indentation only, as the runtime loop does. A trailing space
+# is part of the regex there, and `$ ` never matches, so it silently disables
+# the pattern. That must count as drift, not be normalised away.
+shipped = [l.lstrip() for l in m.group(1).splitlines() if l.strip()]
+mirror = [l.lstrip() for l in os.environ["MIRROR"].splitlines() if l.strip()]
+if shipped != mirror:
+    for p in mirror:
+        if p not in shipped:
+            print("  only in this selftest:              %r" % p)
+    for p in shipped:
+        if p not in mirror:
+            print("  only in claude-author-automerge.yml: %r" % p)
+    if sorted(shipped) == sorted(mirror):
+        print("  same patterns in a different order (the first match names the pattern in the blocked-PR comment)")
+    sys.exit(1)
+print("  ✓ %d patterns identical" % len(shipped))
+PY
+then
+  echo "  ✗ this list has drifted from claude-author-automerge.yml (FAILED)"
+  failed=$((failed + 1))
+fi
 
 echo ""
 if [ "$failed" -gt 0 ]; then

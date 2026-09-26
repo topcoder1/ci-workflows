@@ -145,6 +145,27 @@ run_case "risk-pricing-top-level-file" 0 risk-tier-hold "docs/pricing.md"
 # still auto-merge, or the exception over-blocks.
 run_case "safe-marketingnotes" 1 - "docs/marketingnotes.md"
 run_case "safe-product-pages-overview" 1 - "docs/product-pages-overview.md"
+# gitleaks config and ignore files (2026-09-24). gitleaks reads them from the
+# PR's own checkout, so editing one can allowlist a secret leaked in the same
+# diff. A root copy is not safe-by-glob, so for the usual shape
+# claude-author-automerge's regex is the gate. One reaches the would-arm
+# branch in two ways: nested under a safe tree, where `gitleaks --source
+# tests/fixtures` would read it (a .gitleaks.json there silently shadows the
+# .gitleaks.toml beside it), or through a caller's extra_safe_globs. An
+# "ignore files are harmless" glob is the plausible one, and it swallows
+# .gitleaksignore along with .gitignore.
+run_case "risk-gitleaks-fixture-config" 0 risk-tier-hold "tests/fixtures/.gitleaks.toml"
+run_case "risk-gitleaks-fixture-json-shadow" 0 risk-tier-hold "tests/fixtures/.gitleaks.json"
+export EXTRA_GLOBS='(^|/)\.[^/]*ignore$'
+run_case "risk-gitleaksignore-via-extra-glob" 0 risk-tier-hold "docs/runbook.md" ".gitleaksignore"
+# Control for the case above: the same extra glob still arms a plain
+# .gitignore, so the hold comes from the gitleaks pattern, not the glob.
+run_case "extra-glob-gitignore-still-arms" 1 - "docs/runbook.md" ".gitignore"
+export EXTRA_GLOBS=""
+# The usual shape, a root .gitleaksignore beside a docs change, never arms
+# here. This asserts all_safe=0 only: run_case's `-` does not check the
+# reason, so it cannot tell "not safe-by-glob" from "held".
+run_case "gitleaks-root-shape-never-arms" 0 - "docs/runbook.md" ".gitleaksignore"
 
 # 2. The bypass label releases the hold.
 LABELS="auto-merge-approved"
@@ -160,6 +181,10 @@ run_case "bypass-releases-adr" 1 - "docs/decisions/ADR-0003-cluster-algorithm.md
 # risk_tier_overrides blocks, never the tier a pattern sits in).
 LABELS="auto-merge-approved"
 run_case "bypass-releases-pricing" 1 - "docs/marketing/pricing-block-handoff.md"
+# gitleaks config is tier-2 too, like .env and the workflows: a label click
+# on a PR that edits the allowlist is a human deciding on that allowlist.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitleaks" 1 - "tests/fixtures/.gitleaks.toml"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
@@ -203,16 +228,18 @@ def block(text, name):
     m = re.search(r"^ +%s='(.*?)'\n" % name, text, re.S | re.M)
     if not m:
         sys.exit("FAIL[drift-guard]: could not locate %s=' block" % name)
-    return [l.strip() for l in m.group(1).splitlines() if l.strip()]
+    # Leading indentation only, as both gates strip it. A trailing space
+    # stays part of the regex (`$ ` never matches), so it must count as drift.
+    return [l.lstrip() for l in m.group(1).splitlines() if l.strip()]
 a, b = block(wf, "risk_tier_overrides"), block(sib, "patterns")
 if a != b:
     only_wf = [p for p in a if p not in b]
     only_sib = [p for p in b if p not in a]
     print("FAIL[drift-guard]: tier-2 list has drifted from claude-author-automerge.yml")
     for p in only_wf:
-        print("    only in safe-paths-automerge.yml:      %s" % p)
+        print("    only in safe-paths-automerge.yml:      %r" % p)
     for p in only_sib:
-        print("    only in claude-author-automerge.yml:   %s" % p)
+        print("    only in claude-author-automerge.yml:   %r" % p)
     sys.exit(1)
 print("ok[drift-guard] %d patterns identical in both gates" % len(a))
 PY

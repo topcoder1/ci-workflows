@@ -20,7 +20,9 @@ arbitrary helper scripts; that's a different kind of repo.
   the `uv run pytest` invocation end-to-end.
 - `test_automerge_risk_patterns.sh` / `test_bb_automerge_risk_patterns.sh`
   — risk-tier regex behavior, driven by the shared corpus in
-  `risk_patterns_corpus.txt`.
+  `risk_patterns_corpus.txt`. The GH script runs the corpus against its own
+  hardcoded copy of the patterns, so it also fails when that copy drifts
+  from the shipped `patterns=` block in `claude-author-automerge.yml`.
 - `test_automerge_body_gate.sh` — the PR-body closing-keyword gate in
   `claude-author-automerge.yml`. `closes #N <qualifier>` closes N in FULL on
   merge (GitHub reads the keyword and the number, nothing after them);
