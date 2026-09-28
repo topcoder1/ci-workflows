@@ -256,7 +256,14 @@ jobs:
                       if arm; then rearmed=1; break; fi
                       sleep 3
                     done
-                    if [ -n "$rearmed" ]; then state=$(pr_state); else state=rearm-failed; fi ;;
+                    if [ -n "$rearmed" ]; then
+                      state=$(pr_state)
+                    else
+                      # Re-read before claiming the arm is gone: failed disarms
+                      # (swallowed above) can leave the Actions arm standing.
+                      state=$(pr_state)
+                      case "$state" in actions | merged | merged-by-actions | other) ;; *) state=rearm-failed ;; esac
+                    fi ;;
                 esac
               fi
             fi

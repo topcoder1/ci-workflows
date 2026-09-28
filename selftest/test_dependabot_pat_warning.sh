@@ -76,6 +76,12 @@
 #  18. a PAT, the head moves during a disarm retry ⇒ the head is re-checked
 #      before every disarm, so the newer head's arm is left alone (Codex
 #      round 8).
+#  19. a PAT, every disarm AND every re-arm fails while GitHub Actions still
+#      holds the arm ⇒ the "still holds" verdict, never a false "arm was
+#      removed" (independent review of #248).
+# The stub follows real gh/GitHub where a case could depend on it: a merged
+# PR keeps its autoMergeRequest (so the MERGED-first filter order is
+# pinned by case 11), and `gh pr merge --auto` on a merged PR exits 0.
 #   negative controls, each proving a case above can fail:
 #     the ::warning:: echoes neutralized ⇒ case 1 sees no warning;
 #     the replacement neutralized ⇒ case 4 ends armed by Actions;
@@ -204,8 +210,11 @@ case "$1 $2" in
           n=$(cat "$REARM_FAILS")
           if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$REARM_FAILS"; echo "gh: HTTP 502" >&2; exit 1; fi
         fi
+        # Every arm after this run's first one fails (a transient API error).
+        n=$(( $(cat "$ARM_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ARM_COUNT"
+        if [ "${STUB_ARM_FAIL_AFTER_FIRST:-0}" = "1" ] && [ "$n" -gt 1 ]; then echo "gh: HTTP 502" >&2; exit 1; fi
         case "$(arm_state)" in
-          merged-*) echo "Pull request is already merged" >&2; exit 1 ;;
+          merged-*) exit 0 ;;  # real gh: canMerge/merge return nil once merged
           none)
             who=actions; [ "${USING_PAT:-0}" = "1" ] && who=user
             if [ "${STUB_ARM_MERGES:-0}" = "1" ]; then echo "merged-$who" > "$ARM_STATE"; else echo "$who" > "$ARM_STATE"; fi ;;
@@ -231,8 +240,9 @@ case "$1 $2" in
       actions)        json="{\"state\":\"OPEN\",\"mergedBy\":null,\"autoMergeRequest\":{\"enabledBy\":$act}}" ;;
       user)           json="{\"state\":\"OPEN\",\"mergedBy\":null,\"autoMergeRequest\":{\"enabledBy\":$usr}}" ;;
       other)          json='{"state":"OPEN","mergedBy":null,"autoMergeRequest":{"enabledBy":{"login":"app/some-deploy-app","is_bot":true}}}' ;;
-      merged-user)    json="{\"state\":\"MERGED\",\"mergedBy\":$usr,\"autoMergeRequest\":null}" ;;
-      merged-actions) json="{\"state\":\"MERGED\",\"mergedBy\":$act,\"autoMergeRequest\":null}" ;;
+      # A merged PR keeps the arm that merged it (measured on wxa_vpn#1950).
+      merged-user)    json="{\"state\":\"MERGED\",\"mergedBy\":$usr,\"autoMergeRequest\":{\"enabledBy\":$usr}}" ;;
+      merged-actions) json="{\"state\":\"MERGED\",\"mergedBy\":$act,\"autoMergeRequest\":{\"enabledBy\":$act}}" ;;
     esac
     printf '%s\n' "$json" | jq -r "$(jq_filter "$@")"
     exit $? ;;
@@ -245,10 +255,10 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 run_case() { # script, initial arm state, then env assignments
   local script="$1" initial="$2"; shift 2
   : > "$T/gh.log"; : > "$T/summary"; printf '%s\n' "$initial" > "$T/arm_state"
-  rm -f "$T/reads_fail" "$T/head_moved" "$T/rearm_fails"
+  rm -f "$T/reads_fail" "$T/head_moved" "$T/rearm_fails" "$T/arm_count"
   rc=0
   env "$@" PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" ARM_STATE="$T/arm_state" READS_FAIL="$T/reads_fail" \
-    HEAD_MOVED="$T/head_moved" REARM_FAILS="$T/rearm_fails" \
+    HEAD_MOVED="$T/head_moved" REARM_FAILS="$T/rearm_fails" ARM_COUNT="$T/arm_count" \
     GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY=whois-api-llc/wxa_vpn \
     PR_URL=https://github.com/whois-api-llc/wxa_vpn/pull/9 HEAD_SHA=abc123 METHOD=squash \
     bash "$script" > "$T/out" 2>&1 || rc=$?
@@ -399,6 +409,15 @@ if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(state)" = actions ] && ! warned
   pass "18. PAT, the head moves mid-retry: re-checked before every disarm, the newer head's arm left alone"
 else
   report "18. PAT, the head moves mid-retry"
+fi
+
+# 19. a PAT, every disarm and every re-arm fails while Actions still holds the arm
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_DISARM_STUCK=1 STUB_ARM_FAIL_AFTER_FIRST=1
+if [ "$rc" = 0 ] && [ "$(state)" = actions ] && warned && grep -q 'still holds' "$T/out" \
+  && ! grep -q 'was removed' "$T/out"; then
+  pass "19. PAT, disarms and re-arms all fail: the 'still holds' verdict, never a false 'arm was removed'"
+else
+  report "19. PAT, disarms and re-arms all fail"
 fi
 
 # 12. a PAT, another actor arms between the disarm and the read
