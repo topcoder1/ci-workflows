@@ -170,11 +170,23 @@ arbitrary helper scripts; that's a different kind of repo.
   the Dependabot store, and the PR is still armed exactly once, head-bound;
   `dependabot/fetch-metadata` is SHA-pinned and is the reusable's only action
   (nothing checks out PR code, which callers on `pull_request_target` rely
-  on). With a PAT, a bot's earlier arm is replaced with the PAT user's:
-  safe-paths-automerge arms docs/tests-only Dependabot PRs with GITHUB_TOKEN
-  seconds earlier, and re-arming keeps the original enabler
-  (wxa-mcp-server#436). A stuck bot arm warns, and a user's arm is never
-  touched. A PAT with nothing armed before arms silently
+  on). With a PAT, a GitHub Actions (GITHUB_TOKEN) arm that came first is
+  replaced with the PAT user's: safe-paths-automerge arms docs/tests-only
+  Dependabot PRs with GITHUB_TOKEN seconds earlier, and re-arming keeps the
+  original enabler (wxa-mcp-server#436). Guarantees:
+  - the head is re-read before every disarm, so a newer head's arm is never
+    touched;
+  - only a positively read Actions arm is disarmed again, never a user's or
+    another App's;
+  - after a disarm, the PR is re-armed head-bound with retries, or the run
+    warns that it could not be re-armed;
+  - an immediate merge, a failed read and an Actions merge each end in an
+    explicit verdict, never silence;
+  - the step never fails over this.
+  The stub models arm state (re-arming keeps the enabler) and answers
+  through the shipped jq, and a misspelled enabler path is a negative
+  control. The non-atomic read/disarm gap is a documented residual, as in
+  revoke-stale-arm. A PAT with nothing armed before arms silently
   with no `GET /user` probe (another App token's merge still fires push
   workflows, so a failed probe would misdiagnose); a failed arm still fails
   the step. A negative control neutralizes the warning. Structural pins: the
