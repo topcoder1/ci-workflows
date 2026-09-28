@@ -191,12 +191,40 @@ jobs:
         # selftest/test_dependabot_pat_warning.sh.
         run: |
           set -euo pipefail
+          arm() { gh pr merge --auto "--${METHOD}" --match-head-commit "$HEAD_SHA" "$PR_URL"; }
+          enabler() {
+            gh pr view "$PR_URL" --json autoMergeRequest \
+              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
+              2>/dev/null || echo unknown
+          }
           if [ "$USING_PAT" != "1" ]; then
             msg="No automerge_pat reached this workflow, so this PR is armed with GITHUB_TOKEN: GitHub attributes the merge to github-actions[bot] and runs no push workflows (CI, deploys) for it. Fix the caller in ${GITHUB_REPOSITORY}: trigger it on pull_request_target, so a Dependabot run reads the Actions secrets (this reusable never runs PR code), and map automerge_pat to the Actions secret AUTOMERGE_PAT explicitly (secrets: inherit passes nothing to a reusable owned by another account). Do not copy AUTOMERGE_PAT into the Dependabot secret store: every Dependabot-triggered job that references it would hold it while running the bumped code."
             echo "::warning::$msg"
             echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           fi
-          gh pr merge --auto "--${METHOD}" --match-head-commit "$HEAD_SHA" "$PR_URL"
+          arm
+          # A PAT arm counts only if it is the first: re-arming keeps the
+          # original enabler (measured, #217). safe-paths-automerge runs on
+          # pull_request, whose Dependabot store holds no PAT, and arms
+          # docs/tests-only Dependabot PRs with GITHUB_TOKEN seconds earlier
+          # (wxa-mcp-server#436). Replace a bot's arm with the PAT user's; a
+          # user's arm is never touched. The PR stays armed either way, so a
+          # replacement that fails warns instead of failing the step.
+          if [ "$USING_PAT" = "1" ] && [ "$(enabler)" = "bot" ]; then
+            echo "::notice::a bot armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
+            off=""
+            for _ in 1 2 3; do
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              if [ "$(enabler)" = "none" ]; then off=1; break; fi
+              sleep 3
+            done
+            if [ -n "$off" ]; then arm; fi
+            if [ "$(enabler)" != "user" ]; then
+              msg="A bot still holds this PR's auto-merge arm, so GitHub attributes the merge to it and runs no push workflows (CI, deploys) for it."
+              echo "::warning::$msg"
+              echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            fi
+          fi
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

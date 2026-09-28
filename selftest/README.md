@@ -168,8 +168,13 @@ arbitrary helper scripts; that's a different kind of repo.
   against a stub `gh`. Pins: no PAT gives a `::warning::` (plus a
   step-summary line) naming the `pull_request_target` caller fix and never
   the Dependabot store, and the PR is still armed exactly once, head-bound;
-  `dependabot/fetch-metadata` is SHA-pinned in that PAT-holding job; a PAT
-  arms silently
+  `dependabot/fetch-metadata` is SHA-pinned and is the reusable's only action
+  (nothing checks out PR code, which callers on `pull_request_target` rely
+  on). With a PAT, a bot's earlier arm is replaced with the PAT user's:
+  safe-paths-automerge arms docs/tests-only Dependabot PRs with GITHUB_TOKEN
+  seconds earlier, and re-arming keeps the original enabler
+  (wxa-mcp-server#436). A stuck bot arm warns, and a user's arm is never
+  touched. A PAT with nothing armed before arms silently
   with no `GET /user` probe (another App token's merge still fires push
   workflows, so a failed probe would misdiagnose); a failed arm still fails
   the step. A negative control neutralizes the warning. Structural pins: the
