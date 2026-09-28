@@ -5,12 +5,18 @@
 # Incident (2026-09-25): whois-api-llc/wxa_vpn's deploy.yml skipped all 42
 # Dependabot bumps merged 2026-07-23..09-25 (wxa_vpn#2031). Its caller passed
 # `secrets: inherit`, which delivers nothing to this reusable across
-# accounts, and a run Dependabot triggers reads ONLY the repo's Dependabot
-# secret store, so no PAT could have arrived either way. The arm ran on
-# GITHUB_TOKEN, GitHub attributed the merge to github-actions[bot], and ran
-# no push workflow for it. Nothing said so: automerge_pat is optional and the
-# fallback was silent. A 2026-09-25 sweep found AUTOMERGE_PAT in the
-# Dependabot store of 2 of the 46 caller repos.
+# accounts. It also triggered on `pull_request`, and a run Dependabot
+# triggers there reads ONLY the repo's Dependabot secret store, so no PAT
+# could have arrived either way. The arm ran on GITHUB_TOKEN, GitHub
+# attributed the merge to github-actions[bot], and ran no push workflow for
+# it. Nothing said so: automerge_pat is optional and the fallback was silent.
+#
+# The fix the warning names is the caller's (topcoder1/dotclaude#411):
+# trigger on pull_request_target, so the run reads the Actions store, and
+# map automerge_pat explicitly. It must NEVER suggest the Dependabot store.
+# Every Dependabot-triggered job that references a copy there holds it in
+# runner memory while running the bumped dependency code (16 repos'
+# coverage-floor callers, 2026-09-26).
 #
 # Unlike claude-author/safe-paths (ci-workflows#217), this step still ARMS
 # without a user PAT: Dependabot deletes its own branch, so #217's
@@ -27,7 +33,8 @@
 # The arm step is EXTRACTED from the workflow YAML (the shipped bash) and run
 # against a stubbed `gh`:
 #   1. no PAT ⇒ ::warning:: (plus a step-summary line) naming the
-#      Dependabot-store fix; still arms exactly once, head-bound, exit 0.
+#      pull_request_target fix and never the Dependabot store; still arms
+#      exactly once, head-bound, exit 0.
 #   2. a PAT arrived ⇒ arms exactly once, no warning, and no `gh api user`
 #      call even when /user would fail.
 #   3. the arm itself fails ⇒ the step fails; a warning never masks it.
@@ -42,7 +49,10 @@
 #   * USING_PAT derives from secrets.automerge_pat, and GH_TOKEN keeps its
 #     GITHUB_TOKEN fallback (the no-PAT arm runs on it);
 #   * automerge_pat stays `required: false` — a required secret would fail
-#     every unprovisioned caller at startup, revoke-stale-arm included.
+#     every unprovisioned caller at startup, revoke-stale-arm included;
+#   * dependabot/fetch-metadata is pinned by commit SHA. It runs in the
+#     job that holds the PAT, and a moved tag is how tj-actions/changed-files
+#     harvested secrets from runner memory (CVE-2025-30066).
 #
 # Run from the repo root:
 #   bash selftest/test_dependabot_pat_warning.sh
@@ -113,6 +123,13 @@ else
   fail "automerge_pat is no longer required: false — unprovisioned callers would fail at startup"
 fi
 
+if grep -Eq '^[[:space:]]+uses: dependabot/fetch-metadata@[0-9a-f]{40}([[:space:]]|$)' "$WF" \
+  && ! grep -Eq '^[[:space:]]+uses: dependabot/fetch-metadata@v' "$WF"; then
+  pass "dependabot/fetch-metadata is pinned by commit SHA in the job that holds the PAT"
+else
+  fail "dependabot/fetch-metadata is not SHA-pinned — a moved tag would run in the job that holds the PAT"
+fi
+
 # ---------------------------------------------------------------------------
 # Behavior.
 # ---------------------------------------------------------------------------
@@ -148,9 +165,9 @@ warned() { grep -q '^::warning' "$T/out"; }
 # 1. no PAT
 run_case "$T/arm.sh" USING_PAT=0
 if [ "$rc" = 0 ] && [ "$(arms)" = 1 ] && [ "$(user_calls)" = 0 ] && warned \
-  && grep -q 'gh secret set AUTOMERGE_PAT --app dependabot --repo whois-api-llc/wxa_vpn' "$T/out" \
+  && grep -q 'pull_request_target' "$T/out" && ! grep -q -- '--app dependabot' "$T/out" \
   && grep -q 'push workflows' "$T/summary"; then
-  pass "1. no PAT: warns with the Dependabot-store fix (annotation + summary), arms once"
+  pass "1. no PAT: warns with the pull_request_target fix, never the Dependabot store (annotation + summary), arms once"
 else
   fail "1. no PAT: rc=$rc arms=$(arms) user_calls=$(user_calls)"; sed 's/^/    /' "$T/out"
 fi

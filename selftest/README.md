@@ -166,8 +166,10 @@ arbitrary helper scripts; that's a different kind of repo.
   (2026-07-23..09-25), and a 2026-09-25 sweep found `AUTOMERGE_PAT` in the
   Dependabot secret store of 2 of 46 callers. Runs the extracted arm step
   against a stub `gh`. Pins: no PAT gives a `::warning::` (plus a
-  step-summary line) naming `gh secret set AUTOMERGE_PAT --app dependabot`,
-  and the PR is still armed exactly once, head-bound; a PAT arms silently
+  step-summary line) naming the `pull_request_target` caller fix and never
+  the Dependabot store, and the PR is still armed exactly once, head-bound;
+  `dependabot/fetch-metadata` is SHA-pinned in that PAT-holding job; a PAT
+  arms silently
   with no `GET /user` probe (another App token's merge still fires push
   workflows, so a failed probe would misdiagnose); a failed arm still fails
   the step. A negative control neutralizes the warning. Structural pins: the
