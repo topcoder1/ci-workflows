@@ -69,6 +69,13 @@
 #      newer head's Actions arm is left to that head's own run: no disarm,
 #      no warning (Codex round 7; revoke-stale-arm's ownership guard).
 #  15. a PAT, the head cannot be read ⇒ nothing disarmed, a hedged warning.
+#  16. a PAT, the re-arm fails twice after a successful disarm ⇒ retried,
+#      head-bound, and armed as the user (Codex round 8).
+#  17. a PAT, the re-arm keeps failing ⇒ an explicit warning that the arm was
+#      removed and not restored, exit 0 (Codex round 8).
+#  18. a PAT, the head moves during a disarm retry ⇒ the head is re-checked
+#      before every disarm, so the newer head's arm is left alone (Codex
+#      round 8).
 #   negative controls, each proving a case above can fail:
 #     the ::warning:: echoes neutralized ⇒ case 1 sees no warning;
 #     the replacement neutralized ⇒ case 4 ends armed by Actions;
@@ -183,13 +190,20 @@ case "$1 $2" in
   "pr merge")
     case " $* " in
       *" --disable-auto "*)
+        [ "${STUB_HEAD_MOVES_AFTER_FIRST_DISARM:-0}" = "1" ] && : > "$HEAD_MOVED"
         [ "${STUB_DISARM_STUCK:-0}" = "1" ] && exit 0
         case "$(arm_state)" in actions|user|other) echo none > "$ARM_STATE" ;; esac
         # Another user or App arms the PR right after this disarm.
         [ "${STUB_OTHER_ARMS_AFTER_DISARM:-0}" = "1" ] && echo other > "$ARM_STATE"
-        [ "${STUB_READ_FAIL_AFTER_DISARM:-0}" = "1" ] && : > "$READS_FAIL" ;;
+        [ "${STUB_READ_FAIL_AFTER_DISARM:-0}" = "1" ] && : > "$READS_FAIL"
+        [ -n "${STUB_REARM_FAIL_TIMES:-}" ] && printf '%s' "$STUB_REARM_FAIL_TIMES" > "$REARM_FAILS" ;;
       *" --auto "*)
         [ "${STUB_ARM_FAIL:-0}" = "1" ] && { echo "arm failed" >&2; exit 1; }
+        # The next N arms after a disarm fail (a transient API error).
+        if [ -s "$REARM_FAILS" ]; then
+          n=$(cat "$REARM_FAILS")
+          if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$REARM_FAILS"; echo "gh: HTTP 502" >&2; exit 1; fi
+        fi
         case "$(arm_state)" in
           merged-*) echo "Pull request is already merged" >&2; exit 1 ;;
           none)
@@ -203,7 +217,8 @@ case "$1 $2" in
     { [ -e "$READS_FAIL" ] || [ "${STUB_READS_FAIL_ALWAYS:-0}" = "1" ]; } && { echo "gh: HTTP 502" >&2; exit 1; }
     if [[ " $* " == *" headRefOid "* ]]; then
       [ "${STUB_HEAD_READ_FAIL:-0}" = "1" ] && { echo "gh: HTTP 502" >&2; exit 1; }
-      printf '{"headRefOid":"%s"}\n' "${STUB_HEAD_NOW:-$HEAD_SHA}" | jq -r "$(jq_filter "$@")"
+      head="${STUB_HEAD_NOW:-$HEAD_SHA}"; [ -e "$HEAD_MOVED" ] && head=def456
+      printf '{"headRefOid":"%s"}\n' "$head" | jq -r "$(jq_filter "$@")"
       exit $?
     fi
     # The Actions arm merges the PR before this run's first read.
@@ -229,9 +244,11 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 
 run_case() { # script, initial arm state, then env assignments
   local script="$1" initial="$2"; shift 2
-  : > "$T/gh.log"; : > "$T/summary"; printf '%s\n' "$initial" > "$T/arm_state"; rm -f "$T/reads_fail"
+  : > "$T/gh.log"; : > "$T/summary"; printf '%s\n' "$initial" > "$T/arm_state"
+  rm -f "$T/reads_fail" "$T/head_moved" "$T/rearm_fails"
   rc=0
   env "$@" PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" ARM_STATE="$T/arm_state" READS_FAIL="$T/reads_fail" \
+    HEAD_MOVED="$T/head_moved" REARM_FAILS="$T/rearm_fails" \
     GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY=whois-api-llc/wxa_vpn \
     PR_URL=https://github.com/whois-api-llc/wxa_vpn/pull/9 HEAD_SHA=abc123 METHOD=squash \
     bash "$script" > "$T/out" 2>&1 || rc=$?
@@ -358,6 +375,30 @@ if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && warned; then
   pass "15. PAT, an unreadable head: nothing disarmed, a hedged warning"
 else
   report "15. PAT, an unreadable head"
+fi
+
+# 16. a PAT, the re-arm fails twice after a successful disarm
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_REARM_FAIL_TIMES=2
+if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(state)" = user ] && ! warned; then
+  pass "16. PAT, a transient re-arm failure: retried head-bound, armed as the user"
+else
+  report "16. PAT, a transient re-arm failure"
+fi
+
+# 17. a PAT, the re-arm keeps failing
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_REARM_FAIL_TIMES=9
+if [ "$rc" = 0 ] && [ "$(state)" = none ] && warned && grep -q 'could not be re-armed' "$T/out"; then
+  pass "17. PAT, the re-arm keeps failing: an explicit 'could not be re-armed' warning, exit 0"
+else
+  report "17. PAT, the re-arm keeps failing"
+fi
+
+# 18. a PAT, the head moves during a disarm retry
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_DISARM_STUCK=1 STUB_HEAD_MOVES_AFTER_FIRST_DISARM=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(state)" = actions ] && ! warned; then
+  pass "18. PAT, the head moves mid-retry: re-checked before every disarm, the newer head's arm left alone"
+else
+  report "18. PAT, the head moves mid-retry"
 fi
 
 # 12. a PAT, another actor arms between the disarm and the read

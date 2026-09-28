@@ -217,45 +217,55 @@ jobs:
           # pull_request, whose Dependabot store holds no PAT, and arms
           # docs/tests-only Dependabot PRs with GITHUB_TOKEN seconds earlier
           # (wxa-mcp-server#436). Replace a GitHub Actions arm with the PAT
-          # user's; a user's or another App's arm is never touched, including
-          # one placed while this loop runs. After the disarm attempts, re-arm
-          # only a PR nobody else holds: an unarmed one, a stuck Actions arm
-          # (it keeps its enabler), or an unreadable state (an unarmed PR is
-          # then armed as the PAT user). Every path ends in one explicit
-          # verdict, and none fails the step: the PR stays armed either way.
+          # user's. A user's or another App's arm is never touched, nor is a
+          # newer head's: before EVERY disarm the head is re-read, as in
+          # revoke-stale-arm, and only a positively read Actions arm is
+          # disarmed again. After a disarm, a PR nobody else holds is
+          # re-armed head-bound with retries, since no later event is
+          # guaranteed to arm it. Every path ends in one explicit verdict,
+          # and none fails the step.
+          # RESIDUAL, as in revoke-stale-arm: the reads and the disarm are not
+          # atomic, and GitHub offers no compare-and-swap for auto-merge. So
+          # an arm placed between a read and the next disarm can still be
+          # removed. The loop narrows that window rather than closing it.
           if [ "$USING_PAT" = "1" ]; then
             state=$(pr_state)
-            # Ownership guard, as in revoke-stale-arm: replace only while the
-            # head is still the one this run armed. Once Dependabot pushes a
-            # newer head, that head's own run owns its arm, and this run's
-            # head-bound re-arm would fail and leave it unarmed. An unreadable
-            # head is not disarmed either; the verdict below warns.
-            if [ "$state" = "actions" ]; then
-              head_now=$(gh pr view "$PR_URL" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
-              if [ -z "$head_now" ]; then
-                state=unknown
-              elif [ "$head_now" != "$HEAD_SHA" ]; then
-                echo "::notice::head moved (${HEAD_SHA} -> ${head_now}) since this run armed; that head's own run owns its arm, so leaving it alone."
-                state=moved
-              fi
-            fi
             if [ "$state" = "actions" ]; then
               echo "::notice::GitHub Actions (GITHUB_TOKEN) armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
+              disarmed=""
               for _ in 1 2 3; do
+                head_now=$(gh pr view "$PR_URL" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+                if [ -z "$head_now" ]; then state=unknown; break; fi
+                if [ "$head_now" != "$HEAD_SHA" ]; then
+                  echo "::notice::head moved (${HEAD_SHA} -> ${head_now}); that head's own run owns its arm, so leaving it alone."
+                  state=moved
+                  break
+                fi
                 gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+                disarmed=1
                 state=$(pr_state)
                 if [ "$state" = "unknown" ]; then sleep 3; state=$(pr_state); fi
-                # Disarm again only after positively reading an Actions arm:
-                # after a failed read someone else may hold it now.
                 [ "$state" = "actions" ] || break
                 sleep 3
               done
-              case "$state" in none | actions | unknown) arm; state=$(pr_state) ;; esac
+              if [ -n "$disarmed" ]; then
+                case "$state" in
+                  none | actions | unknown)
+                    rearmed=""
+                    for _ in 1 2 3; do
+                      if arm; then rearmed=1; break; fi
+                      sleep 3
+                    done
+                    if [ -n "$rearmed" ]; then state=$(pr_state); else state=rearm-failed; fi ;;
+                esac
+              fi
             fi
             case "$state" in
               merged | other | moved) ;;
               actions | merged-by-actions)
                 warn "GitHub Actions (GITHUB_TOKEN) still holds this PR's auto-merge arm or made its merge, so GitHub runs no push workflows (CI, deploys) for it." ;;
+              rearm-failed)
+                warn "This PR's GitHub Actions auto-merge arm was removed, but the PR could not be re-armed after 3 attempts (the head may have moved). Re-run this job, or merge the PR by hand." ;;
               *)
                 warn "Could not confirm who holds this PR's auto-merge arm. If it is GitHub Actions (GITHUB_TOKEN), the merge fires no push workflows (CI, deploys)." ;;
             esac
