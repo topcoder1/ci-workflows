@@ -43,7 +43,7 @@ Runs `prettier --write` on PR-changed markdown and pushes the fix back to the br
 - `changed_only` (bool, default `true`) — write only PR-touched files; mirrors `lint.yml`'s `prettier_changed_only`
 - `commit_message` (string, default `style: prettier auto-fix`)
 
-**Required secret:** `automerge_pat` — fine-grained PAT (or classic with `repo` scope). Same secret name and required scopes as `claude-author-automerge.yml`, so a repo that already has auto-merge wired needs no extra provisioning. Why a PAT: pushes by the default `GITHUB_TOKEN` do not retrigger downstream `pull_request` workflows, so the lint check would stay red against the previous SHA. A PAT push triggers `lint.yml` on the new commit and the check turns green.
+**Required secret:** `automerge_pat` — fine-grained PAT (or classic with `repo` scope). Same secret as `claude-author-automerge.yml`, so a repo that already has auto-merge wired needs no extra provisioning; this workflow uses only its `Contents: read and write` scope, to push the fix. Map it explicitly in the caller (`automerge_pat: ${{ secrets.AUTOMERGE_PAT }}` under the job's `secrets:`); `secrets: inherit` passes nothing to a reusable owned by another account. Why a PAT: pushes by the default `GITHUB_TOKEN` do not retrigger downstream `pull_request` workflows, so the lint check would stay red against the previous SHA. A PAT push triggers `lint.yml` on the new commit and the check turns green.
 
 **Skipped automatically on:** fork PRs (cross-repo push impossible), closed PRs, PRs touching zero markdown.
 
