@@ -18,7 +18,14 @@ name: Prettier Autofix
 #     is correctly formatted.
 #   - Reuses the same `automerge_pat` secret that `claude-author-automerge.yml`
 #     consumes — owner-scoped fine-grained PAT with `Contents: r/w +
-#     Pull-requests: r/w`. Wire via `secrets: inherit` in the caller.
+#     Pull-requests: r/w`. The PAT is forwarded EXPLICITLY, never via
+#     `secrets: inherit`: inherit passes nothing to a reusable owned by
+#     another account, and this one lives in topcoder1 while callers include
+#     whois-api-llc/* repos, where an inherit caller fails at startup with
+#     "Secret automerge_pat is required, but not provided while calling"
+#     (verified 2026-05-10 on whois-api-llc/wxa-graph). In the caller's job:
+#       secrets:
+#         automerge_pat: ${{ secrets.AUTOMERGE_PAT }}
 #     See `runbooks/prettier-autofix.md`.
 #
 # Skip behavior:
