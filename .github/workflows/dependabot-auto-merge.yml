@@ -217,20 +217,25 @@ jobs:
           # pull_request, whose Dependabot store holds no PAT, and arms
           # docs/tests-only Dependabot PRs with GITHUB_TOKEN seconds earlier
           # (wxa-mcp-server#436). Replace a GitHub Actions arm with the PAT
-          # user's; a user's or another App's arm is never touched. Re-arm
-          # unless the PR already merged, even when the reads failed: an
-          # unarmed PR is then armed as the PAT user, and a stuck Actions arm
-          # keeps its enabler. The PR stays armed either way, so this warns
-          # instead of failing the step.
-          if [ "$USING_PAT" = "1" ] && [ "$(pr_state)" = "actions" ]; then
-            echo "::notice::GitHub Actions (GITHUB_TOKEN) armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
-            for _ in 1 2 3; do
-              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
-              case "$(pr_state)" in none | merged | merged-by-actions) break ;; esac
-              sleep 3
-            done
-            case "$(pr_state)" in merged | merged-by-actions) ;; *) arm ;; esac
-            case "$(pr_state)" in
+          # user's; a user's or another App's arm is never touched, including
+          # one placed while this loop runs. After the disarm attempts, re-arm
+          # only a PR nobody else holds: an unarmed one, a stuck Actions arm
+          # (it keeps its enabler), or an unreadable state (an unarmed PR is
+          # then armed as the PAT user). Every path ends in one explicit
+          # verdict, and none fails the step: the PR stays armed either way.
+          if [ "$USING_PAT" = "1" ]; then
+            state=$(pr_state)
+            if [ "$state" = "actions" ]; then
+              echo "::notice::GitHub Actions (GITHUB_TOKEN) armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
+              for _ in 1 2 3; do
+                gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+                state=$(pr_state)
+                case "$state" in none | merged | merged-by-actions | other) break ;; esac
+                sleep 3
+              done
+              case "$state" in none | actions | unknown) arm; state=$(pr_state) ;; esac
+            fi
+            case "$state" in
               merged | other) ;;
               actions | merged-by-actions)
                 warn "GitHub Actions (GITHUB_TOKEN) still holds this PR's auto-merge arm or made its merge, so GitHub runs no push workflows (CI, deploys) for it." ;;

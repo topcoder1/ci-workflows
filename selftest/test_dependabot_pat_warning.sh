@@ -56,6 +56,12 @@
 #      re-armed anyway, as the user, never left unarmed (Codex rounds 1-2).
 #   9. a PAT, the re-arm merges at once (checks already green) ⇒ merged as
 #      the user, no warning (Codex round 2).
+#  10. a PAT, every read fails ⇒ nothing disarmed, a hedged warning (never
+#      silent), exit 0 (Codex round 3).
+#  11. a PAT, the Actions arm merged before the first read ⇒ a warning that
+#      the merge fired no push workflows (Codex round 3).
+#  12. a PAT, another actor arms between the disarm and the read ⇒ that arm
+#      is never disarmed or re-armed over (Codex rounds 3-4).
 #   negative controls, each proving a case above can fail:
 #     the ::warning:: echoes neutralized ⇒ case 1 sees no warning;
 #     the replacement neutralized ⇒ case 4 ends armed by Actions;
@@ -172,6 +178,8 @@ case "$1 $2" in
       *" --disable-auto "*)
         [ "${STUB_DISARM_STUCK:-0}" = "1" ] && exit 0
         case "$(arm_state)" in actions|user|other) echo none > "$ARM_STATE" ;; esac
+        # Another user or App arms the PR right after this disarm.
+        [ "${STUB_OTHER_ARMS_AFTER_DISARM:-0}" = "1" ] && echo other > "$ARM_STATE"
         [ "${STUB_READ_FAIL_AFTER_DISARM:-0}" = "1" ] && : > "$READS_FAIL" ;;
       *" --auto "*)
         [ "${STUB_ARM_FAIL:-0}" = "1" ] && { echo "arm failed" >&2; exit 1; }
@@ -185,7 +193,11 @@ case "$1 $2" in
     esac
     exit 0 ;;
   "pr view")
-    [ -e "$READS_FAIL" ] && { echo "gh: HTTP 502" >&2; exit 1; }
+    { [ -e "$READS_FAIL" ] || [ "${STUB_READS_FAIL_ALWAYS:-0}" = "1" ]; } && { echo "gh: HTTP 502" >&2; exit 1; }
+    # The Actions arm merges the PR before this run's first read.
+    if [ "${STUB_MERGE_ON_FIRST_READ:-0}" = "1" ] && [ "$(arm_state)" = actions ]; then
+      echo merged-actions > "$ARM_STATE"
+    fi
     act='{"login":"app/github-actions","is_bot":true}'; usr='{"login":"topcoder1","is_bot":false}'
     case "$(arm_state)" in
       none)           json='{"state":"OPEN","mergedBy":null,"autoMergeRequest":null}' ;;
@@ -293,6 +305,31 @@ if [ "$rc" = 0 ] && [ "$(state)" = merged-user ] && ! warned; then
   pass "9. PAT, the re-arm merges at once: merged as the user, no warning"
 else
   report "9. PAT, the re-arm merges at once"
+fi
+
+# 10. a PAT, every read fails
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_READS_FAIL_ALWAYS=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && warned; then
+  pass "10. PAT, every read fails: nothing disarmed, a hedged warning, exit 0"
+else
+  report "10. PAT, every read fails"
+fi
+
+# 11. a PAT, the Actions arm merged before the first read
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_MERGE_ON_FIRST_READ=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && [ "$(state)" = merged-actions ] && warned \
+  && grep -q 'push workflows' "$T/summary"; then
+  pass "11. PAT, Actions merged it before the first read: a warning, exit 0"
+else
+  report "11. PAT, Actions merged it before the first read"
+fi
+
+# 12. a PAT, another actor arms between the disarm and the read
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_OTHER_ARMS_AFTER_DISARM=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(arms)" = 1 ] && [ "$(state)" = other ] && ! warned; then
+  pass "12. PAT, another actor arms mid-replacement: its arm is never disarmed or re-armed over"
+else
+  report "12. PAT, another actor arms mid-replacement"
 fi
 
 # Negative controls: each neutralizes one mechanism and reruns the case it
