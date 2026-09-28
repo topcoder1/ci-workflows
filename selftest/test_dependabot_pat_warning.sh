@@ -65,6 +65,10 @@
 #  13. a PAT, the read after a successful disarm fails WHILE another actor
 #      arms ⇒ no second disarm: only a positively read Actions arm is
 #      disarmed again (Codex rounds 5-6).
+#  14. a PAT, Dependabot pushed a newer head after this run's arm ⇒ the
+#      newer head's Actions arm is left to that head's own run: no disarm,
+#      no warning (Codex round 7; revoke-stale-arm's ownership guard).
+#  15. a PAT, the head cannot be read ⇒ nothing disarmed, a hedged warning.
 #   negative controls, each proving a case above can fail:
 #     the ::warning:: echoes neutralized ⇒ case 1 sees no warning;
 #     the replacement neutralized ⇒ case 4 ends armed by Actions;
@@ -197,6 +201,11 @@ case "$1 $2" in
     exit 0 ;;
   "pr view")
     { [ -e "$READS_FAIL" ] || [ "${STUB_READS_FAIL_ALWAYS:-0}" = "1" ]; } && { echo "gh: HTTP 502" >&2; exit 1; }
+    if [[ " $* " == *" headRefOid "* ]]; then
+      [ "${STUB_HEAD_READ_FAIL:-0}" = "1" ] && { echo "gh: HTTP 502" >&2; exit 1; }
+      printf '{"headRefOid":"%s"}\n' "${STUB_HEAD_NOW:-$HEAD_SHA}" | jq -r "$(jq_filter "$@")"
+      exit $?
+    fi
     # The Actions arm merges the PR before this run's first read.
     if [ "${STUB_MERGE_ON_FIRST_READ:-0}" = "1" ] && [ "$(arm_state)" = actions ]; then
       echo merged-actions > "$ARM_STATE"
@@ -333,6 +342,22 @@ if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(state)" = other ]; then
   pass "13. PAT, an unreadable state after the disarm: no second disarm, another actor's arm survives"
 else
   report "13. PAT, an unreadable state after the disarm"
+fi
+
+# 14. a PAT, Dependabot pushed a newer head after this run's arm
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_HEAD_NOW=def456
+if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && [ "$(state)" = actions ] && ! warned; then
+  pass "14. PAT, a newer head: its Actions arm is left to that head's own run (no disarm, no warning)"
+else
+  report "14. PAT, a newer head"
+fi
+
+# 15. a PAT, the head cannot be read
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_HEAD_READ_FAIL=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && warned; then
+  pass "15. PAT, an unreadable head: nothing disarmed, a hedged warning"
+else
+  report "15. PAT, an unreadable head"
 fi
 
 # 12. a PAT, another actor arms between the disarm and the read

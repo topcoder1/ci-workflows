@@ -225,6 +225,20 @@ jobs:
           # verdict, and none fails the step: the PR stays armed either way.
           if [ "$USING_PAT" = "1" ]; then
             state=$(pr_state)
+            # Ownership guard, as in revoke-stale-arm: replace only while the
+            # head is still the one this run armed. Once Dependabot pushes a
+            # newer head, that head's own run owns its arm, and this run's
+            # head-bound re-arm would fail and leave it unarmed. An unreadable
+            # head is not disarmed either; the verdict below warns.
+            if [ "$state" = "actions" ]; then
+              head_now=$(gh pr view "$PR_URL" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+              if [ -z "$head_now" ]; then
+                state=unknown
+              elif [ "$head_now" != "$HEAD_SHA" ]; then
+                echo "::notice::head moved (${HEAD_SHA} -> ${head_now}) since this run armed; that head's own run owns its arm, so leaving it alone."
+                state=moved
+              fi
+            fi
             if [ "$state" = "actions" ]; then
               echo "::notice::GitHub Actions (GITHUB_TOKEN) armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
               for _ in 1 2 3; do
@@ -239,7 +253,7 @@ jobs:
               case "$state" in none | actions | unknown) arm; state=$(pr_state) ;; esac
             fi
             case "$state" in
-              merged | other) ;;
+              merged | other | moved) ;;
               actions | merged-by-actions)
                 warn "GitHub Actions (GITHUB_TOKEN) still holds this PR's auto-merge arm or made its merge, so GitHub runs no push workflows (CI, deploys) for it." ;;
               *)
