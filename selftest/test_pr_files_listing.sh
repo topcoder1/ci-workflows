@@ -46,12 +46,17 @@ done
 #    file out of a gated tree reads as no-change. Same fail-open class as
 #    the caller-side changes-classifier holes fixed fleet-wide 2026-08-06
 #    (Codex pre-review of inbox_superpilot's quality-tests classifier).
-#    Match the FUNCTIONAL jq invocation, not the bare field name — both
-#    workflows carry doc-comments mentioning previous_filename, and a
-#    comment must not satisfy this check after the real call is removed.
-for wf in claude-author-automerge safe-paths-automerge; do
+#    pr-classify and codex-review's cost gate classify the same listing to
+#    decide whether a review runs, so they are held to it too; their
+#    behavior is pinned by test_pr_classify_rename_sources.sh and
+#    test_codex_review_rename_sources.sh.
+#    Match the FUNCTIONAL jq invocation, not the bare field name, and in code
+#    only — these workflows carry doc-comments mentioning previous_filename,
+#    and a comment must not satisfy this check after the real call is removed.
+for wf in claude-author-automerge safe-paths-automerge pr-classify codex-review; do
   f=".github/workflows/${wf}.yml"
-  if grep -qE 'select\(\.previous_filename\)' "$f"; then
+  code=$(grep -vE '^[[:space:]]*#' "$f" || true)
+  if grep -qE 'select\(\.previous_filename\)' <<<"$code"; then
     echo "✓ ${wf}.yml classifies renames via previous_filename"
   else
     echo "✗ ${wf}.yml lost rename coverage — the select(.previous_filename) jq call must feed the classification"

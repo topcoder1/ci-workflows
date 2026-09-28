@@ -1,7 +1,8 @@
 name: Prettier Autofix
 
-# Reusable workflow that auto-applies `prettier --write` on PR-changed
-# markdown and pushes the fix back to the PR branch as a single commit.
+# Reusable workflow that auto-applies `prettier --write` on PR-changed files
+# matching `markdown_glob` (markdown, YAML and JSON by default) and pushes the
+# fix back to the PR branch as a single commit.
 #
 # Why a separate workflow vs folding write-mode into lint.yml:
 #   - lint.yml is intentionally check-only (read-only token, runs on every
@@ -18,18 +19,31 @@ name: Prettier Autofix
 #     is correctly formatted.
 #   - Reuses the same `automerge_pat` secret that `claude-author-automerge.yml`
 #     consumes — owner-scoped fine-grained PAT with `Contents: r/w +
-#     Pull-requests: r/w`. Wire via `secrets: inherit` in the caller.
-#     See `runbooks/prettier-autofix.md`.
+#     Pull-requests: r/w`. This workflow needs only the `Contents: r/w` part:
+#     the PAT does nothing here but push the autofix commit. The changed-files
+#     listing runs on the job's GITHUB_TOKEN (`pull-requests: read`), not the
+#     PAT. The PAT is forwarded EXPLICITLY, never via
+#     `secrets: inherit`: inherit passes nothing to a reusable owned by
+#     another account, and this one lives in topcoder1 while callers include
+#     whois-api-llc/* repos, where an inherit caller fails at startup with
+#     "Secret automerge_pat is required, but not provided while calling"
+#     (verified 2026-05-10 on whois-api-llc/wxa-graph). In the caller's job:
+#       secrets:
+#         automerge_pat: ${{ secrets.AUTOMERGE_PAT }}
+#     See `templates/ci-workflows/runbooks/prettier-autofix.md` in the
+#     private topcoder1/dotclaude repo.
 #
 # Skip behavior:
 #   - Forks: skipped (cross-repo push not allowed).
 #   - Closed PRs: skipped.
 #   - Bot-authored PRs (dependabot/renovate): skipped. GitHub withholds
 #     Actions secrets from dependabot-triggered runs, so `automerge_pat` is
-#     empty and the checkout fails with "Input required and not supplied:
-#     token" — a permanent red X on every dependabot PR. Mirrors the
+#     empty, and any run with a fix to push would fail at the push step
+#     ("automerge_pat secret is empty — cannot push"). Mirrors the
 #     bot-skip in claude-review.yml. Dependency bumps don't need autofix.
-#   - PRs that touched zero markdown files: skipped (no-op).
+#   - With `changed_only: true` (the default), PRs that changed no file
+#     matching `markdown_glob` (markdown, YAML and JSON by default): skipped
+#     (no-op).
 #   - Changed-file listing failures (transient API errors): skipped after
 #     3 attempts — a scoping failure is never widened to a full-tree run
 #     (wxa-secrets#27: the old full-tree fallback reformatted pre-existing
@@ -115,11 +129,17 @@ on:
           Fine-grained PAT (or classic with `repo` scope) used to push
           the autofix commit. Required — pushes by the default
           GITHUB_TOKEN do not retrigger the lint workflow on the new
-          SHA. Same secret name and required scopes as
-          `claude-author-automerge.yml`'s `automerge_pat`, so a repo
-          that already has auto-merge wired needs no additional
-          provisioning. Required scopes: `Contents: read and write`,
-          `Pull-requests: read`.
+          SHA. Same secret as `claude-author-automerge.yml`'s
+          `automerge_pat`, so a repo that already has auto-merge wired
+          needs no additional provisioning. The only scope this
+          workflow needs is `Contents: read and write`: that push is
+          the PAT's only use, and the changed-files listing runs on
+          the job's GITHUB_TOKEN. The shared PAT also carries
+          `Pull-requests: read and write`, which
+          `claude-author-automerge.yml` needs. Pass it EXPLICITLY
+          (`automerge_pat: <the repo's AUTOMERGE_PAT secret>`);
+          `secrets: inherit` passes nothing to a reusable owned by a
+          different account.
         required: true
 
 jobs:

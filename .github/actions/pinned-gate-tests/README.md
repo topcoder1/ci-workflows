@@ -92,6 +92,29 @@ inside an **existing** job that a required check already gates (webcrawl uses
 `test`, whose failure fails the required `coverage-floor-gate`). Then no ruleset
 change is needed.
 
+### Repos whose tests run through `tests-runner.yml`
+
+A repo whose tests run through the shared `tests-runner.yml` reusable has no job
+of its own to add the step to. The reusable runs it for you. Pass the list and
+the count on the `tests` job, and the step becomes the first step of the
+`Tests (Python)` job, before uv, the git-deps credential and any PR code:
+
+```yaml
+jobs:
+  tests:
+    uses: topcoder1/ci-workflows/.github/workflows/tests-runner.yml@main
+    with:
+      pinned_gate_files: |
+        tests/regression/test_example_gate.py
+      pinned_gate_expected: "12"
+      # Optional: in-directory helpers the gates import by bare name.
+      # pinned_gate_imports: |
+      #   _risk_paths_glob
+```
+
+This keeps the list and the count in the caller's workflow (a `blocked` path).
+The inputs are empty by default, so callers that don't set them see no change.
+
 ## Inputs
 
 | Input            | Required | Default         | Notes                                                                                                                                                                                                                                                                                                  |

@@ -34,7 +34,7 @@ Selftests: `selftest/test_claude_review_cost_guardrails.sh` (static contract), `
 
 ### `prettier-autofix.yml`
 
-Runs `prettier --write` on PR-changed markdown and pushes the fix back to the branch as a single commit. Pairs with `lint.yml`'s `prettier --check`: when a markdown PR lands with formatting drift, autofix lands a `style: prettier auto-fix` commit so the lint check goes green on the next CI run instead of blocking the PR.
+Runs `prettier --write` on PR-changed files matching `markdown_glob` (markdown, YAML and JSON by default) and pushes the fix back to the branch as a single commit. Pairs with `lint.yml`'s `prettier --check`: when a markdown PR lands with formatting drift, autofix lands a `style: prettier auto-fix` commit so the lint check goes green on the next CI run instead of blocking the PR.
 
 **Inputs:**
 
@@ -43,9 +43,9 @@ Runs `prettier --write` on PR-changed markdown and pushes the fix back to the br
 - `changed_only` (bool, default `true`) — write only PR-touched files; mirrors `lint.yml`'s `prettier_changed_only`
 - `commit_message` (string, default `style: prettier auto-fix`)
 
-**Required secret:** `automerge_pat` — fine-grained PAT (or classic with `repo` scope). Same secret name and required scopes as `claude-author-automerge.yml`, so a repo that already has auto-merge wired needs no extra provisioning. Why a PAT: pushes by the default `GITHUB_TOKEN` do not retrigger downstream `pull_request` workflows, so the lint check would stay red against the previous SHA. A PAT push triggers `lint.yml` on the new commit and the check turns green.
+**Required secret:** `automerge_pat` — fine-grained PAT (or classic with `repo` scope). Same secret as `claude-author-automerge.yml`, so a repo that already has auto-merge wired needs no extra provisioning. This workflow uses only the PAT's `Contents: read and write` scope, to push the fix; keep its `Pull-requests: read and write` scope too, because `claude-author-automerge.yml` needs it. Map it explicitly in the caller (`automerge_pat: ${{ secrets.AUTOMERGE_PAT }}` under the job's `secrets:`); `secrets: inherit` passes nothing to a reusable owned by another account. Why a PAT: pushes by the default `GITHUB_TOKEN` do not retrigger downstream `pull_request` workflows, so the lint check would stay red against the previous SHA. A PAT push triggers `lint.yml` on the new commit and the check turns green.
 
-**Skipped automatically on:** fork PRs (cross-repo push impossible), closed PRs, PRs touching zero markdown.
+**Skipped automatically on:** fork PRs (cross-repo push impossible), closed PRs, PRs opened by Dependabot or Renovate (Dependabot-triggered runs get no Actions secrets, so the PAT is empty, and dependency bumps don't need autofix), and, with `changed_only: true` (the default), PRs that change no file matching `markdown_glob`.
 
 **Untrusted-head hardening (defense in depth).** This workflow checks out the PR **head** — attacker- or model-writable — with the push PAT in reach, and fires the moment the PR opens (draft or not). Prettier's default behavior loads config and plugins as **code** (`prettier.config.js`, `.prettierrc.cjs`, a `package.json` `"prettier"` module ref, and any plugin they name), so an unhardened run executes head-authored Node on the runner. The central lane closes this so callers don't have to:
 
@@ -93,7 +93,7 @@ Auto-merges Dependabot PRs for patch (and optionally minor) version bumps once r
 - `merge_method` (string, default `squash`) — `merge` | `squash` | `rebase`
 - `allow_minor` (bool, default `true`) — also merge minor bumps
 
-**Required secret:** none (uses auto-injected `GITHUB_TOKEN`)
+**Secret:** `automerge_pat` — optional, but without it the arm runs on `GITHUB_TOKEN`, GitHub attributes the merge to github-actions[bot], and no push workflow (CI, deploys) runs for it; the arm step then emits a `::warning::`. Map it explicitly in the caller (`secrets: inherit` passes nothing across accounts), and trigger the caller on `pull_request_target`, so a Dependabot run reads the Actions secrets (this reusable never checks out or runs PR code). Never copy the PAT into the **Dependabot** secret store: every Dependabot-triggered job that references it would hold it while running the bumped code.
 
 ## Per-project caller stubs
 
