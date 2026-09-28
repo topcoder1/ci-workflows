@@ -26,6 +26,24 @@ name: Claude-author Auto-merge (reusable)
 #     - auth / login / signin / signup / logout / session(s) / oauth /
 #       oauth2 / sso / jwt / mfa / totp / webauthn / passkey
 #     - secret(s) / env files / keychain / credentials
+#     - secret-scanner config: gitleaks' config and ignore files at any
+#       depth. gitleaks reads its allowlists and its ignore list from the PR's
+#       own checkout, so a PR that leaks a secret could allowlist it in the
+#       same diff and turn a REQUIRED gitleaks check green. Lesson 2026-09-24,
+#       from an independent review of topcoder1/wxaintel-platform's gitleaks
+#       fix. The config file is not just .gitleaks.toml. Once that name
+#       exists, gitleaks lets Viper search for `.gitleaks`, which returns the
+#       first FILE among .gitleaks.<ext> (json before toml) or a bare
+#       .gitleaks. gitleaks parses that file as TOML whatever its extension.
+#       So a .gitleaks.json holding TOML text silently shadows .gitleaks.toml,
+#       and a .gitleaks.toml DIRECTORY hands the scan to any of the others. The
+#       segment rule enumerates Viper's closed extension list (v1.8.1 plus
+#       v1.19.0's tfvars); re-check it when gitleaks bumps Viper. Also gated:
+#       the dotless gitleaks.toml that gitleaks-action's README tells users to
+#       create, and .gitleaksignore. A repo that points --config,
+#       $GITLEAKS_CONFIG, --baseline-path or an [extend] path at another file
+#       gates that file in its own .github/risk-paths.yml `blocked:` list,
+#       because such a target can have any name.
 #     - DB migrations / SQL files
 #     - billing / payment / pricing / invoice / subscription(s) /
 #       checkout / refund(s)
@@ -1266,6 +1284,9 @@ jobs:
           ^(.*/)?\.env($|\..*)
           ^(.*/)?keychain.*
           ^(.*/)?credentials.*
+          (^|/)\.gitleaks(\.(json|toml|yaml|yml|properties|props|prop|hcl|tfvars|dotenv|env|ini))?(/|$)
+          (^|/)gitleaks\.toml$
+          (^|/)\.gitleaksignore$
           ^(.*/)?migrations(/|$)
           .*\.sql$
           ^(.*/)?(billing|payment[s]?|pricing|invoice[s]?|subscription[s]?|checkout|refund[s]?)(/|\.(py|go|ts|tsx|js|jsx)$|$)
