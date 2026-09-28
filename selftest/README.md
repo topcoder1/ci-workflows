@@ -158,6 +158,35 @@ arbitrary helper scripts; that's a different kind of repo.
   enabler path (a typo that would be silent in production); structural pins
   hold one arm call site per workflow and keep `automerge_pat`
   `required: false`.
+- `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
+  without the PAT, since Dependabot deletes its own branch and refusing would
+  stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
+  makes the merge github-actions[bot]'s, and GitHub runs no push workflow for
+  it: whois-api-llc/wxa_vpn's deploy.yml skipped 42 Dependabot bumps
+  (2026-07-23..09-25). Runs the extracted arm step against a stub `gh` that
+  models arm state (re-arming keeps the original enabler) and answers
+  through the SHIPPED `--jq` filter; a misspelled enabler path is a negative
+  control. Pins: no PAT gives a `::warning::` (plus a step-summary line)
+  naming the `pull_request_target` caller fix and never the Dependabot
+  store, and the PR is still armed exactly once, head-bound; a PAT arms
+  silently with no `GET /user` probe; a failed arm still fails the step.
+  Structural pins: the run block is `${{ }}`-free, there is one arm call
+  site, `automerge_pat` stays `required: false`, and the only action is a
+  SHA-pinned `dependabot/fetch-metadata`, so nothing checks out PR code for
+  callers on `pull_request_target`. With a PAT, a GitHub Actions arm that
+  came first (safe-paths-automerge arms docs/tests-only Dependabot PRs with
+  GITHUB_TOKEN seconds earlier; wxa-mcp-server#436) is replaced with the PAT
+  user's, and the non-atomic read/disarm gap is a documented residual, as in
+  revoke-stale-arm. The replacement's guarantees:
+  - the head is re-read before every disarm, so a newer head's arm is never
+    touched;
+  - only a positively read Actions arm is disarmed again, never a user's or
+    another App's;
+  - after a disarm, the PR is re-armed head-bound with retries, or the run
+    warns that it could not be re-armed;
+  - an immediate merge, a failed read and an Actions merge each end in an
+    explicit verdict, never silence;
+  - the step never fails over this.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

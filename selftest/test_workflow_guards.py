@@ -54,6 +54,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_codex_review_rename_sources.sh",
     "selftest/test_codex_verdict_gate.sh",
     "selftest/test_comment_nonfatal_reporting.sh",
+    "selftest/test_dependabot_pat_warning.sh",
     "selftest/test_findings_reply_narrowing.sh",
     "selftest/test_lint_prettier_check_untrusted_head.sh",
     "selftest/test_pr_classify_rename_sources.sh",

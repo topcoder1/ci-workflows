@@ -93,7 +93,7 @@ Auto-merges Dependabot PRs for patch (and optionally minor) version bumps once r
 - `merge_method` (string, default `squash`) — `merge` | `squash` | `rebase`
 - `allow_minor` (bool, default `true`) — also merge minor bumps
 
-**Required secret:** none (uses auto-injected `GITHUB_TOKEN`)
+**Secret:** `automerge_pat` — optional, but without it the arm runs on `GITHUB_TOKEN`, GitHub attributes the merge to github-actions[bot], and no push workflow (CI, deploys) runs for it; the arm step then emits a `::warning::`. Map it explicitly in the caller (`secrets: inherit` passes nothing across accounts), and trigger the caller on `pull_request_target`, so a Dependabot run reads the Actions secrets (this reusable never checks out or runs PR code). Never copy the PAT into the **Dependabot** secret store: every Dependabot-triggered job that references it would hold it while running the bumped code.
 
 ## Per-project caller stubs
 
