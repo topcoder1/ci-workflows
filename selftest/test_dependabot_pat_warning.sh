@@ -30,28 +30,37 @@
 # reads the empty Dependabot store, and arms docs/tests-only Dependabot PRs
 # with GITHUB_TOKEN 2-44 s before this job (wxa-mcp-server#436 and 6 more,
 # found by the independent review of dotclaude#411). So with a PAT, the step
-# reads the enabler back and replaces a bot's arm with the PAT user's.
+# reads the PR back and replaces a GitHub Actions (GITHUB_TOKEN) arm with the
+# PAT user's. Only that enabler is replaced: another App's merge still fires
+# push workflows (Codex round 1).
 #
 # The arm step is EXTRACTED from the workflow YAML (the shipped bash) and run
-# against a stubbed `gh` that models the PR's arm state (none/bot/user;
-# re-arming keeps the original enabler) and answers `pr view` by running the
-# SHIPPED --jq filter over gh-shaped JSON:
+# against a stubbed `gh` that models the PR (unarmed, armed by GitHub Actions,
+# a user or another App, or merged; re-arming keeps the original enabler) and
+# answers `pr view` by running the SHIPPED --jq filter over gh-shaped JSON:
 #   1. no PAT ⇒ ::warning:: (plus a step-summary line) naming the
 #      pull_request_target fix and never the Dependabot store; still arms
 #      exactly once, head-bound, exit 0.
 #   2. a PAT, nothing armed before ⇒ one arm, as the user, no disarm, no
 #      warning, no `gh api user` call.
 #   3. the arm itself fails ⇒ the step fails; a warning never masks it.
-#   4. a PAT, a BOT armed first ⇒ the bot's arm is removed and the PR re-armed
-#      as the user (head-bound), no warning.
-#   5. a PAT, a bot's arm that will not come off ⇒ 3 disarm attempts, no
-#      re-arm, a warning that the merge stays bot-attributed, exit 0.
+#   4. a PAT, GitHub Actions armed first ⇒ its arm is removed and the PR
+#      re-armed as the user (head-bound), no warning.
+#   5. a PAT, an Actions arm that will not come off ⇒ 3 disarm attempts, the
+#      re-arm keeps it, a warning that the merge fires no push workflows,
+#      exit 0.
 #   6. a PAT, a USER armed first ⇒ never disarmed, no warning.
+#   7. a PAT, ANOTHER App armed first ⇒ never disarmed, no warning (its merge
+#      fires push workflows; Codex round 1).
+#   8. a PAT, the disarm succeeds but every later read fails ⇒ the PR is
+#      re-armed anyway, as the user, never left unarmed (Codex rounds 1-2).
+#   9. a PAT, the re-arm merges at once (checks already green) ⇒ merged as
+#      the user, no warning (Codex round 2).
 #   negative controls, each proving a case above can fail:
 #     the ::warning:: echoes neutralized ⇒ case 1 sees no warning;
-#     the bot-arm replacement neutralized ⇒ case 4 ends bot-armed;
-#     the enabler jq path misspelled (`.enabled_by.is_bot`) ⇒ case 4 ends
-#     bot-armed (the stub runs the shipped filter, so a typo is caught).
+#     the replacement neutralized ⇒ case 4 ends armed by Actions;
+#     the enabler jq path misspelled (`.enabled_by`) ⇒ case 4 ends armed by
+#     Actions (the stub runs the shipped filter, so a typo is caught).
 # Structural pins (hardcoded, not derived from the file under test):
 #   * the run block is `${{ }}`-free — Actions evaluates expressions in a run
 #     block before bash starts, so even a message quoting
@@ -150,6 +159,7 @@ fi
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
+# $ARM_STATE: none | actions | user | other | merged-user | merged-actions
 echo "gh $*" >> "$GH_LOG"
 arm_state() { cat "$ARM_STATE" 2>/dev/null || echo none; }
 jq_filter() { while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && { printf '%s' "$2"; return; }; shift; done; }
@@ -159,20 +169,31 @@ fi
 case "$1 $2" in
   "pr merge")
     case " $* " in
-      *" --disable-auto "*) [ "${STUB_DISARM_STUCK:-0}" = "1" ] || echo none > "$ARM_STATE" ;;
+      *" --disable-auto "*)
+        [ "${STUB_DISARM_STUCK:-0}" = "1" ] && exit 0
+        case "$(arm_state)" in actions|user|other) echo none > "$ARM_STATE" ;; esac
+        [ "${STUB_READ_FAIL_AFTER_DISARM:-0}" = "1" ] && : > "$READS_FAIL" ;;
       *" --auto "*)
         [ "${STUB_ARM_FAIL:-0}" = "1" ] && { echo "arm failed" >&2; exit 1; }
-        # Re-arming keeps the ORIGINAL enabler (measured, ci-workflows#217).
-        if [ "$(arm_state)" = "none" ]; then
-          if [ "${USING_PAT:-0}" = "1" ]; then echo user > "$ARM_STATE"; else echo bot > "$ARM_STATE"; fi
-        fi ;;
+        case "$(arm_state)" in
+          merged-*) echo "Pull request is already merged" >&2; exit 1 ;;
+          none)
+            who=actions; [ "${USING_PAT:-0}" = "1" ] && who=user
+            if [ "${STUB_ARM_MERGES:-0}" = "1" ]; then echo "merged-$who" > "$ARM_STATE"; else echo "$who" > "$ARM_STATE"; fi ;;
+          *) ;;  # re-arming keeps the ORIGINAL enabler (measured, ci-workflows#217)
+        esac ;;
     esac
     exit 0 ;;
   "pr view")
+    [ -e "$READS_FAIL" ] && { echo "gh: HTTP 502" >&2; exit 1; }
+    act='{"login":"app/github-actions","is_bot":true}'; usr='{"login":"topcoder1","is_bot":false}'
     case "$(arm_state)" in
-      none) json='{"autoMergeRequest":null}' ;;
-      bot)  json='{"autoMergeRequest":{"enabledBy":{"login":"app/github-actions","is_bot":true}}}' ;;
-      user) json='{"autoMergeRequest":{"enabledBy":{"login":"topcoder1","is_bot":false}}}' ;;
+      none)           json='{"state":"OPEN","mergedBy":null,"autoMergeRequest":null}' ;;
+      actions)        json="{\"state\":\"OPEN\",\"mergedBy\":null,\"autoMergeRequest\":{\"enabledBy\":$act}}" ;;
+      user)           json="{\"state\":\"OPEN\",\"mergedBy\":null,\"autoMergeRequest\":{\"enabledBy\":$usr}}" ;;
+      other)          json='{"state":"OPEN","mergedBy":null,"autoMergeRequest":{"enabledBy":{"login":"app/some-deploy-app","is_bot":true}}}' ;;
+      merged-user)    json="{\"state\":\"MERGED\",\"mergedBy\":$usr,\"autoMergeRequest\":null}" ;;
+      merged-actions) json="{\"state\":\"MERGED\",\"mergedBy\":$act,\"autoMergeRequest\":null}" ;;
     esac
     printf '%s\n' "$json" | jq -r "$(jq_filter "$@")"
     exit $? ;;
@@ -184,9 +205,9 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 
 run_case() { # script, initial arm state, then env assignments
   local script="$1" initial="$2"; shift 2
-  : > "$T/gh.log"; : > "$T/summary"; printf '%s\n' "$initial" > "$T/arm_state"
+  : > "$T/gh.log"; : > "$T/summary"; printf '%s\n' "$initial" > "$T/arm_state"; rm -f "$T/reads_fail"
   rc=0
-  env "$@" PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" ARM_STATE="$T/arm_state" \
+  env "$@" PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" ARM_STATE="$T/arm_state" READS_FAIL="$T/reads_fail" \
     GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY=whois-api-llc/wxa_vpn \
     PR_URL=https://github.com/whois-api-llc/wxa_vpn/pull/9 HEAD_SHA=abc123 METHOD=squash \
     bash "$script" > "$T/out" 2>&1 || rc=$?
@@ -225,21 +246,21 @@ else
   report "3. the arm failed but the step exited 0"
 fi
 
-# 4. a PAT, a bot armed first (safe-paths-automerge's GITHUB_TOKEN arm)
-run_case "$T/arm.sh" bot USING_PAT=1
+# 4. a PAT, GitHub Actions armed first (safe-paths-automerge's GITHUB_TOKEN arm)
+run_case "$T/arm.sh" actions USING_PAT=1
 if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(arms)" = 2 ] && [ "$(state)" = user ] && ! warned; then
-  pass "4. PAT, a bot armed first: its arm is removed and the PR re-armed as the user"
+  pass "4. PAT, GitHub Actions armed first: its arm is removed and the PR re-armed as the user"
 else
-  report "4. PAT, a bot armed first"
+  report "4. PAT, GitHub Actions armed first"
 fi
 
-# 5. a PAT, a bot's arm that will not come off
-run_case "$T/arm.sh" bot USING_PAT=1 STUB_DISARM_STUCK=1
-if [ "$rc" = 0 ] && [ "$(disarms)" = 3 ] && [ "$(arms)" = 1 ] && [ "$(state)" = bot ] && warned \
+# 5. a PAT, an Actions arm that will not come off
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_DISARM_STUCK=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 3 ] && [ "$(state)" = actions ] && warned \
   && grep -q 'push workflows' "$T/summary"; then
-  pass "5. PAT, a stuck bot arm: 3 disarm attempts, no blind re-arm, a warning, exit 0"
+  pass "5. PAT, a stuck Actions arm: 3 disarm attempts, a warning, exit 0"
 else
-  report "5. PAT, a stuck bot arm"
+  report "5. PAT, a stuck Actions arm"
 fi
 
 # 6. a PAT, a user armed first
@@ -248,6 +269,30 @@ if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && [ "$(state)" = user ] && ! warned; t
   pass "6. PAT, a user armed first: never disarmed, no warning"
 else
   report "6. PAT, a user armed first"
+fi
+
+# 7. a PAT, another App armed first
+run_case "$T/arm.sh" other USING_PAT=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && [ "$(state)" = other ] && ! warned; then
+  pass "7. PAT, another App armed first: never disarmed, no warning (its merge fires push workflows)"
+else
+  report "7. PAT, another App armed first"
+fi
+
+# 8. a PAT, the disarm succeeds but every later read fails
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_READ_FAIL_AFTER_DISARM=1
+if [ "$rc" = 0 ] && [ "$(state)" = user ]; then
+  pass "8. PAT, reads fail after a successful disarm: the PR is re-armed as the user, never left unarmed"
+else
+  report "8. PAT, reads fail after a successful disarm"
+fi
+
+# 9. a PAT, the re-arm merges at once
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_ARM_MERGES=1
+if [ "$rc" = 0 ] && [ "$(state)" = merged-user ] && ! warned; then
+  pass "9. PAT, the re-arm merges at once: merged as the user, no warning"
+else
+  report "9. PAT, the re-arm merges at once"
 fi
 
 # Negative controls: each neutralizes one mechanism and reruns the case it
@@ -264,14 +309,14 @@ if neutralize "warning" 's/^([[:space:]]*)echo "::warning::/\1: echo "::warning:
   if ! warned; then pass "control: with the ::warning:: echoes neutralized, case 1 sees no warning"
   else fail "control: a warning appeared with every ::warning:: echo neutralized"; fi
 fi
-if neutralize "replacement" 's/= "bot" \]; then/= "never" ]; then/'; then
-  run_case "$T/arm_ctl.sh" bot USING_PAT=1
-  if [ "$(state)" = bot ]; then pass "control: with the bot-arm replacement neutralized, case 4 ends bot-armed"
+if neutralize "replacement" 's/= "actions" \]; then/= "never" ]; then/'; then
+  run_case "$T/arm_ctl.sh" actions USING_PAT=1
+  if [ "$(state)" = actions ]; then pass "control: with the replacement neutralized, case 4 ends armed by Actions"
   else fail "control: case 4 ended '$(state)' with the replacement neutralized"; fi
 fi
-if neutralize "jq path" 's/\.enabledBy\.is_bot/.enabled_by.is_bot/g'; then
-  run_case "$T/arm_ctl.sh" bot USING_PAT=1
-  if [ "$(state)" = bot ]; then pass "control: with the enabler jq path misspelled, case 4 ends bot-armed (the stub runs the shipped filter)"
+if neutralize "jq path" 's/\.autoMergeRequest\.enabledBy/.autoMergeRequest.enabled_by/g'; then
+  run_case "$T/arm_ctl.sh" actions USING_PAT=1
+  if [ "$(state)" = actions ]; then pass "control: with the enabler jq path misspelled, case 4 ends armed by Actions (the stub runs the shipped filter)"
   else fail "control: case 4 ended '$(state)' with the enabler jq path misspelled"; fi
 fi
 

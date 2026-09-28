@@ -192,38 +192,51 @@ jobs:
         run: |
           set -euo pipefail
           arm() { gh pr merge --auto "--${METHOD}" --match-head-commit "$HEAD_SHA" "$PR_URL"; }
-          enabler() {
-            gh pr view "$PR_URL" --json autoMergeRequest \
-              --jq 'if .autoMergeRequest == null then "none" elif (.autoMergeRequest.enabledBy.is_bot // false) then "bot" else "user" end' \
-              2>/dev/null || echo unknown
+          # merged | merged-by-actions | none | actions | other, or unknown when
+          # the read fails. Only a GitHub Actions (GITHUB_TOKEN) enabler
+          # suppresses push workflows; another App's merge still fires them.
+          pr_state() {
+            gh pr view "$PR_URL" --json state,mergedBy,autoMergeRequest --jq '
+              def actions: (.login // "") | test("^(app/)?github-actions(\\[bot\\])?$"; "i");
+              if .state == "MERGED" then (if (.mergedBy // {} | actions) then "merged-by-actions" else "merged" end)
+              elif .autoMergeRequest == null then "none"
+              elif (.autoMergeRequest.enabledBy // {} | actions) then "actions"
+              else "other" end' 2>/dev/null || echo unknown
+          }
+          warn() {
+            echo "::warning::$1"
+            echo "$1" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           }
           if [ "$USING_PAT" != "1" ]; then
             msg="No automerge_pat reached this workflow, so this PR is armed with GITHUB_TOKEN: GitHub attributes the merge to github-actions[bot] and runs no push workflows (CI, deploys) for it. Fix the caller in ${GITHUB_REPOSITORY}: trigger it on pull_request_target, so a Dependabot run reads the Actions secrets (this reusable never runs PR code), and map automerge_pat to the Actions secret AUTOMERGE_PAT explicitly (secrets: inherit passes nothing to a reusable owned by another account). Do not copy AUTOMERGE_PAT into the Dependabot secret store: every Dependabot-triggered job that references it would hold it while running the bumped code."
-            echo "::warning::$msg"
-            echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            warn "$msg"
           fi
           arm
           # A PAT arm counts only if it is the first: re-arming keeps the
           # original enabler (measured, #217). safe-paths-automerge runs on
           # pull_request, whose Dependabot store holds no PAT, and arms
           # docs/tests-only Dependabot PRs with GITHUB_TOKEN seconds earlier
-          # (wxa-mcp-server#436). Replace a bot's arm with the PAT user's; a
-          # user's arm is never touched. The PR stays armed either way, so a
-          # replacement that fails warns instead of failing the step.
-          if [ "$USING_PAT" = "1" ] && [ "$(enabler)" = "bot" ]; then
-            echo "::notice::a bot armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
-            off=""
+          # (wxa-mcp-server#436). Replace a GitHub Actions arm with the PAT
+          # user's; a user's or another App's arm is never touched. Re-arm
+          # unless the PR already merged, even when the reads failed: an
+          # unarmed PR is then armed as the PAT user, and a stuck Actions arm
+          # keeps its enabler. The PR stays armed either way, so this warns
+          # instead of failing the step.
+          if [ "$USING_PAT" = "1" ] && [ "$(pr_state)" = "actions" ]; then
+            echo "::notice::GitHub Actions (GITHUB_TOKEN) armed this PR first; replacing its arm with the PAT user's so the merge fires push workflows."
             for _ in 1 2 3; do
               gh pr merge --disable-auto "$PR_URL" 2>&1 || true
-              if [ "$(enabler)" = "none" ]; then off=1; break; fi
+              case "$(pr_state)" in none | merged | merged-by-actions) break ;; esac
               sleep 3
             done
-            if [ -n "$off" ]; then arm; fi
-            if [ "$(enabler)" != "user" ]; then
-              msg="A bot still holds this PR's auto-merge arm, so GitHub attributes the merge to it and runs no push workflows (CI, deploys) for it."
-              echo "::warning::$msg"
-              echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-            fi
+            case "$(pr_state)" in merged | merged-by-actions) ;; *) arm ;; esac
+            case "$(pr_state)" in
+              merged | other) ;;
+              actions | merged-by-actions)
+                warn "GitHub Actions (GITHUB_TOKEN) still holds this PR's auto-merge arm or made its merge, so GitHub runs no push workflows (CI, deploys) for it." ;;
+              *)
+                warn "Could not confirm who holds this PR's auto-merge arm. If it is GitHub Actions (GITHUB_TOKEN), the merge fires no push workflows (CI, deploys)." ;;
+            esac
           fi
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
