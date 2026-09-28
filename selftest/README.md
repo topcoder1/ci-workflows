@@ -163,17 +163,21 @@ arbitrary helper scripts; that's a different kind of repo.
   stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
   makes the merge github-actions[bot]'s, and GitHub runs no push workflow for
   it: whois-api-llc/wxa_vpn's deploy.yml skipped 42 Dependabot bumps
-  (2026-07-23..09-25), and a 2026-09-25 sweep found `AUTOMERGE_PAT` in the
-  Dependabot secret store of 2 of 46 callers. Runs the extracted arm step
-  against a stub `gh`. Pins: no PAT gives a `::warning::` (plus a
-  step-summary line) naming the `pull_request_target` caller fix and never
-  the Dependabot store, and the PR is still armed exactly once, head-bound;
-  `dependabot/fetch-metadata` is SHA-pinned and is the reusable's only action
-  (nothing checks out PR code, which callers on `pull_request_target` rely
-  on). With a PAT, a GitHub Actions (GITHUB_TOKEN) arm that came first is
-  replaced with the PAT user's: safe-paths-automerge arms docs/tests-only
-  Dependabot PRs with GITHUB_TOKEN seconds earlier, and re-arming keeps the
-  original enabler (wxa-mcp-server#436). Guarantees:
+  (2026-07-23..09-25). Runs the extracted arm step against a stub `gh` that
+  models arm state (re-arming keeps the original enabler) and answers
+  through the SHIPPED `--jq` filter; a misspelled enabler path is a negative
+  control. Pins: no PAT gives a `::warning::` (plus a step-summary line)
+  naming the `pull_request_target` caller fix and never the Dependabot
+  store, and the PR is still armed exactly once, head-bound; a PAT arms
+  silently with no `GET /user` probe; a failed arm still fails the step.
+  Structural pins: the run block is `${{ }}`-free, there is one arm call
+  site, `automerge_pat` stays `required: false`, and the only action is a
+  SHA-pinned `dependabot/fetch-metadata`, so nothing checks out PR code for
+  callers on `pull_request_target`. With a PAT, a GitHub Actions arm that
+  came first (safe-paths-automerge arms docs/tests-only Dependabot PRs with
+  GITHUB_TOKEN seconds earlier; wxa-mcp-server#436) is replaced with the PAT
+  user's, and the non-atomic read/disarm gap is a documented residual, as in
+  revoke-stale-arm. The replacement's guarantees:
   - the head is re-read before every disarm, so a newer head's arm is never
     touched;
   - only a positively read Actions arm is disarmed again, never a user's or
@@ -183,15 +187,6 @@ arbitrary helper scripts; that's a different kind of repo.
   - an immediate merge, a failed read and an Actions merge each end in an
     explicit verdict, never silence;
   - the step never fails over this.
-  The stub models arm state (re-arming keeps the enabler) and answers
-  through the shipped jq, and a misspelled enabler path is a negative
-  control. The non-atomic read/disarm gap is a documented residual, as in
-  revoke-stale-arm. A PAT with nothing armed before arms silently
-  with no `GET /user` probe (another App token's merge still fires push
-  workflows, so a failed probe would misdiagnose); a failed arm still fails
-  the step. A negative control neutralizes the warning. Structural pins: the
-  run block is `${{ }}`-free, there is one arm call site, and `automerge_pat`
-  stays `required: false`.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
