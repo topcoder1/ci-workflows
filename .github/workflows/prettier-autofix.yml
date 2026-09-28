@@ -37,8 +37,8 @@ name: Prettier Autofix
 #   - Closed PRs: skipped.
 #   - Bot-authored PRs (dependabot/renovate): skipped. GitHub withholds
 #     Actions secrets from dependabot-triggered runs, so `automerge_pat` is
-#     empty and the checkout fails with "Input required and not supplied:
-#     token" — a permanent red X on every dependabot PR. Mirrors the
+#     empty, and any run with a fix to push would fail at the push step
+#     ("automerge_pat secret is empty — cannot push"). Mirrors the
 #     bot-skip in claude-review.yml. Dependency bumps don't need autofix.
 #   - PRs that touched zero markdown files: skipped (no-op).
 #   - Changed-file listing failures (transient API errors): skipped after
@@ -133,7 +133,7 @@ on:
           the PAT's only use, and the changed-files listing runs on
           the job's GITHUB_TOKEN. The shared PAT also carries
           `Pull-requests: read and write`, which
-          claude-author-automerge.yml needs. Pass it EXPLICITLY
+          `claude-author-automerge.yml` needs. Pass it EXPLICITLY
           (`automerge_pat: <the repo's AUTOMERGE_PAT secret>`);
           `secrets: inherit` passes nothing to a reusable owned by a
           different account.
