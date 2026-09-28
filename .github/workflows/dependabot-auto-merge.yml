@@ -230,7 +230,10 @@ jobs:
               for _ in 1 2 3; do
                 gh pr merge --disable-auto "$PR_URL" 2>&1 || true
                 state=$(pr_state)
-                case "$state" in none | merged | merged-by-actions | other) break ;; esac
+                if [ "$state" = "unknown" ]; then sleep 3; state=$(pr_state); fi
+                # Disarm again only after positively reading an Actions arm:
+                # after a failed read someone else may hold it now.
+                [ "$state" = "actions" ] || break
                 sleep 3
               done
               case "$state" in none | actions | unknown) arm; state=$(pr_state) ;; esac

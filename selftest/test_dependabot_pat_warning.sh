@@ -62,6 +62,9 @@
 #      the merge fired no push workflows (Codex round 3).
 #  12. a PAT, another actor arms between the disarm and the read ⇒ that arm
 #      is never disarmed or re-armed over (Codex rounds 3-4).
+#  13. a PAT, the read after a successful disarm fails WHILE another actor
+#      arms ⇒ no second disarm: only a positively read Actions arm is
+#      disarmed again (Codex rounds 5-6).
 #   negative controls, each proving a case above can fail:
 #     the ::warning:: echoes neutralized ⇒ case 1 sees no warning;
 #     the replacement neutralized ⇒ case 4 ends armed by Actions;
@@ -322,6 +325,14 @@ if [ "$rc" = 0 ] && [ "$(disarms)" = 0 ] && [ "$(state)" = merged-actions ] && w
   pass "11. PAT, Actions merged it before the first read: a warning, exit 0"
 else
   report "11. PAT, Actions merged it before the first read"
+fi
+
+# 13. a PAT, the read after a successful disarm fails while another actor arms
+run_case "$T/arm.sh" actions USING_PAT=1 STUB_OTHER_ARMS_AFTER_DISARM=1 STUB_READ_FAIL_AFTER_DISARM=1
+if [ "$rc" = 0 ] && [ "$(disarms)" = 1 ] && [ "$(state)" = other ]; then
+  pass "13. PAT, an unreadable state after the disarm: no second disarm, another actor's arm survives"
+else
+  report "13. PAT, an unreadable state after the disarm"
 fi
 
 # 12. a PAT, another actor arms between the disarm and the read
