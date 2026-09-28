@@ -1,7 +1,8 @@
 name: Prettier Autofix
 
-# Reusable workflow that auto-applies `prettier --write` on PR-changed
-# markdown and pushes the fix back to the PR branch as a single commit.
+# Reusable workflow that auto-applies `prettier --write` on PR-changed files
+# matching `markdown_glob` (markdown, YAML and JSON by default) and pushes the
+# fix back to the PR branch as a single commit.
 #
 # Why a separate workflow vs folding write-mode into lint.yml:
 #   - lint.yml is intentionally check-only (read-only token, runs on every
@@ -40,7 +41,9 @@ name: Prettier Autofix
 #     empty, and any run with a fix to push would fail at the push step
 #     ("automerge_pat secret is empty — cannot push"). Mirrors the
 #     bot-skip in claude-review.yml. Dependency bumps don't need autofix.
-#   - PRs that touched zero markdown files: skipped (no-op).
+#   - With `changed_only: true` (the default), PRs that changed no file
+#     matching `markdown_glob` (markdown, YAML and JSON by default): skipped
+#     (no-op).
 #   - Changed-file listing failures (transient API errors): skipped after
 #     3 attempts — a scoping failure is never widened to a full-tree run
 #     (wxa-secrets#27: the old full-tree fallback reformatted pre-existing
