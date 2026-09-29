@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   review:
-    uses: ./.github/workflows/claude-review.yml # CANARY for #266: revert before merge
+    uses: topcoder1/ci-workflows/.github/workflows/claude-review.yml@main
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
