@@ -167,7 +167,11 @@ jobs:
 
             Do NOT post inline comments. Do NOT do general bug-hunting. The
             first pass already did that — your value is the regression axes.
+          # 40 turns: at 25 about 1 run in 20 went over while finishing a
+          # complete review (29 turns at most seen), and the action fails a
+          # run that reports success past the cap, so the check went red on a
+          # finished review. Most runs take 9-16.
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 25
+            --max-turns 40
             --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"
