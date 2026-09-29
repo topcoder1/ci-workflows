@@ -26,6 +26,13 @@ jobs:
     name: Claude Adversarial Review
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
+    env:
+      # The Claude Code CLI version, installed by the step
+      # "Pre-install Claude Code binary" and handed to the action. It is
+      # the version this lane already ran, bundled with claude-code-action
+      # v1.0.229; a bump is a deliberate change here, not a side effect of
+      # an action bump. Pinned by selftest/test_claude_lanes_cli_pin.py.
+      CLAUDE_CODE_VERSION: "2.1.276"
     permissions:
       contents: read
       pull-requests: write
@@ -35,6 +42,58 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: ${{ inputs.checkout_depth }}
+
+      # The Claude Code CLI this lane runs, installed at the version the job's
+      # CLAUDE_CODE_VERSION pins and handed to the action below, the same step
+      # claude-review.yml runs. Without it the action runs the CLI bundled with
+      # its release, so every action bump would change this lane's CLI too.
+      # Pinned by selftest/test_claude_lanes_cli_pin.py.
+      - name: Pre-install Claude Code binary (workaround anthropics/claude-code-action#1290)
+        id: claude_install
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          # The version actually on disk, "" when there is no binary yet.
+          # `claude --version` prints e.g. "2.1.233 (Claude Code)".
+          installed_version() {
+            [ -x "$HOME/.local/bin/claude" ] || { echo ""; return; }
+            "$HOME/.local/bin/claude" --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+          }
+          # install.sh intermittently exits 0 WITHOUT placing the binary (#1290),
+          # which used to fail the whole review job on a coin-flip. Retry up to
+          # 3 times, then fall back to npm, before giving up. `install.sh
+          # [stable|latest|VERSION]` hands the target to `claude install`; a
+          # binary of any OTHER version counts as a failed attempt too - see
+          # CLAUDE_CODE_VERSION at the job level for why the pin is load-bearing.
+          for attempt in 1 2 3; do
+            curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION" || true
+            [ "$(installed_version)" = "$CLAUDE_CODE_VERSION" ] && break
+            echo "::warning::Claude install attempt ${attempt}/3 produced no ${CLAUDE_CODE_VERSION} binary (got '$(installed_version)'); retrying..."
+            sleep $((attempt * 5))
+          done
+          if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::warning::install.sh failed 3× — falling back to npm (@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION})"
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" || true
+            if command -v claude >/dev/null 2>&1; then
+              ln -sf "$(command -v claude)" "$HOME/.local/bin/claude"
+            fi
+          fi
+          if [ ! -x "$HOME/.local/bin/claude" ]; then
+            echo "::error::Claude Code binary not at $HOME/.local/bin/claude after 3 install attempts + npm fallback — check upstream issue #1290"
+            exit 1
+          fi
+          # FAIL CLOSED on an unpinned binary: an unexpected version means
+          # the lane is back on a floating CLI, the channel the Aug-04, Aug-14
+          # and Aug-16 incidents came through (and for claude-review, below
+          # 2.1.217 --max-budget-usd would silently stop bounding subagent
+          # spend).
+          if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::error::Claude Code '$(installed_version)' installed but the pin is ${CLAUDE_CODE_VERSION} — refusing to review on an unpinned binary (the pin is the fleet's rollback lever; bump CLAUDE_CODE_VERSION at the job level deliberately, never here)"
+            exit 1
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+          echo "executable=$HOME/.local/bin/claude" >> "$GITHUB_OUTPUT"
 
       # git leaves a submodule's pointer change out of `git log -p` (and out
       # of every other diff it prints) when the .gitmodules it reads sets
@@ -131,6 +190,7 @@ jobs:
           GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          path_to_claude_code_executable: ${{ steps.claude_install.outputs.executable }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}

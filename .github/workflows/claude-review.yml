@@ -311,11 +311,12 @@ jobs:
             exit 1
           fi
           # FAIL CLOSED on an unpinned binary: an unexpected version means
-          # the fleet is back on the floating channel that caused the Aug-04,
-          # Aug-14 and Aug-16 incidents, and below 2.1.217 --max-budget-usd
-          # would silently stop bounding subagent spend.
+          # the lane is back on a floating CLI, the channel the Aug-04, Aug-14
+          # and Aug-16 incidents came through (and for claude-review, below
+          # 2.1.217 --max-budget-usd would silently stop bounding subagent
+          # spend).
           if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
-            echo "::error::Claude Code '$(installed_version)' installed but the pin is ${CLAUDE_CODE_VERSION} — refusing to review on an unpinned binary (the pin is the fleet's rollback lever; bump CLAUDE_CODE_VERSION in claude-review.yml deliberately, never here)"
+            echo "::error::Claude Code '$(installed_version)' installed but the pin is ${CLAUDE_CODE_VERSION} — refusing to review on an unpinned binary (the pin is the fleet's rollback lever; bump CLAUDE_CODE_VERSION at the job level deliberately, never here)"
             exit 1
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
