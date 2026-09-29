@@ -31,7 +31,16 @@
 #       limit rather than a missing permission.
 #   R8  a review still running at the cap declines (quiet-cap) and names it.
 #   R9  an empty review_check_names input is the pre-change behavior: no read.
-#   R10 pagination: a running review on page 2 still holds the gate.
+#   R10 pagination: a running review on page 2 still holds the gate (the stub
+#       serves page 2 only to a --paginate read).
+#   R11 a failed newest attempt is not a finished review: the gate waits for
+#       the re-run, which posts a finding the detector then sees.
+#   R12 a failed attempt nobody re-runs declines at the cap, named with its
+#       conclusion.
+#   R13 a queued review (not yet in_progress) holds the gate.
+#   R14 an empty HEAD_SHA fails closed without reading anything.
+#   R15 a control character in a check-run name cannot start a workflow
+#       command in the log.
 #   S1  structural: the read paginates and asks for every attempt (filter=all).
 #   S2  structural: HEAD_SHA and REVIEW_CHECK_NAMES are bound in THIS step's env.
 #
@@ -134,8 +143,14 @@ case "$*" in
     if [ -f "$T_DIR/checkruns_error" ]; then cat "$T_DIR/checkruns_error" >&2; exit 1; fi
     now=$(cat "$T_NOW")
     for page in "$T_DIR"/checkruns_page*.json; do
-      jq -c --argjson now "$now" '{total_count: length, check_runs: map({id, name,
-        status: (if $now >= .done_at then "completed" else "in_progress" end)})}' "$page"
+      case "$page" in
+        */checkruns_page1.json) ;;
+        *) case "$*" in *--paginate*) ;; *) continue ;; esac ;;
+      esac
+      jq -c --argjson now "$now" '{total_count: length, check_runs: map(select($now >= (.appear_at // 0))
+        | {id, name,
+           status: (if $now >= .done_at then "completed" else (.before // "in_progress") end),
+           conclusion: (if $now >= .done_at then (.conclusion // "success") else null end)})}' "$page"
     done
     exit 0 ;;
   *pulls/*/commits*)
@@ -182,17 +197,20 @@ EOF
   echo '[{"parents":[{"sha":"x"}],"commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]' > "$CASE/commits.json"
   echo '[]' > "$CASE/checkruns_page1.json"
 }
-runs() {  # $1 = page number, then "id|name|done_at" per check run
+runs() {  # $1 = page number, then "id|name|done_at[|appear_at|before|conclusion]" per run
   local page=$1; shift
   printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0) | split("|")
-    | {id: (.[0] | tonumber), name: .[1], done_at: (.[2] | tonumber)})' > "$CASE/checkruns_page$page.json"
+    | {id: (.[0] | tonumber), name: .[1], done_at: (.[2] | tonumber),
+       appear_at: ((.[3] // "0") | if . == "" then 0 else tonumber end),
+       before: ((.[4] // "") | if . == "" then "in_progress" else . end),
+       conclusion: ((.[5] // "") | if . == "" then "success" else . end)})' > "$CASE/checkruns_page$page.json"
 }
-exec_gate() {  # $1 = REVIEW_CHECK_NAMES
+exec_gate() {  # $1 = REVIEW_CHECK_NAMES, $2 = HEAD_SHA (default abc123)
   set +e
   PATH="$T/bin:$PATH" T_DIR="$CASE" T_NOW="$CASE/now" \
     GITHUB_OUTPUT="$CASE/output" GITHUB_REPOSITORY="o/r" \
     PR=1 PR_URL="https://example.invalid/pr/1" QUIET_MINUTES=20 \
-    PR_CREATED_AT="" HEAD_SHA="abc123" REVIEW_CHECK_NAMES="$1" \
+    PR_CREATED_AT="" HEAD_SHA="${2-abc123}" REVIEW_CHECK_NAMES="$1" \
     bash "$T/qf.sh" > "$CASE/stdout" 2>&1
   RC=$?
   set -e
@@ -252,7 +270,7 @@ fi
 # checks already gate the merge itself.
 new_case
 runs 1 "20|pytest|$NEVER" "21|lint / actionlint|$NEVER" "22|Codex Review Summary|$NEVER" \
-  "23|review / Codex Reviewer|$NEVER" "24|review / Claude Review|$PAST"
+  "23|review / Codex Reviewer|$NEVER" "24|review / Claude Review|$PAST" "25|pre-Codex Review|$NEVER"
 exec_gate "$DEFAULT_NAMES"
 if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ ! -s "$CASE/sleep.log" ]; then
   echo "✓ R4a running non-review checks and look-alike names do not hold the gate"
@@ -278,12 +296,12 @@ fi
 # gate even though an earlier attempt completed, and an earlier attempt still
 # listed as running does not hold it once a newer attempt completed.
 new_case
-runs 1 "40|review / Claude Review|$PAST" "41|review / Claude Review|$DONE"
+runs 1 "41|review / Claude Review|$DONE" "40|review / Claude Review|$PAST"
 exec_gate "$DEFAULT_NAMES"
 r5a_ok=0
 if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ "$(polls)" -eq 6 ]; then r5a_ok=1; fi
 new_case
-runs 1 "40|review / Claude Review|$NEVER" "41|review / Claude Review|$PAST"
+runs 1 "41|review / Claude Review|$PAST" "40|review / Claude Review|$NEVER"
 exec_gate "$DEFAULT_NAMES"
 if [ "$r5a_ok" -eq 1 ] && [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ ! -s "$CASE/sleep.log" ]; then
   echo "✓ R5 the newest attempt of each review check decides"
@@ -367,6 +385,80 @@ if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ "$(polls)" -eq 6 ]
   echo "✓ R10 a running review on page 2 still holds the gate"
 else
   echo "✗ R10 the gate read only page 1 of the check runs"
+  report
+  failed=1
+fi
+
+# R11. The newest attempt FAILED 100s ago (a Claude API error, a runner
+# loss). That is not a finished review: the gate waits for the re-run, which
+# appears 300s from now, completes at 600s and posts a finding. Counting the
+# failure as done would consult now, before the finding exists, and arm
+# (wxa_webcat#1695's timeline, where only a manual-merge label stopped it).
+new_case
+REDO=$((NOW0 + 600))
+runs 1 "81|review / Claude Review|$REDO|$((NOW0 + 300))" "80|review / Claude Review|$PAST|||failure"
+echo "$REDO" > "$CASE/finding_at"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=0$' "$CASE/output" && grep -q '^reason=findings$' "$CASE/output" \
+   && [ "$(polls)" -eq 10 ]; then
+  echo "✓ R11 a failed newest attempt is waited on; the re-run's finding declines the arm"
+else
+  echo "✗ R11 a failed review attempt was treated as a finished review"
+  report
+  failed=1
+fi
+
+# R12. A failed attempt that nobody re-runs: poll to the cap, then decline
+# via quiet-cap and name the lane with its conclusion.
+new_case
+runs 1 "90|review / Codex Review|$PAST|||timed_out"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=0$' "$CASE/output" && grep -q '^reason=quiet-cap$' "$CASE/output" \
+   && grep -q 'review / Codex Review (timed_out)' "$CASE/stdout"; then
+  echo "✓ R12 a failed attempt nobody re-runs declines at the cap, named with its conclusion"
+else
+  echo "✗ R12 a failed attempt nobody re-ran did not decline at the cap with its conclusion"
+  report
+  failed=1
+fi
+
+# R13. Queued, waiting, pending and requested are running too, not just
+# in_progress.
+new_case
+runs 1 "100|review / Codex Review|$DONE||queued"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ "$(polls)" -eq 6 ]; then
+  echo "✓ R13 a queued review holds the gate until it completes"
+else
+  echo "✗ R13 a queued review did not hold the gate"
+  report
+  failed=1
+fi
+
+# R14. An empty HEAD_SHA would read commits//check-runs: fail closed before
+# reading anything.
+new_case
+runs 1 "110|review / Codex Review|$NEVER"
+exec_gate "$DEFAULT_NAMES" ""
+if [ "$RC" -eq 1 ] && ! grep -q '^clear=' "$CASE/output" && ! grep -q 'check-runs' "$CASE/gh.log"; then
+  echo "✓ R14 an empty HEAD_SHA fails closed without a check-runs read"
+else
+  echo "✗ R14 an empty HEAD_SHA did not fail closed before reading"
+  report
+  failed=1
+fi
+
+# R15. Check-run names come from workflow job names, which a PR can set. A
+# newline in one must not start a line with a workflow command in the log
+# (the gate prints pending names on its poll and cap lines).
+new_case
+jq -n --argjson never "$NEVER" '[{id: 120, name: "x\n::error::injected / Codex Review", done_at: $never}]' \
+  > "$CASE/checkruns_page1.json"
+exec_gate "$DEFAULT_NAMES"
+if grep -q '^reason=quiet-cap$' "$CASE/output" && ! grep -q '^::error::injected' "$CASE/stdout"; then
+  echo "✓ R15 a control character in a check-run name cannot start a workflow command"
+else
+  echo "✗ R15 a check-run name reached the log with its control characters"
   report
   failed=1
 fi
