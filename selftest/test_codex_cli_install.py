@@ -25,7 +25,15 @@ max-age plus the longest lag a linux-x64 binary has had behind its wrapper
 since 0.149.0 (403 s, 0.153.3); then the step fails closed with an ::error::.
 Negative controls run the same checks against the pre-fix one-liner and
 single-point mutations of the shipped step.
+
+The CLI version is pinned too (CODEX_CLI_VERSION in the job env, hardcoded
+here as PINNED_CLI): the step installs exactly that version, and a CLI that
+reports any other version fails the step closed at once, without a retry.
+The version decides which project files Codex reads from the checkout, and
+the base-config step covers the paths this version reads.
 """
+
+import re
 
 import os
 import pathlib
@@ -42,6 +50,8 @@ _STEP_NAME = "Install Codex CLI"
 ATTEMPTS = 5  # the first install plus 4 retries
 DELAYS = ["60", "120", "240", "300"]  # seconds before retries 1 to 4
 VERIFY = "codex --version"
+# Hardcoded, not read from the workflow: bump it with CODEX_CLI_VERSION.
+PINNED_CLI = "0.158.0"
 # The step as it shipped before this guard, byte for byte.
 PRE_FIX_STEP = "npm install -g @openai/codex@latest"
 
@@ -71,7 +81,7 @@ echo "added 1 package in 2s"
 
 _CODEX_STUB = r"""#!/bin/sh
 echo "codex $*" >> "$STUB_STATE/calls.log"
-if [ -e "$STUB_STATE/binary" ]; then echo "codex-cli 0.0.0-fixture"; exit 0; fi
+if [ -e "$STUB_STATE/binary" ]; then echo "codex-cli $STUB_CODEX_VERSION"; exit 0; fi
 echo "Error: Missing optional dependency @openai/codex-linux-x64. Reinstall Codex: npm install -g @openai/codex@latest" >&2
 exit 1
 """
@@ -91,7 +101,9 @@ def _shipped_step() -> str:
     return runs[0]
 
 
-def _run(script: str, listed_from: int, npm_fail_on: str = ""):
+def _run(
+    script: str, listed_from: int, npm_fail_on: str = "", codex_version=PINNED_CLI
+):
     """Run `script` as GitHub runs a `run:` block without `shell:` (bash -e).
 
     Returns (rc, output, calls) where calls lists every stub invocation."""
@@ -115,6 +127,9 @@ def _run(script: str, listed_from: int, npm_fail_on: str = ""):
             "STUB_STATE": str(d),
             "STUB_LISTED_FROM": str(listed_from),
             "STUB_NPM_FAIL_ON": npm_fail_on,
+            # The job env the step runs under, and what the installed CLI says.
+            "CODEX_CLI_VERSION": PINNED_CLI,
+            "STUB_CODEX_VERSION": codex_version,
         }
         proc = subprocess.run(
             ["bash", "-e", str(step)],
@@ -138,8 +153,8 @@ def _kinds(calls):
             assert (
                 "install" in args
                 and "-g" in args
-                and any(a.startswith("@openai/codex@") for a in args)
-            ), f"not a global install of @openai/codex: {call!r}"
+                and f"@openai/codex@{PINNED_CLI}" in args
+            ), f"not a global install of @openai/codex@{PINNED_CLI}: {call!r}"
             kinds.append("install")
         elif call == VERIFY:
             kinds.append("verify")
@@ -208,7 +223,9 @@ def _pre_fix(_: str) -> str:
 
 
 def _drop_verify(t: str) -> str:
-    return t.replace(f" && {VERIFY}", "")
+    return t.replace(
+        "installed=$(codex --version)", 'installed="codex-cli ${CODEX_CLI_VERSION}"'
+    )
 
 
 def _drop_retry(t: str) -> str:
@@ -261,3 +278,61 @@ def test_guard_catches_each_regression(mutate):
     assert mutated != script, "mutation did not apply; the anchor drifted"
     with pytest.raises(AssertionError):
         _check(mutated)
+
+
+# --- The pinned CLI version -----------------------------------------------------
+
+
+def _workflow_pin():
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    return wf["jobs"]["codex-review"]["env"].get("CODEX_CLI_VERSION")
+
+
+def _check_pin(script: str) -> None:
+    # The step installs exactly the pinned version.
+    assert '"@openai/codex@${CODEX_CLI_VERSION}"' in script, script
+    assert "@latest" not in script, script
+    # A CLI reporting another version fails closed after one install, no retry.
+    rc, out, calls = _run(script, listed_from=1, codex_version="0.159.0")
+    assert rc != 0 and "::error::" in out and "unpinned" in out, (
+        f"another CLI version must fail the step closed (rc={rc}):\n{out}"
+    )
+    assert _kinds(calls) == ["install", "verify"], calls
+
+
+def test_the_cli_version_is_pinned():
+    assert _workflow_pin() == PINNED_CLI
+    assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", PINNED_CLI)
+    _check_pin(_shipped_step())
+
+
+def _float_to_latest(t: str) -> str:
+    return t.replace('"@openai/codex@${CODEX_CLI_VERSION}"', "@openai/codex@latest")
+
+
+def _drop_version_check(t: str) -> str:
+    return t.replace('[ "$installed" != "codex-cli ${CODEX_CLI_VERSION}" ]', "false")
+
+
+def _retry_on_mismatch(t: str) -> str:
+    head, sep, tail = t.partition("exit 1")
+    return head + "continue" + tail if sep else t
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_float_to_latest, _drop_version_check, _retry_on_mismatch],
+    ids=["floats-to-latest", "version-check-dropped", "mismatch-retried"],
+)
+def test_pin_guard_catches_each_regression(mutate):
+    script = _shipped_step()
+    mutated = mutate(script)
+    assert mutated != script, "mutation did not apply; the anchor drifted"
+    with pytest.raises(AssertionError):
+        _check_pin(mutated)
+
+
+def test_the_job_env_pin_is_not_read_from_the_workflow_by_the_test():
+    # A typo in the workflow's pin must fail here, not be copied into the test.
+    wf_text = WORKFLOW.read_text()
+    assert f'CODEX_CLI_VERSION: "{PINNED_CLI}"' in wf_text

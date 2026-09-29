@@ -52,9 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
     env:
-      # The review model. `npm install -g @openai/codex@latest` (below) floats
-      # the CLI on purpose so bug fixes land without a bump, but the CLI's
-      # BUNDLED DEFAULT model floats with it: 0.153.4 (2026-09-04) flipped it
+      # The review model. When the install step took `@openai/codex@latest`,
+      # the CLI floated so bug fixes landed without a bump, and the CLI's
+      # BUNDLED DEFAULT model floated with it: 0.153.4 (2026-09-04) flipped it
       # from gpt-5.6-sol to gpt-6-astra and nobody chose that. Astra at
       # reasoning=low then reported zero regressions across the next 88 fleet
       # reviews against a 16% baseline on Sol (750 reviews), at 2.5x the token
@@ -69,6 +69,16 @@ jobs:
       # the log) instead of silently reviewing with the wrong model. The
       # response to rot is a deliberate bump, not a return to floating.
       CODEX_MODEL: gpt-5.6-sol
+      # The Codex CLI version, pinned for the same reason as the model: it
+      # decides which project files Codex reads from the checkout, and the
+      # step "Review with the base branch's Codex project config" puts the
+      # base's copies of exactly the paths this version reads (traced on
+      # 0.158.0). A release that reads another path would read the PR's copy
+      # until that step knew of it, so the CLI moves by decision: bump this
+      # AND PINNED_CLI in selftest/test_codex_cli_install.py in the same PR,
+      # after re-checking which project paths the new version reads. The
+      # install step refuses to go on with any other version.
+      CODEX_CLI_VERSION: "0.158.0"
     permissions:
       contents: read
       pull-requests: write
@@ -207,8 +217,9 @@ jobs:
       # does an error from any git or grep call a decision rests on. A base
       # version that points elsewhere in the repo (a symlink, or a fallback
       # filename in its own config) still reads that file from the PR's
-      # tree. A Codex release that reads another project path needs it
-      # added here. Pinned by
+      # tree. The paths are the ones the CLI version in CODEX_CLI_VERSION
+      # reads; a bump that reads another project path needs it added here.
+      # Pinned by
       # selftest/test_codex_review_base_project_config.py.
       - name: Review with the base branch's Codex project config
         if: steps.gate.outputs.should_run == 'true'
@@ -307,7 +318,10 @@ jobs:
           # lost attaxion_dev#374's review on 2026-09-22 (PT): this step ran
           # 257 s after 0.156.1's linux-x64 binary was published.
           #
-          # So `codex --version` decides success, never npm's exit code.
+          # So `codex --version` decides success, never npm's exit code. It
+          # must also report exactly the pinned CODEX_CLI_VERSION (see the job
+          # env): any other version fails the step at once, without a retry,
+          # since installing again would not change it.
           # Every attempt passes --prefer-online because a plain retry replays
           # npm's own cached packument for up to that same max-age (reproduced
           # with the runner's npm 10.9.8: "changed 1 package", still no binary).
@@ -320,7 +334,12 @@ jobs:
           # Pinned by selftest/test_codex_cli_install.py.
           delay=60
           for attempt in 1 2 3 4 5; do
-            if npm install -g --prefer-online @openai/codex@latest && codex --version; then
+            if npm install -g --prefer-online "@openai/codex@${CODEX_CLI_VERSION}" && installed=$(codex --version); then
+              if [ "$installed" != "codex-cli ${CODEX_CLI_VERSION}" ]; then
+                echo "::error::codex-review: pinned Codex CLI ${CODEX_CLI_VERSION}, but the installed CLI reports '${installed}'. Refusing to review with an unpinned CLI; move the pin by a reviewed change to CODEX_CLI_VERSION."
+                exit 1
+              fi
+              echo "$installed"
               exit 0
             fi
             if [ "$attempt" -lt 5 ]; then
@@ -530,8 +549,8 @@ jobs:
           # that step's shipped bash directly.
           printf '%s\n' "$verdict" > /tmp/codex.verdict.full
 
-          # Record which Codex model + CLI version actually ran. `npm install
-          # -g @openai/codex@latest` (above) floats the CLI on every run; the
+          # Record which Codex model + CLI version actually ran. The CLI is
+          # pinned via CODEX_CLI_VERSION and checked at install; the
           # model is pinned via CODEX_MODEL and the reported one is checked
           # against it below, so a CLI that stopped honoring `-c model=`
           # cannot drift unnoticed across the fleet. The CLI version is the
