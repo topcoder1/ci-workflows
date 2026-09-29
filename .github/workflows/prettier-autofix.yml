@@ -47,8 +47,9 @@ name: Prettier Autofix
 #     (no-op). In this mode bash expands the glob (globstar, no dotglob), so
 #     dotfiles and anything under a dot-directory (`.github/`, `.claude/`)
 #     match only where a glob segment starts with a literal `.`: the default
-#     glob never formats them. Name them to include them, e.g.
-#     `{**/*.md,.github/**/*.md}`.
+#     glob never formats them. Name them to include them; for the default
+#     types plus `.github/`, use
+#     `{**/*.{md,yml,yaml,json},.github/**/*.{md,yml,yaml,json}}`.
 #   - Changed-file listing failures (transient API errors): skipped after
 #     3 attempts — a scoping failure is never widened to a full-tree run
 #     (wxa-secrets#27: the old full-tree fallback reformatted pre-existing
