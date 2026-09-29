@@ -137,22 +137,37 @@ jobs:
             echo "::error::PR changes 3000+ files — file listing is truncated, cost gate cannot classify. Review manually."
             exit 1
           fi
+          # A rename is listed under its new path only; the old path is in
+          # `.previous_filename`. Hand codex-gate.mjs both ends, so an
+          # always_review file still matches after it moves. An added path
+          # can only move the gate toward running: one more path that can
+          # match always_review, one more the docs/tests-only skip must
+          # cover. Appended after the count above, which caps the listing
+          # endpoint, not the path list. Fails closed, like the listing.
+          renamed_from=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || {
+            echo "::error::could not list PR rename sources — cost gate cannot classify (fail closed). Re-run the job."
+            exit 1
+          }
+          if [ -n "$renamed_from" ]; then
+            files=$(printf '%s\n%s' "$files" "$renamed_from")
+          fi
           # additions+deletions equals the +/- line count (sans +++/---
           # file markers) the old `gh pr diff | awk` pass computed, without
           # fetching a diff body subject to the same 20k-line cap.
           lines=$(gh pr view "$PR" --json additions,deletions --jq '.additions + .deletions')
-          {
-            echo "files<<__FILES_EOF__"
-            echo "$files"
-            echo "__FILES_EOF__"
-            echo "lines=$lines"
-          } >> "$GITHUB_OUTPUT"
-          echo "Diff: $lines lines across $(echo "$files" | wc -l | tr -d ' ') file(s)"
+          # The gate reads the path list from a file, not the environment:
+          # Linux will not start a process with a single environment string
+          # over 128 KiB, and a PR near the listing cap, or half that when
+          # every rename is listed twice, exceeds it.
+          printf '%s\n' "$files" > "${RUNNER_TEMP:?RUNNER_TEMP is not set}/codex-gate-paths.txt"
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+          echo "Diff: $lines lines across $(echo "$files" | wc -l | tr -d ' ') path(s), rename sources included"
 
       - name: Codex cost gate
         id: gate
         env:
-          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+          CHANGED_FILES_FILE: ${{ runner.temp }}/codex-gate-paths.txt
           DIFF_LINES: ${{ steps.diff.outputs.lines }}
           SIZE_THRESHOLD: "30"
         run: node .github/scripts/codex-gate.mjs
@@ -214,6 +229,17 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          # Attributes come from the base commit, never from the PR. Codex
+          # reads the change with its own git commands in this checkout, and
+          # git takes .gitattributes from the checkout: a path the PR itself
+          # marks `binary` or `-diff` (that .gitattributes included) would
+          # reach Codex only as "Binary files ... differ". Codex's shell tool
+          # inherits this variable (shell_environment_policy defaults to
+          # inherit = "all"), so every git command it runs reads the base's
+          # attributes instead. #244 makes the same fix in claude-review.yml
+          # with `git --attr-source`. Pinned by
+          # selftest/test_review_lanes_base_attributes.py.
+          GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Make sure the base ref is fetched so Codex can diff against it.

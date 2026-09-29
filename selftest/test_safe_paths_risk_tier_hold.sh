@@ -15,17 +15,18 @@
 #
 # Pins:
 #   1. The incident shape holds (all_safe=0, reason=risk-tier-hold).
-#   2. The bypass label RELEASES the hold — claude-author-automerge's
-#      blocked-PR comment advertises that exact one-click path, so a hold
-#      that ignored it would kill the advertised escape hatch.
+#   2. The bypass label RELEASES the hold (all_safe=1, reason empty) —
+#      claude-author-automerge's blocked-PR comment advertises that exact
+#      one-click path, so a hold that ignored it would kill the advertised
+#      escape hatch.
 #   3. docs/legal/** (tier 1) is NOT releasable by the label.
 #   4. The hold fires ONLY in the would-arm branch. A diff carrying a
 #      non-safe file must keep reason empty — emitting a revoke-triggering
 #      reason there would make the revoke step disarm a SIBLING workflow's
 #      legitimate arm (a dependabot bump of .github/workflows/** matches
 #      the risk patterns and is armed by dependabot-auto-merge.yml).
-#   5. Ordinary docs/tests still auto-merge — the carve-out this workflow
-#      exists to provide must not regress.
+#   5. Ordinary docs/tests still auto-merge (all_safe=1, reason empty) —
+#      the carve-out this workflow exists to provide must not regress.
 #   6. The tier-2 pattern list has not drifted from claude-author-
 #      automerge.yml's `patterns=` block.
 #
@@ -80,7 +81,15 @@ export GH_TOKEN=stub REPO=owner/repo PR=1 EXTRA_GLOBS="" BYPASS_LABEL="auto-merg
 RENAMED_FROM=""
 LABELS=""
 
-# run_case <name> <expected all_safe> <expected reason|-> <file>...
+# run_case <name> <expected all_safe> <expected reason|none|-> <file>...
+#
+# `none` asserts reason is EMPTY; `-` skips the reason check. Every case
+# here that expects no verdict asserts `none`, arming runs included: the
+# revoke step's reason checks ignore all_safe, so a stray revoke-triggering
+# reason disarms whatever is armed, a sibling's arm or a human's. Section 4
+# once passed `-` for its "reason MUST stay empty" claim, so a classify
+# block that emitted reason=risk-tier-hold on a non-safe diff passed every
+# case (2026-09-24).
 run_case() {
   local name="$1" want_safe="$2" want_reason="$3"
   shift 3
@@ -102,18 +111,21 @@ run_case() {
     return
   fi
 
-  local got_safe got_reason
+  local got_safe got_reason reason_ok=1
   got_safe=$(grep -E '^all_safe=' "$T/gh_output" | tail -1 | cut -d= -f2)
   got_reason=$(grep -E '^reason=' "$T/gh_output" | tail -1 | cut -d= -f2- || true)
-  [ -n "$got_reason" ] || got_reason="-"
+  case "$want_reason" in
+    -)    ;;
+    none) [ -z "$got_reason" ] || reason_ok=0 ;;
+    *)    [ "$got_reason" = "$want_reason" ] || reason_ok=0 ;;
+  esac
 
-  if [ "$got_safe" != "$want_safe" ] || \
-     { [ "$want_reason" != "-" ] && [ "$got_reason" != "$want_reason" ]; }; then
-    echo "FAIL[$name]: all_safe=$got_safe reason=$got_reason, want $want_safe/$want_reason (files: $*)"
+  if [ "$got_safe" != "$want_safe" ] || [ "$reason_ok" -eq 0 ]; then
+    echo "FAIL[$name]: all_safe=$got_safe reason='$got_reason', want $want_safe/$want_reason (files: $*)"
     failed=1
     return
   fi
-  echo "ok[$name] all_safe=$got_safe reason=$got_reason"
+  echo "ok[$name] all_safe=$got_safe reason='$got_reason'"
 }
 
 # 1. The incident case, exactly as it merged.
@@ -144,7 +156,7 @@ export EXTRA_GLOBS='(^|/)\.git[^/]*$'
 run_case "risk-gitattributes-via-extra-glob" 0 risk-tier-hold ".gitattributes"
 # Control for the case above: the same glob still arms a plain .gitignore, so
 # the hold comes from the .gitattributes pattern, not from the glob.
-run_case "extra-glob-arms-gitignore" 1 - ".gitignore"
+run_case "extra-glob-arms-gitignore" 1 none ".gitignore"
 export EXTRA_GLOBS=""
 # An ADR amendment is 100% docs — safe-by-glob — and exactly the diff the
 # tier-2 hold must catch (wxa-graph gap, 2026-08-27; wxa-graph#477).
@@ -160,30 +172,56 @@ run_case "risk-pricing-product-page" 0 risk-tier-hold "docs/product-page/index.h
 run_case "risk-pricing-top-level-file" 0 risk-tier-hold "docs/pricing.md"
 # Boundary: a name that merely STARTS with a token is ordinary docs and must
 # still auto-merge, or the exception over-blocks.
-run_case "safe-marketingnotes" 1 - "docs/marketingnotes.md"
-run_case "safe-product-pages-overview" 1 - "docs/product-pages-overview.md"
+run_case "safe-marketingnotes" 1 none "docs/marketingnotes.md"
+run_case "safe-product-pages-overview" 1 none "docs/product-pages-overview.md"
+# gitleaks config and ignore files (2026-09-24). gitleaks reads them from the
+# PR's own checkout, so editing one can allowlist a secret leaked in the same
+# diff. A root copy is not safe-by-glob, so for the usual shape
+# claude-author-automerge's regex is the gate. One reaches the would-arm
+# branch in two ways: nested under a safe tree, where `gitleaks --source
+# tests/fixtures` would read it (a .gitleaks.json there silently shadows the
+# .gitleaks.toml beside it), or through a caller's extra_safe_globs. An
+# "ignore files are harmless" glob is the plausible one, and it swallows
+# .gitleaksignore along with .gitignore.
+run_case "risk-gitleaks-fixture-config" 0 risk-tier-hold "tests/fixtures/.gitleaks.toml"
+run_case "risk-gitleaks-fixture-json-shadow" 0 risk-tier-hold "tests/fixtures/.gitleaks.json"
+export EXTRA_GLOBS='(^|/)\.[^/]*ignore$'
+run_case "risk-gitleaksignore-via-extra-glob" 0 risk-tier-hold "docs/runbook.md" ".gitleaksignore"
+# Control for the case above: the same extra glob still arms a plain
+# .gitignore, so the hold comes from the gitleaks pattern, not the glob.
+run_case "extra-glob-gitignore-still-arms" 1 none "docs/runbook.md" ".gitignore"
+export EXTRA_GLOBS=""
+# The usual shape, a root .gitleaksignore beside a docs change, never arms
+# here. The empty reason shows it defers as not safe-by-glob, not held.
+run_case "gitleaks-root-shape-never-arms" 0 none "docs/runbook.md" ".gitleaksignore"
 
-# 2. The bypass label releases the hold.
+# 2. The bypass label releases the hold — all_safe=1 AND an empty reason.
+#    A release that still emitted reason=risk-tier-hold would fire the
+#    revoke step on the PR the label just released.
 LABELS="auto-merge-approved"
-run_case "bypass-releases-hold" 1 - "web/tests/e2e/auth/signup.spec.ts"
+run_case "bypass-releases-hold" 1 none "web/tests/e2e/auth/signup.spec.ts"
 # ADRs are tier-2, not tier-1: unlike docs/legal below, the label DOES
 # release them — a label click on an ADR PR is a human decision on that PR.
 LABELS="auto-merge-approved"
-run_case "bypass-releases-adr" 1 - "docs/decisions/ADR-0003-cluster-algorithm.md"
+run_case "bypass-releases-adr" 1 none "docs/decisions/ADR-0003-cluster-algorithm.md"
 # Pricing is tier-2 as well: a price is a commercial decision a human can
 # approve with a label click. This case is what pins the TIER — promoting the
 # pattern into unsafe_overrides would yield reason=unsafe-override here, and
 # the drift guard could not catch it (it only compares the two
 # risk_tier_overrides blocks, never the tier a pattern sits in).
 LABELS="auto-merge-approved"
-run_case "bypass-releases-pricing" 1 - "docs/marketing/pricing-block-handoff.md"
+run_case "bypass-releases-pricing" 1 none "docs/marketing/pricing-block-handoff.md"
+# gitleaks config is tier-2 too, like .env and the workflows: a label click
+# on a PR that edits the allowlist is a human deciding on that allowlist.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitleaks" 1 none "tests/fixtures/.gitleaks.toml"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
 # .gitattributes is tier-2 too: a label click on a PR that edits it is a human
 # deciding on that edit. Like the pricing case above, this pins the TIER.
 LABELS="auto-merge-approved"
-run_case "bypass-releases-gitattributes" 1 - "docs/.gitattributes"
+run_case "bypass-releases-gitattributes" 1 none "docs/.gitattributes"
 
 # 3. Tier 1 is absolute — the label does not release customer-facing legal
 #    wording. A label click is not evidence anyone read the clause.
@@ -193,14 +231,14 @@ run_case "legal-not-bypassable" 0 unsafe-override "docs/legal/acceptable-use-pol
 # 4. The hold is scoped to the would-arm branch. These carry a non-safe file,
 #    so this workflow no-ops — reason MUST stay empty or the revoke step
 #    would disarm whatever sibling legitimately armed the PR.
-run_case "workflow-bump-no-reason" 0 - ".github/workflows/ci.yml"
-run_case "workflow-bump-mixed-no-reason" 0 - ".github/workflows/ci.yml" "docs/changelog.md"
-run_case "auth-source-no-reason" 0 - "src/auth/login.ts"
+run_case "workflow-bump-no-reason" 0 none ".github/workflows/ci.yml"
+run_case "workflow-bump-mixed-no-reason" 0 none ".github/workflows/ci.yml" "docs/changelog.md"
+run_case "auth-source-no-reason" 0 none "src/auth/login.ts"
 
 # 5. Regression guard: the carve-out still works.
-run_case "plain-docs" 1 - "docs/architecture.md"
-run_case "plain-tests" 1 - "tests/test_a.py" "tests/test_b.py"
-run_case "specs-no-risk-dir" 1 - \
+run_case "plain-docs" 1 none "docs/architecture.md"
+run_case "plain-tests" 1 none "tests/test_a.py" "tests/test_b.py"
+run_case "specs-no-risk-dir" 1 none \
   "web/tests/e2e/kb/knowledge-base.spec.ts" \
   "web/tests/e2e/marketing/landing.spec.ts" \
   "web/tests/e2e/stripe/stripe-integration.spec.ts"
@@ -212,7 +250,7 @@ RENAMED_FROM="web/tests/e2e/auth/signup.spec.ts"
 run_case "rename-auth-out" 0 risk-tier-hold "web/tests/e2e/misc/signup2.spec.ts"
 # A rename with no risk path on either end stays safe.
 RENAMED_FROM="web/tests/e2e/kb/old.spec.ts"
-run_case "rename-benign" 1 - "web/tests/e2e/kb/new.spec.ts"
+run_case "rename-benign" 1 none "web/tests/e2e/kb/new.spec.ts"
 
 # 7. DRIFT GUARD. The tier-2 list is a verbatim copy of the sibling gate's
 #    `patterns=` block. If they diverge, the two gates disagree about what
@@ -224,16 +262,18 @@ def block(text, name):
     m = re.search(r"^ +%s='(.*?)'\n" % name, text, re.S | re.M)
     if not m:
         sys.exit("FAIL[drift-guard]: could not locate %s=' block" % name)
-    return [l.strip() for l in m.group(1).splitlines() if l.strip()]
+    # Leading indentation only, as both gates strip it. A trailing space
+    # stays part of the regex (`$ ` never matches), so it must count as drift.
+    return [l.lstrip() for l in m.group(1).splitlines() if l.strip()]
 a, b = block(wf, "risk_tier_overrides"), block(sib, "patterns")
 if a != b:
     only_wf = [p for p in a if p not in b]
     only_sib = [p for p in b if p not in a]
     print("FAIL[drift-guard]: tier-2 list has drifted from claude-author-automerge.yml")
     for p in only_wf:
-        print("    only in safe-paths-automerge.yml:      %s" % p)
+        print("    only in safe-paths-automerge.yml:      %r" % p)
     for p in only_sib:
-        print("    only in claude-author-automerge.yml:   %s" % p)
+        print("    only in claude-author-automerge.yml:   %r" % p)
     sys.exit(1)
 print("ok[drift-guard] %d patterns identical in both gates" % len(a))
 PY

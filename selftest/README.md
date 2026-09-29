@@ -20,7 +20,9 @@ arbitrary helper scripts; that's a different kind of repo.
   the `uv run pytest` invocation end-to-end.
 - `test_automerge_risk_patterns.sh` / `test_bb_automerge_risk_patterns.sh`
   — risk-tier regex behavior, driven by the shared corpus in
-  `risk_patterns_corpus.txt`.
+  `risk_patterns_corpus.txt`. The GH script runs the corpus against its own
+  hardcoded copy of the patterns, so it also fails when that copy drifts
+  from the shipped `patterns=` block in `claude-author-automerge.yml`.
 - `test_automerge_body_gate.sh` — the PR-body closing-keyword gate in
   `claude-author-automerge.yml`. `closes #N <qualifier>` closes N in FULL on
   merge (GitHub reads the keyword and the number, nothing after them);
@@ -108,6 +110,23 @@ arbitrary helper scripts; that's a different kind of repo.
   Each run case has a control that differs only in the match and must skip.
   The first selftest to execute `codex-gate.mjs` at all (gap raised on
   whois-api-llc/wxa_webcat#1612).
+- `test_pr_classify_rename_sources.sh` / `test_codex_review_rename_sources.sh`
+  — the files API lists a rename under its new path only, with the old one
+  in `.previous_filename`. `pr-classify.yml`'s compute step and
+  `codex-review.yml`'s diff step now pass both paths to their classifier,
+  like the automerge lanes. Each test runs the shipped step against a stub
+  `gh` that applies the step's own `--jq` filter to gh-shaped JSON, then the
+  real `classify.mjs` or `codex-gate.mjs`. Pins: a rename out of a gated or
+  `always_review` path keeps that verdict; old paths are added to the list,
+  not swapped in for it; the docs/tests-only skip covers the old path too;
+  an unreadable rename listing fails closed; the 3000-entry cap counts the
+  listing only; a rename on page 2 is still read; a path list over 128 KiB
+  reaches the classifier whole. That last one is why `codex-review.yml` hands
+  the list to the gate as a file in the runner's temp dir
+  (`CHANGED_FILES_FILE`): Linux will not start a process with a single
+  environment string that long, and the test pins that wiring. Controls: a
+  rename with neither end gated stays benign, and the step with its rename
+  read cut out, or unpaginated, reverts to the benign verdict.
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
@@ -141,9 +160,62 @@ arbitrary helper scripts; that's a different kind of repo.
   enabler path (a typo that would be silent in production); structural pins
   hold one arm call site per workflow and keep `automerge_pat`
   `required: false`.
+- `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
+  without the PAT, since Dependabot deletes its own branch and refusing would
+  stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
+  makes the merge github-actions[bot]'s, and GitHub runs no push workflow for
+  it: whois-api-llc/wxa_vpn's deploy.yml skipped 42 Dependabot bumps
+  (2026-07-23..09-25). Runs the extracted arm step against a stub `gh` that
+  models arm state (re-arming keeps the original enabler) and answers
+  through the SHIPPED `--jq` filter; a misspelled enabler path is a negative
+  control. Pins: no PAT gives a `::warning::` (plus a step-summary line)
+  naming the `pull_request_target` caller fix and never the Dependabot
+  store, and the PR is still armed exactly once, head-bound; a PAT arms
+  silently with no `GET /user` probe; a failed arm still fails the step.
+  Structural pins: the run block is `${{ }}`-free, there is one arm call
+  site, `automerge_pat` stays `required: false`, and the only action is a
+  SHA-pinned `dependabot/fetch-metadata`, so nothing checks out PR code for
+  callers on `pull_request_target`. With a PAT, a GitHub Actions arm that
+  came first (safe-paths-automerge arms docs/tests-only Dependabot PRs with
+  GITHUB_TOKEN seconds earlier; wxa-mcp-server#436) is replaced with the PAT
+  user's, and the non-atomic read/disarm gap is a documented residual, as in
+  revoke-stale-arm. The replacement's guarantees:
+  - the head is re-read before every disarm, so a newer head's arm is never
+    touched;
+  - only a positively read Actions arm is disarmed again, never a user's or
+    another App's;
+  - after a disarm, the PR is re-armed head-bound with retries, or the run
+    warns that it could not be re-armed;
+  - an immediate merge, a failed read and an Actions merge each end in an
+    explicit verdict, never silence;
+  - the step never fails over this.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
+- `test_verifier_changed_paths_renames.py` — runs
+  `verifier-on-high-risk.yml`'s shipped "Compute PR diff" step in a fixture
+  PR checkout where the PR renames a file: the path list the high-risk
+  classifier reads must name the old path as well as the new one. `git diff`
+  detects renames by default, and `--name-only` then prints only the new
+  path, so the step passes `--no-renames`. The classifier, fed the central
+  high-risk list by the shipped `extract-high-risk-globs` action, must then
+  match the old path. Negative control: the step without the flag lists only
+  the new path, and nothing matches. The verifier's per-file diff of that old
+  path shows only a deletion, so the test also renders the shipped prompt and
+  runs the commands it gives the model to list the PR's renames and read both
+  paths together; they must show the rename and the edit. git also applies a
+  submodule's `ignore` setting from the checkout's `.gitmodules` (the PR's
+  own copy) to diffs between commits, so the step and every prompt command
+  pass `--ignore-submodules=none`: a submodule change the PR's `.gitmodules`
+  ignores must be listed, matched and shown to the model, and a submodule
+  the PR moves must be followed to its new path (negative controls: each
+  command without the flag). A move that rewrites most of a file falls under
+  git's default 50% similarity: the prompt's rename listing, at 10%, must
+  pair a move that kept two of ten functions (negative control: the default
+  threshold). For a matched file the PR removes, the prompt's changed-paths
+  listing must name where its code went: a new file after a move that kept
+  nothing, or a file that already existed, which git never pairs as a rename
+  (negative control: the listing limited to added files).
 - `test_prettier_symlink_filter.sh` — extracts the symlink filter from
   `lint.yml` / `prettier-autofix.yml`, runs it against a fixture tree,
   and asserts the two copies haven't drifted.
@@ -250,6 +322,21 @@ arbitrary helper scripts; that's a different kind of repo.
   that did not list it yet; npm skipped the optional dependency silently
   ("added 1 package") and the next step died on
   `Missing optional dependency @openai/codex-linux-x64`.
+- `test_review_lanes_base_attributes.py` — every review lane whose model
+  runs git in the PR checkout (the verifier, the adversarial pass, Codex)
+  must give that model `GIT_ATTR_SOURCE=<base sha>`, so `.gitattributes`
+  comes from the base: a path the PR itself marks `binary` or `-diff` still
+  reaches the model in full, and the base's own `-diff` keeps working.
+  Matches the claude-code-action steps whose allowlist grants git or a shell
+  (or that have none) and the steps running `codex review`/`exec` against a
+  hardcoded lane list; runs `git diff`, `git log -p` and `git show` in a
+  fixture merge checkout under each lane's model-step environment (negative
+  controls: the variable dropped, misspelled, or set to the head sha or the
+  base branch name); renders the verifier prompt and runs its diff command;
+  runs the Codex review step against a stub `codex`. Background: #244 closes the same gap in
+  `claude-review.yml`'s context step. GitHub's own diff (`gh pr diff`, the
+  files API) ignores `.gitattributes`, so a lane reading only that diff
+  needs nothing.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.
