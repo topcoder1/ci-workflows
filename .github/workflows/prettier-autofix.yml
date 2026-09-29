@@ -47,7 +47,8 @@ name: Prettier Autofix
 #     dotfiles and anything under a dot-directory (`.github/`, `.claude/`)
 #     match only where a glob segment starts with a literal `.`: the default
 #     glob never formats them. Name them to include them, e.g.
-#     `{**/*.md,.github/**/*.md}` (one brace level only).
+#     `{**/*.md,.github/**/*.md}` (a single brace group: no nesting and no
+#     second group).
 #   - Changed-file listing failures (transient API errors): skipped after
 #     3 attempts — a scoping failure is never widened to a full-tree run
 #     (wxa-secrets#27: the old full-tree fallback reformatted pre-existing

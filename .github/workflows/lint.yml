@@ -80,7 +80,8 @@ name: Lint
 #     dot-directory (`.github/`, `.claude/`) match only where a glob segment
 #     starts with a literal `.`. The default glob never matches them, so
 #     they're never checked; to include them, name them, e.g.
-#     `{**/*.md,.github/**/*.md}` (one brace level only).
+#     `{**/*.md,.github/**/*.md}` (a single brace group: no nesting and no
+#     second group).
 #   - shellcheck on .sh files is OFF by default for the same reason as
 #     actionlint's shellcheck: most repos have pre-existing style/info
 #     drift. When opted in, defaults to severity=error so only real bugs
