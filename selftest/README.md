@@ -318,7 +318,12 @@ arbitrary helper scripts; that's a different kind of repo.
   packument without it, as npm 10.9.8 measurably does); a binary that never
   lands fails the step closed with an `::error::`. Negative controls: the
   pre-fix one-liner plus verify/retry/cache-bypass/backoff/cap/fail-closed
-  mutations.
+  mutations. The CLI version is pinned (`CODEX_CLI_VERSION`, hardcoded as
+  `PINNED_CLI`): the step installs exactly that version, and a CLI reporting
+  any other version fails the step closed without a retry (negative
+  controls: floating to `@latest`, the version check dropped, a mismatch
+  retried). The version decides which project files Codex reads, and the
+  base-config step covers the paths that version reads.
   Background: on 2026-09-22 (PT) attaxion_dev#374's Codex job installed
   0.156.1 257 s after its linux-x64 binary was published, from a packument
   that did not list it yet; npm skipped the optional dependency silently
