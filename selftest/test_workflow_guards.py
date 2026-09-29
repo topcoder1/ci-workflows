@@ -299,6 +299,36 @@ def test_codex_review_covers_every_automergeable_class():
         )
 
 
+def _automerge_workflow():
+    return yaml.safe_load((WORKFLOWS_DIR / "claude-author-automerge.yml").read_text())
+
+
+def _codex_check_name_default():
+    workflow = _automerge_workflow()
+    inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
+    return (inputs["codex_check_name"].get("default") or "").strip()
+
+
+def test_codex_trusted_bypass_is_off_by_default():
+    """Option B (a Codex SUCCESS bypasses the risk-tier gate) is opt-in.
+
+    It shipped default-on as "review / Codex Review" but never fired on a
+    private caller: the automerge job's own `permissions:` block omitted
+    `checks`, so its check-runs read was refused and bypass stayed 0. WS2
+    step 1 (2026-09-29) lets the job inherit the caller's `checks: read`,
+    which would switch the bypass on in every caller that grants it: a
+    policy change riding a timing fix. A cost-gated Codex skip still
+    concludes `success`, so a trusted name can bypass the risk gate with
+    Codex having read nothing. The default is therefore empty; a repo that
+    wants the bypass sets `codex_check_name` explicitly.
+    """
+    assert _codex_check_name_default() == "", (
+        "codex_check_name must default to empty: with the job inheriting the "
+        "caller's checks: read, a non-empty default turns the Codex-trusted "
+        "risk-gate bypass on for every caller at once"
+    )
+
+
 def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
     """The risk:standard Codex lane must not publish the bypass-trusted check.
 
@@ -346,11 +376,12 @@ def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
     )
 
     # And the standard lane's id must not be the one claude-author-automerge
-    # trusts by default.
-    automerge = (WORKFLOWS_DIR / "claude-author-automerge.yml").read_text()
-    m = re.search(r'default:\s*"([^"]*?)\s*/\s*Codex Review"', automerge)
-    assert m, "could not read codex_check_name default from claude-author-automerge.yml"
-    trusted_job = m.group(1).strip()
+    # trusts by default. An empty default trusts no check at all
+    # (test_codex_trusted_bypass_is_off_by_default).
+    trusted = _codex_check_name_default()
+    if not trusted:
+        return
+    trusted_job = trusted.split(" / ")[0].strip()
     assert standard_job != trusted_job, (
         f"the risk:standard lane uses job id '{standard_job}', which is the "
         f"bypass-trusted check name '{trusted_job} / Codex Review' — a "

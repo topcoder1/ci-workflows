@@ -261,10 +261,10 @@ on:
         type: string
         default: "auto-merge-nonmain"
       codex_check_name:
-        description: "Status-check name for Codex Review. When this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Set empty to disable Codex-trusted bypass."
+        description: "Status-check name for Codex Review. When set and this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Empty (the default since 2026-09-29) disables the bypass. It shipped as \"review / Codex Review\" but never fired on a private caller, whose job token could not read check runs; setting it turns the bypass on for real, so it is a policy decision, not a fix."
         required: false
         type: string
-        default: "review / Codex Review"
+        default: ""
       risk_main_go:
         description: "Treat ANY main.go change as risk-tier (manual merge). Default true. Set false in Go monorepos where most cmd/*/main.go are dev tools rather than the deployed service — the bare main.go pattern can't tell cmd/<service>/main.go from cmd/<tool>/main.go. When false, gate the real service entrypoint via the caller's .github/risk-paths.yml instead."
         required: false
