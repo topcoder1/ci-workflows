@@ -7,10 +7,14 @@ name: Lint
 #    downstream consumer.
 #
 # 2. Reusable: other repos can call it via
+#       permissions:
+#         contents: read
+#         pull-requests: read  # required, or every run fails at startup
 #       jobs:
 #         lint:
 #           uses: topcoder1/ci-workflows/.github/workflows/lint.yml@main
-#    See callers/lint.yml in the templates dir for a copy-paste-ready caller.
+#    A copy-paste-ready caller lives at templates/ci-workflows/callers/lint.yml
+#    in the private topcoder1/dotclaude repo.
 #
 # What it checks:
 #   - actionlint on every .github/workflows/*.yml (catches GHA-specific bugs)
@@ -119,7 +123,7 @@ on:
         type: boolean
         default: true
       prettier_changed_only:
-        description: "On PR events, check only files added/modified/renamed in the PR diff (intersected with markdown_glob). Push events always scan the full glob. Default true. Whatever this is set to, the caller must grant `pull-requests: read`: the prettier job requests it, so without it every run fails at startup, even with `run_prettier: false`. If listing the PR's files fails after 3 attempts, the prettier check is skipped for that run rather than widened to the full glob."
+        description: "On PR events, check only files added/modified/renamed in the PR diff (intersected with markdown_glob). The prettier job runs on pull_request events only. Default true. Whatever this is set to, the caller must grant `pull-requests: read`: the prettier job requests it, so without it every run fails at startup, even with `run_prettier: false`. If listing the PR's files fails after 3 attempts, the prettier check is skipped for that run rather than widened to the full glob."
         required: false
         type: boolean
         default: true
@@ -194,16 +198,18 @@ permissions:
   contents: read
   # `pull-requests: read` is requested ONLY by the prettier job (job-level
   # block below), so the other jobs' tokens never carry it. That does NOT
-  # spare callers from granting it: GitHub treats a called workflow's
-  # permission requests, workflow-level AND job-level, as a hard ceiling
-  # against the caller's grant, and checks every job's request at startup
-  # whatever its `if:` says. A caller that grants only `contents: read`
-  # gets `startup_failure`, and its required checks hang at "Expected —
-  # Waiting for status to be reported", even with `run_prettier: false`.
-  # #29 (2026-05-03 23:54 UTC) requested the scope at workflow level and
-  # broke every such caller; #31 moved it to job level, which did not
-  # unbreak them. Callers had to grant it. Keep this list minimal; ask
-  # for extra scopes only inside the job that needs them.
+  # spare callers from granting it: the caller's grant is the ceiling for
+  # every permission a called workflow requests, at workflow OR job level,
+  # and GitHub checks each job's request at startup whatever its `if:`
+  # says. A request above the grant isn't capped; it fails the whole run.
+  # A caller that grants only `contents: read` gets `startup_failure`, and
+  # its required checks hang at "Expected — Waiting for status to be
+  # reported", even with `run_prettier: false`. #29 (2026-05-03 23:54 UTC)
+  # requested the scope at workflow level and broke every such caller;
+  # #31 moved it to job level, which did not unbreak them. Callers had to
+  # grant it. Keep this list minimal, ask for extra scopes only inside the
+  # job that needs them, and treat any new scope, at either level, as
+  # breaking every caller that lacks it.
 
 jobs:
   actionlint:
@@ -356,13 +362,13 @@ jobs:
     permissions:
       contents: read
       # Used by `gh api .../pulls/N/files` in changed-only mode. Every
-      # caller must grant it: a job-level request is a hard ceiling too, so
-      # a caller whose GITHUB_TOKEN lacks it gets startup_failure (see the
-      # workflow-level `permissions:` comment). If the listing itself fails
-      # (an API error), "Resolve prettier targets" retries, warns, and
-      # skips the prettier check for that run (sets mode=none — a scoping
-      # failure is never widened to a full-tree check, which would go red
-      # on pre-existing drift in files the PR never touched).
+      # caller must grant it: a job-level request above the caller's grant
+      # fails the whole run at startup, just as a workflow-level one does
+      # (see the workflow-level `permissions:` comment). If the listing
+      # itself fails (an API error), "Resolve prettier targets" retries,
+      # warns, and skips the prettier check for that run (sets mode=none —
+      # a scoping failure is never widened to a full-tree check, which
+      # would go red on pre-existing drift in files the PR never touched).
       pull-requests: read
     steps:
       - uses: actions/checkout@v7
@@ -552,7 +558,8 @@ jobs:
 
       # Decide what files prettier should check. Three modes:
       #   - mode=glob   → existing behavior, run prettier --check "$GLOB"
-      #                   (push events, or PRs with prettier_changed_only=false)
+      #                   (PRs with prettier_changed_only=false; the job never
+      #                   runs on push events)
       #   - mode=files  → run prettier --check on an explicit file list
       #                   (PRs, default — only files added/modified/renamed
       #                   in the diff that also match the glob)
