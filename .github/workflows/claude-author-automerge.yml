@@ -275,6 +275,15 @@ on:
         required: false
         type: number
         default: 20
+      review_check_names:
+        description: "Job names of the review lanes the quiet gate waits for, one per line. A check run matches when its name equals an entry or ends with ' / <entry>' (a caller job id prefixes a reusable's job name). Before consulting the findings detector, the gate waits until the newest attempt of every matching check run on the head commit has completed, so a review still running is never overtaken by the arm, whether or not it has commented yet (WS2 step 1, 2026-09-29). Empty disables the wait. Needs `checks: read` in the caller's workflow-level permissions; without it the gate logs one warning per run and falls back to comment activity alone."
+        required: false
+        type: string
+        default: |
+          Claude Review
+          Codex Review
+          Claude Adversarial Review
+          verifier-evidence-bound-runner
     secrets:
       automerge_pat:
         description: >-
@@ -303,25 +312,21 @@ jobs:
   automerge:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
-    permissions:
-      contents: write
-      pull-requests: write
-      # NOTE: Option B (Codex-trusted bypass) queries the check-runs API,
-      # which requires `checks: read`. We do NOT request it here at the
-      # reusable's job level because that would cap-mismatch with the 44+
-      # existing fleet callers that grant only contents+pull-requests at
-      # the workflow level — startup_failure on every existing caller's
-      # next Claude PR (caught on whois-api-llc/wxa-mcp-server#80, run
-      # 25292746179, before broad rollout).
-      #
-      # Option B also needs `codex_check_name` set: it is empty by default
-      # since 2026-09-29, which turns the bypass off. And this job-level
-      # block leaves `checks` at none whatever the caller grants, so on a
-      # private repo the Codex bypass step's check-runs read is refused and
-      # it returns bypass=0 with no crash (`gh api ... || echo '{}'` + jq
-      # `try`); a public repo's check runs are readable without the grant.
-      # The label bypass (Option A) and the original "no risky paths" path
-      # are unaffected.
+    # No job-level `permissions:` block (WS2 step 1, 2026-09-29). The job
+    # inherits the CALLER's workflow-level grant: contents: write and
+    # pull-requests: write everywhere, plus checks: read in the installer
+    # template and in 14 of the 42 callers audited on 2026-09-29.
+    #
+    # A job-level block sets every scope it does not list to none, so the
+    # block this replaced (contents + pull-requests) kept `checks` at none
+    # on every caller: the quiet gate could never read the review checks,
+    # and the Codex bypass below (Option B) never fired on a private repo.
+    # Listing `checks: read` here instead would startup_fail every caller
+    # that does not grant it (whois-api-llc/wxa-mcp-server#80, run
+    # 25292746179). Inheriting never asks for more than the caller grants,
+    # so it cannot fail at startup. A caller without checks: read gets the
+    # quiet gate's documented fallback (one warning, comment activity
+    # alone) and no Codex bypass, exactly as before.
     steps:
       - name: Checkout PR head
         id: checkout
@@ -1517,6 +1522,11 @@ jobs:
       #      arm below binds --match-head-commit so a moved head can never
       #      inherit this run's arm. Chronic chatter is bounded by a 3x
       #      cap, which declines + disarms (fail toward manual).
+      #      Since WS2 step 1 (2026-09-29) it also waits, under the same
+      #      cap, until every review check run on the head commit has
+      #      completed (review_check_names; see review_state), so a review
+      #      that has not spoken yet cannot be overtaken by the arm even
+      #      when no clean comment stretches the window.
       #
       #   2. CONSULT — run the unaddressed-findings check (vendored twin
       #      of dotclaude's bb-unaddressed-findings.sh, fetched from this
@@ -1561,6 +1571,10 @@ jobs:
           # than an API read; immutable, so a later labeled/synchronize
           # re-run sees the same fixed value aged out.
           PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          # The review-completion wait (see review_state): the commit whose
+          # check runs are read, and the review lanes' job names.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_CHECK_NAMES: ${{ inputs.review_check_names }}
         run: |
           set -euo pipefail
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
@@ -1670,6 +1684,58 @@ jobs:
             printf '%s\n%s\n%s\n%s\n%s\n' "$c1" "$c2" "$c3" "$c4" "$c5" | grep -v '^$' | sort | tail -1
           }
 
+          # REVIEW COMPLETION (WS2 step 1, 2026-09-29). The anchors above
+          # measure silence, so they cannot tell "no review has spoken yet"
+          # from "every review has finished". Until now a lane's CLEAN
+          # comment was what stretched the window while a slower lane was
+          # still working; WS2 steps 2-5 stop posting those comments. So the
+          # gate also waits until the newest attempt of every review check
+          # run on the head commit has COMPLETED. A lane posts its comment
+          # before its job completes, so the detector then sees it.
+          # Prints one of:
+          #   none-configured        REVIEW_CHECK_NAMES is empty: no wait
+          #   done                   no matching check run is still running
+          #   pending <a, b>         these review checks are still running
+          #   unreadable-permission  the token has no `checks: read`: fall
+          #                          back to the anchors alone (warned once)
+          # and returns nonzero on anything else, which fails closed: a 5xx,
+          # a network error, a rate limit (also a 403, with other text), an
+          # unparseable body. Only GitHub's missing-permission message falls
+          # back, because only that one is a configuration, not an outage.
+          review_state() {
+            local out err attempt
+            if [ -z "$(printf '%s' "${REVIEW_CHECK_NAMES:-}" | tr -d '[:space:]')" ]; then
+              echo "none-configured"
+              return 0
+            fi
+            [ -n "${HEAD_SHA:-}" ] || { echo "HEAD_SHA is empty" >&2; return 1; }
+            err=$(mktemp)
+            for attempt in 1 2 3; do
+              if out=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=all&per_page=100" --paginate 2>"$err"); then
+                rm -f "$err"
+                printf '%s' "$out" | jq -rs --arg names "$REVIEW_CHECK_NAMES" '
+                  ($names | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $want
+                  | [ .[] | .check_runs[]? ]
+                  | map(select(.name as $n | any($want[]; . as $w | $n == $w or ($n | endswith(" / " + $w)))))
+                  | group_by(.name) | map(max_by(.id))
+                  | map(select(.status != "completed") | .name) | sort
+                  | if length == 0 then "done" else "pending " + join(", ") end'
+                return
+              fi
+              if grep -qF 'Resource not accessible by integration' "$err"; then
+                rm -f "$err"
+                echo "unreadable-permission"
+                return 0
+              fi
+              [ "$attempt" -lt 3 ] && sleep $(( attempt * 5 ))
+            done
+            cat "$err" >&2
+            rm -f "$err"
+            return 1
+          }
+
+          REVIEW_POLL_S=60
+          warned_review_perm=0
           waited=0
           cap=$(( QUIET_S * 3 ))
           while :; do
@@ -1689,12 +1755,28 @@ jobs:
             esac
             age=$(( $(date -u +%s) - $(date -u -d "$anchor" +%s) ))
             remaining=$(( QUIET_S - age ))
-            if [ "$remaining" -le 0 ]; then
+            reviews=$(review_state) || {
+              echo "::error::could not read the head commit's check runs (the review-completion wait) after retries — refusing to arm auto-merge (fail closed)."
+              exit 1
+            }
+            if [ "$reviews" = "unreadable-permission" ] && [ "$warned_review_perm" -eq 0 ]; then
+              echo "::warning::this run's token cannot read check runs, so the quiet gate cannot wait for the review checks and falls back to comment activity alone. Grant \`checks: read\` in the caller's workflow-level permissions (the installer template already does)."
+              warned_review_perm=1
+            fi
+            case "$reviews" in
+              pending\ *) review_pending=1 ;;
+              *) review_pending=0 ;;
+            esac
+            if [ "$remaining" -le 0 ] && [ "$review_pending" -eq 0 ]; then
               echo "Quiet: newest commit/review activity is ${age}s old (>= ${QUIET_S}s)."
+              echo "Review checks: ${reviews}."
               break
             fi
             if [ "$waited" -ge "$cap" ]; then
               echo "::notice::review activity kept arriving for ${waited}s (cap ${cap}s) — not arming from this run and disarming any stale arm; the next PR event retries."
+              if [ "$review_pending" -eq 1 ]; then
+                echo "::notice::review checks still running at the cap: ${reviews#pending }."
+              fi
               gh pr merge --disable-auto "$PR_URL" 2>&1 || true
               state=$(gh pr view "$PR_URL" --json autoMergeRequest --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
               echo "Auto-merge state after quiet-cap revoke: $state"
@@ -1705,9 +1787,14 @@ jobs:
               { echo "clear=0"; echo "reason=quiet-cap"; } >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            sleep_for=$remaining
-            [ "$sleep_for" -gt "$QUIET_S" ] && sleep_for=$QUIET_S
-            echo "Quiet period: newest activity ${age}s ago — sleeping ${sleep_for}s (waited ${waited}s, cap ${cap}s)."
+            if [ "$remaining" -gt 0 ]; then
+              sleep_for=$remaining
+              [ "$sleep_for" -gt "$QUIET_S" ] && sleep_for=$QUIET_S
+              echo "Quiet period: newest activity ${age}s ago — sleeping ${sleep_for}s (waited ${waited}s, cap ${cap}s)."
+            else
+              sleep_for=$REVIEW_POLL_S
+              echo "Quiet period elapsed; review checks still running (${reviews#pending }) — polling again in ${sleep_for}s (waited ${waited}s, cap ${cap}s)."
+            fi
             sleep "$sleep_for"
             waited=$(( waited + sleep_for ))
           done

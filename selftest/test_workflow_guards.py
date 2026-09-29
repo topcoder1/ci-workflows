@@ -35,6 +35,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_automerge_output_injection.sh",
     "selftest/test_automerge_pat_attribution_gate.sh",
     "selftest/test_automerge_quiet_anchor.sh",
+    "selftest/test_automerge_review_wait.sh",
     "selftest/test_automerge_risk_patterns.sh",
     "selftest/test_automerge_riskfile_gate.sh",
     "selftest/test_bot_skip_commit_authorship.sh",
@@ -354,6 +355,28 @@ def test_codex_bypass_step_reads_the_input_verbatim():
     )
     assert not re.search(r"(^|[^A-Za-z0-9_])CHECK_NAME=", step["run"]), (
         "the Option B step's script must not reassign CHECK_NAME"
+    )
+
+
+def test_automerge_job_inherits_the_callers_permissions():
+    """The automerge job declares no `permissions:`; nor does the workflow.
+
+    A job-level block sets every scope it does not list to none. The block
+    this replaced listed contents + pull-requests only, so `checks` stayed
+    none on every caller and the quiet gate could not wait for the review
+    checks (WS2 step 1). Listing checks: read instead would startup_fail the
+    28 of 42 callers that do not grant it (whois-api-llc/wxa-mcp-server#80).
+    Inheriting never exceeds the caller's grant, so it cannot fail at start.
+    A top-level block would cap the job the same way, so pin both.
+    """
+    workflow = _automerge_workflow()
+    assert "permissions" not in workflow, (
+        "claude-author-automerge.yml must not declare top-level permissions"
+    )
+    assert "permissions" not in workflow["jobs"]["automerge"], (
+        "the automerge job must inherit the caller's permissions; a job-level "
+        "block either hides checks: read from the quiet gate or startup_fails "
+        "every caller that does not grant it"
     )
 
 
