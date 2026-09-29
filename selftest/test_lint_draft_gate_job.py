@@ -90,7 +90,7 @@ def replay_checkout(workspace, step):
 
 def run_job(workspace, tmp_path, repository="acme/app", served=None, text=None):
     """Run the job's steps in order in `workspace`; return the last run step's
-    result and the arguments the stub gh was called with."""
+    result and the argument lists the stub gh was called with."""
     document = yaml.safe_load(text if text is not None else LINT.read_text())
     context = {"github.repository": repository}
     stub = tmp_path / "bin" / "gh"
@@ -98,8 +98,12 @@ def run_job(workspace, tmp_path, repository="acme/app", served=None, text=None):
     calls = tmp_path / "gh-calls"
     body = tmp_path / "gh-body"
     body.write_bytes(served if served is not None else CHECKER.read_bytes())
+    # One argument per line, then an end marker, so each call's argv is exact.
     stub.write_text(
-        f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{calls}"\nbase64 < "{body}"\n'
+        "#!/bin/sh\n"
+        f'for argument; do printf \'%s\\n\' "$argument"; done >> "{calls}"\n'
+        f"echo '--end-of-call--' >> \"{calls}\"\n"
+        f'base64 < "{body}"\n'
     )
     stub.chmod(0o755)
     runner_temp = tmp_path / "runner-temp"
@@ -132,7 +136,8 @@ def run_job(workspace, tmp_path, repository="acme/app", served=None, text=None):
         if result.returncode != 0:
             break
     assert result is not None, "no run step executed"
-    return result, calls.read_text() if calls.exists() else ""
+    recorded = calls.read_text().split("--end-of-call--\n") if calls.exists() else []
+    return result, [call.splitlines() for call in recorded if call]
 
 
 def workspace_with(tmp_path, workflows):
@@ -159,10 +164,21 @@ def test_a_clean_caller_passes_and_the_workspace_is_left_alone(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == OK_LINE
     assert listing(workspace) == before
-    assert calls == (
-        "api repos/topcoder1/ci-workflows/contents/selftest/"
-        "check_draft_gate_triggers.py --jq .content\n"
-    )
+    # One fetch: a GET pinned to main, the source the reusable documents.
+    assert calls == [
+        [
+            "api",
+            "repos/topcoder1/ci-workflows/contents/selftest/"
+            "check_draft_gate_triggers.py?ref=main",
+            "--jq",
+            ".content",
+        ]
+    ]
+    (call,) = calls
+    assert call[1].endswith("?ref=main")
+    # gh api sends a POST once any field or input is given, or if told to.
+    post_flags = {"-f", "-F", "--field", "--raw-field", "--input", "-X", "--method"}
+    assert not post_flags & set(call)
 
 
 def test_a_violating_caller_fails(tmp_path):
@@ -229,7 +245,7 @@ def test_the_self_test_runs_the_checkouts_own_checker(tmp_path):
     result, calls = run_job(workspace, tmp_path, repository="topcoder1/ci-workflows")
     assert result.returncode == 1, result.stdout + result.stderr
     assert result.stdout.startswith(VIOLATION_LINE)
-    assert calls == ""
+    assert calls == []
 
 
 # --- 2. The checker ---------------------------------------------------------

@@ -338,7 +338,9 @@ jobs:
           else
             dir=$(mktemp -d "${RUNNER_TEMP:?RUNNER_TEMP is not set}/draft-gate.XXXXXX")
             checker="$dir/check_draft_gate_triggers.py"
-            gh api repos/topcoder1/ci-workflows/contents/selftest/check_draft_gate_triggers.py \
+            # ?ref=main in the URL keeps this a GET pinned to main, the source this
+            # reusable documents (@main); a -f ref=main field would make it a POST.
+            gh api "repos/topcoder1/ci-workflows/contents/selftest/check_draft_gate_triggers.py?ref=main" \
               --jq .content | base64 -d > "$checker"
             if [ ! -s "$checker" ]; then
               echo "::error::fetched an empty draft-gate checker from topcoder1/ci-workflows; refusing to report the check as passed."
