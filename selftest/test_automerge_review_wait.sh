@@ -53,6 +53,8 @@
 #       lane that can carry the higher id (topcoder1/dotclaude#417).
 #   R20 the cap bounds the waiting, not the clearing: a review that
 #       completes during the poll that crosses the cap clears on that poll.
+#   R21 an all-skipped check counts as done: a lane that skipped every
+#       attempt (drafts, cost gates) carries no review to wait for.
 #   S1  structural: the read paginates and asks for every attempt (filter=all).
 #   S2  structural: HEAD_SHA and REVIEW_CHECK_NAMES are bound in THIS step's env.
 #
@@ -560,6 +562,21 @@ if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && grep -q '^reason=qui
   echo "✓ R20 a review completing during the poll that crosses the cap still clears"
 else
   echo "✗ R20 a review completing during the poll that crosses the cap did not clear"
+  report
+  failed=1
+fi
+
+# R21. A check whose every attempt was skipped carries no review, so it counts
+# as done: no wait, and the gate clears on an aged window. Pins the fallback
+# in the grouping (dropping it makes jq error and fail closed) and the
+# acceptance of `skipped` (dropping it polls to the cap and declines).
+new_case
+runs 1 "170|review / Claude Review|$PAST|||skipped" "171|review / Claude Review|$PAST|||skipped"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ ! -s "$CASE/sleep.log" ]; then
+  echo "✓ R21 an all-skipped check counts as done"
+else
+  echo "✗ R21 an all-skipped check did not count as done"
   report
   failed=1
 fi

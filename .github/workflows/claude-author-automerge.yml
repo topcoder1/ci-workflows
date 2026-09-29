@@ -276,7 +276,7 @@ on:
         type: number
         default: 20
       review_check_names:
-        description: "Job names of the review lanes the quiet gate waits for, one per line. A check run matches when its name equals an entry or ends with ' / <entry>' (a caller job id prefixes a reusable's job name). Before consulting the findings detector, the gate waits until the newest non-skipped attempt of every matching check run on the head commit has completed with success, neutral or skipped, so a review whose check run exists is not overtaken by the arm while it runs, whether or not it has commented yet; a failed, cancelled or timed-out attempt waits for a re-run, up to the cap (WS2 step 1, 2026-09-29). Empty disables the wait. On a private repo this needs `checks: read` in the caller's workflow-level permissions (a public repo's check runs are readable without it); without it the gate logs one warning per run and falls back to comment activity alone."
+        description: "Job names of the review lanes the quiet gate waits for, one per line. A check run matches when its name equals an entry or ends with ' / <entry>' (a caller job id prefixes a reusable's job name). Before consulting the findings detector, the gate waits until the newest non-skipped attempt of every matching check run on the head commit has completed with success, neutral or skipped (an all-skipped check counts as done), so a review whose check run exists is not overtaken by the arm while it runs, whether or not it has commented yet; a failed, cancelled or timed-out attempt waits for a re-run, up to the cap (WS2 step 1, 2026-09-29). Empty disables the wait. On a private repo this needs `checks: read` in the caller's workflow-level permissions (a public repo's check runs are readable without it); without it the gate logs one warning per run and falls back to comment activity alone."
         required: false
         type: string
         default: |
@@ -1529,11 +1529,11 @@ jobs:
       #      until the newest non-skipped attempt of each matching review
       #      check (per app and name) on the head commit has completed with
       #      success, neutral or skipped (review_check_names; see
-      #      review_state), so a review that has not spoken yet cannot be
-      #      overtaken by the arm even when no clean comment stretches the
-      #      window. The cap bounds the waiting, not the clearing: a review
-      #      that completes during the poll that crosses the cap still clears
-      #      on that poll, as the window always has.
+      #      review_state), so a review whose check run exists is not
+      #      overtaken by the arm while it runs, even when no clean comment
+      #      stretches the window. The cap bounds the waiting, not the
+      #      clearing: a review that completes during the poll that crosses
+      #      the cap still clears on that poll, as the window always has.
       #
       #   2. CONSULT — run the unaddressed-findings check (vendored twin
       #      of dotclaude's bb-unaddressed-findings.sh, fetched from this
