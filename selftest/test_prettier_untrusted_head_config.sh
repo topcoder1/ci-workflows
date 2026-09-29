@@ -399,6 +399,26 @@ else
   bad "the prettier invocation must place '--' before the target list (a head file named --plugin=x must not reparse as a flag)"
 fi
 
+# 3e. The job's GITHUB_TOKEN is read-only. The push authenticates with the PAT
+#     alone (3a, 3b), so no job-level scope needs write, and a read-only token
+#     limits what anything running over the untrusted head could do with it.
+#     Asserts on the comment-stripped job-level `permissions:` block, so the
+#     word "write" in a comment can't satisfy or trip it.
+perm_block=$(awk '
+  /^    permissions:/ {grab=1; next}
+  grab && /^    [a-z]/ {exit}
+  grab {print}
+' "$AUTOFIX" | grep -vE '^[[:space:]]*#' || true)
+if [ -z "$perm_block" ]; then
+  bad "could not locate the autofix job's permissions: block — 3e cannot verify the token is read-only"
+elif printf '%s' "$perm_block" | grep -q ':[[:space:]]*write'; then
+  bad "the autofix job must not request any write scope — the push uses the PAT, so GITHUB_TOKEN stays read-only"
+elif printf '%s' "$perm_block" | grep -qE '^[[:space:]]*contents:[[:space:]]*read'; then
+  ok "the job's GITHUB_TOKEN is read-only (contents: read, no write scope)"
+else
+  bad "the autofix job must request contents: read (for checkout) and no write scope"
+fi
+
 echo
 if [ "$failed" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES ABOVE"; fi
 exit "$failed"
