@@ -1,18 +1,19 @@
-"""The Claude review lanes allow only read-only commands by prefix.
+"""The Claude review lanes allow only reviewed read-only commands.
 
 A `Bash(<command>:*)` allow rule lets the model run <command> with any
-arguments. For rg, sed and awk that reaches past reading: each can run another
+arguments. Some commands reach past reading: rg, sed and awk can run another
 program or write files (verifier-on-high-risk.yml's allowlist comment gives
-the reasons), so no lane allows them. Nor may a lane allow Bash broadly
-(`Bash`, `Bash(*)`, a rule whose command is a wildcard), which would allow
-them too. The commands are written out here, not read from the workflows, so
-a lane that gains one of them fails.
+the reasons), as can shells, interpreters and wrappers such as `env`. So every
+Bash rule a lane allows must be one of the read-only command prefixes written
+out in SAFE_BASH_COMMANDS below, not read from the workflows. A lane that
+gains any other Bash rule, `Bash` or `Bash(*)` included, fails, and widening
+the list is a reviewed change to this file.
 
 Every `anthropics/claude-code-action` step in .github/workflows is checked,
-not just the lanes known today, and its allowlist is read the way the action
-reads it: `--allowedTools` / `--allowed-tools` in `claude_args` (shell-split,
-`--flag value` or `--flag=value`, comma-separated), plus the `allowed_tools`
-input.
+not just the lanes known today. Its rules are read the way the CLI takes them:
+`--allowedTools` / `--allowed-tools` in `claude_args`, as `--flag value ...`
+(every value up to the next option) or `--flag=value`, each value split on
+commas and spaces outside parentheses, plus the `allowed_tools` input.
 """
 
 import re
@@ -29,9 +30,44 @@ KNOWN_LANES = {
     "claude-review.yml",
     "verifier-on-high-risk.yml",
 }
-EXCLUDED_COMMANDS = {"rg", "sed", "awk"}
+# The read-only command prefixes the lanes may allow, and nothing else.
+SAFE_BASH_COMMANDS = {
+    "gh pr comment",
+    "gh pr diff",
+    "gh pr view",
+    "git diff",
+    "git log",
+    "git ls-files",
+    "git show",
+    "grep",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "ls",
+    "find",
+    "file",
+}
 ALLOW_FLAGS = ("--allowedTools", "--allowed-tools")
-COMMAND = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def split_rules(value):
+    """Split on commas and whitespace outside parentheses."""
+    rules, current, depth = [], "", 0
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(depth - 1, 0)
+        if depth == 0 and (char == "," or char.isspace()):
+            if current.strip():
+                rules.append(current.strip())
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        rules.append(current.strip())
+    return rules
 
 
 def allowed_tools(step):
@@ -39,21 +75,23 @@ def allowed_tools(step):
     with_ = step.get("with") or {}
     values = []
     tokens = shlex.split(str(with_.get("claude_args") or ""))
-    for index, token in enumerate(tokens):
-        for flag in ALLOW_FLAGS:
-            if token == flag and index + 1 < len(tokens):
-                values.append(tokens[index + 1])
-            elif token.startswith(flag + "="):
-                values.append(token[len(flag) + 1 :])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token in ALLOW_FLAGS:
+            while index < len(tokens) and not tokens[index].startswith("-"):
+                values.append(tokens[index])
+                index += 1
+        elif any(token.startswith(flag + "=") for flag in ALLOW_FLAGS):
+            values.append(token.split("=", 1)[1])
     if with_.get("allowed_tools"):
         values.append(str(with_["allowed_tools"]))
-    return [
-        rule.strip() for value in values for rule in value.split(",") if rule.strip()
-    ]
+    return [rule for value in values for rule in split_rules(value)]
 
 
 def rejected_rules(rules):
-    """Bash rules that allow an excluded command, or Bash broadly."""
+    """Bash rules outside SAFE_BASH_COMMANDS, `Bash` itself included."""
     rejected = []
     for rule in rules:
         if rule == "Bash":
@@ -62,8 +100,8 @@ def rejected_rules(rules):
         match = re.fullmatch(r"Bash\((.*)\)", rule, re.DOTALL)
         if not match:
             continue
-        command = re.split(r"[:\s]", match.group(1).strip(), maxsplit=1)[0]
-        if not COMMAND.fullmatch(command) or command in EXCLUDED_COMMANDS:
+        command = re.sub(r"(?::\*| \*)$", "", match.group(1).strip()).strip()
+        if command not in SAFE_BASH_COMMANDS:
             rejected.append(rule)
     return rejected
 
@@ -95,7 +133,7 @@ def test_every_known_lane_is_discovered_with_an_allowlist():
     action_steps(),
     ids=lambda value: value if isinstance(value, str) else "",
 )
-def test_no_lane_allows_a_command_that_reaches_past_reading(name, step):
+def test_every_lane_allows_only_reviewed_read_only_commands(name, step):
     assert rejected_rules(allowed_tools(step)) == []
 
 
@@ -106,6 +144,7 @@ def test_the_adversarial_lane_keeps_its_search_and_history():
     rules = allowed_tools(step)
     assert "Bash(grep:*)" in rules
     assert "Bash(git log:*)" in rules
+    assert "Bash(rg:*)" not in rules
 
 
 @pytest.mark.parametrize(
@@ -120,23 +159,25 @@ def test_the_adversarial_lane_keeps_its_search_and_history():
         "Bash",
         "Bash(*)",
         "Bash(:*)",
-        "Bash(* rg:*)",
-        "Bash(r?:*)",
+        "Bash(* grep:*)",
+        "Bash(env grep:*)",
+        "Bash(command grep:*)",
+        "Bash(sh:*)",
+        "Bash(bash:*)",
+        "Bash(xargs:*)",
+        "Bash(python3:*)",
+        "Bash(git:*)",
+        "Bash(gh:*)",
+        "Bash(grep; ls:*)",
     ],
 )
-def test_the_check_rejects_excluded_and_broad_rules(rule):
+def test_the_check_rejects_rules_outside_the_reviewed_list(rule):
     assert rejected_rules(["Bash(grep:*)", rule, "Read"]) == [rule]
 
 
-def test_the_check_leaves_other_rules_alone():
-    rules = [
-        "Bash(grep:*)",
-        "Bash(rgx:*)",
-        "Bash(sedate:*)",
-        "Bash(git log:*)",
-        "Read",
-        "mcp__github_inline_comment__create_inline_comment",
-    ]
+def test_the_check_accepts_the_reviewed_list_in_either_wildcard_form():
+    rules = [f"Bash({command}:*)" for command in sorted(SAFE_BASH_COMMANDS)]
+    rules += ["Bash(grep *)", "Bash(git log)", "Read", "mcp__github__x"]
     assert rejected_rules(rules) == []
 
 
@@ -148,11 +189,23 @@ def test_the_check_leaves_other_rules_alone():
         "--allowed-tools Bash(rg:*)",
         '--allowedTools="Bash(rg:*)"',
         '--model x\n--allowedTools "Read"\n--allowedTools "Bash(rg:*)"',
+        "--allowedTools Bash(grep:*) Bash(rg:*)",
+        '--allowedTools "Bash(grep:*) Bash(rg:*)"',
+        '--allowedTools "Bash(git log:*)" "Bash(rg:*)" --max-turns 3',
     ],
 )
 def test_the_allowlist_is_read_however_it_is_written(claude_args):
     step = {"with": {"claude_args": claude_args}}
     assert rejected_rules(allowed_tools(step)) == ["Bash(rg:*)"]
+
+
+def test_rules_with_spaces_inside_parentheses_stay_whole():
+    step = {
+        "with": {
+            "claude_args": '--allowedTools "Bash(git log:*) Read,Bash(gh pr view:*)"'
+        }
+    }
+    assert allowed_tools(step) == ["Bash(git log:*)", "Read", "Bash(gh pr view:*)"]
 
 
 def test_the_allowed_tools_input_is_read_too():
