@@ -82,9 +82,10 @@ jobs:
       # v1.0.229; a bump is a deliberate change here, not a side effect of
       # an action bump. Pinned by selftest/test_claude_lanes_cli_pin.py.
       CLAUDE_CODE_VERSION: "2.1.276"
-    # 20: the model step's own 10 (see it below) plus the setup before it and
-    # the reporting after it, so a hung model is reported, not cancelled.
-    timeout-minutes: 20
+    # 25: the model step's own 10 and the CLI install's 4 (see both below),
+    # plus the rest of the setup before them and the reporting after, so a
+    # hung model or install is reported, not cancelled.
+    timeout-minutes: 25
     steps:
       - name: Validate ci_workflows_sha is a full commit SHA
         env:
@@ -504,13 +505,13 @@ jobs:
         if: steps.classify.outputs.matched == 'yes'
         id: verifier
         continue-on-error: true # keep the workflow running so we can post the check-run with FAILURE conclusion
-        # Step-level, 10 of the job's 20: a hung model ends here as a step
+        # Step-level, 10 of the job's 25: a hung model ends here as a step
         # failure, which continue-on-error turns into a FAILURE result posted
         # below. At the job's timeout GitHub cancels the whole job instead,
         # and a cancelled job posts nothing. The job's clock starts first, so
-        # it leaves the other 10 minutes for the setup before this step (well
-        # under 1 on real runs) and the reporting after it. Real runs take
-        # about 2 minutes in all.
+        # it leaves the other 15 minutes for the setup before this step (the
+        # CLI install and well under 1 more on real runs) and the reporting
+        # after it. Real runs take about 2 minutes in all.
         timeout-minutes: 10
         uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         # Attributes come from the base commit, never from the PR. The model

@@ -86,9 +86,10 @@ def lane_problems(name, job, index):
 INSTALL_TIMEOUT_LANES = {"claude-adversarial-review.yml", "verifier-on-high-risk.yml"}
 MAX_INSTALL_MINUTES = 5
 # What the verifier's job keeps beyond the model and install timeouts: the
-# other setup steps (checkouts, classification, the prompt) and the steps that
-# report a failure afterwards, about 3 minutes each at most.
-VERIFIER_RESERVE_MINUTES = 6
+# rest of the setup (checkouts, classification, the prompt) and the steps that
+# report a failure afterwards, the 5 + 3 minutes that
+# selftest/test_verifier_failure_result.py reserves.
+VERIFIER_RESERVE_MINUTES = 8
 
 
 def install_timeout_problems(name, job, index):
@@ -202,12 +203,8 @@ MUTANTS = {
         ),
         "the install step's timeout-minutes is None",
     ),
-    "verifier install bound past the reserve": (
-        swap(
-            VERIFIER,
-            "        timeout-minutes: 4\n        run: |\n",
-            "        timeout-minutes: 5\n        run: |\n",
-        ),
+    "verifier job without the install's time": (
+        swap(VERIFIER, "    timeout-minutes: 25\n", "    timeout-minutes: 20\n"),
         "leave the job too little time",
     ),
     "adversarial install bound too long": (

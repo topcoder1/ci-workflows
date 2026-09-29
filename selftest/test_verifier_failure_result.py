@@ -521,7 +521,7 @@ TIMEOUT_MUTANTS = {
         "leaves the job too little time",
     ),
     "job timeout without the setup budget": (
-        ("    timeout-minutes: 20\n", "    timeout-minutes: 15\n"),
+        ("    timeout-minutes: 25\n", "    timeout-minutes: 15\n"),
         "leaves the job too little time",
     ),
     "step timeout of 0": (
