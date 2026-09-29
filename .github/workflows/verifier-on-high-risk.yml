@@ -75,9 +75,17 @@ jobs:
   verify:
     name: verifier-evidence-bound-runner
     runs-on: ubuntu-latest
-    # 20: the model step's own 10 (see it below) plus the setup before it and
-    # the reporting after it, so a hung model is reported, not cancelled.
-    timeout-minutes: 20
+    env:
+      # The Claude Code CLI version, installed by the step
+      # "Pre-install Claude Code binary" and handed to the action. It is
+      # the version this lane already ran, bundled with claude-code-action
+      # v1.0.229; a bump is a deliberate change here, not a side effect of
+      # an action bump. Pinned by selftest/test_claude_lanes_cli_pin.py.
+      CLAUDE_CODE_VERSION: "2.1.276"
+    # 25: the model step's own 10 and the CLI install's 4 (see both below),
+    # plus the rest of the setup before them and the reporting after, so a
+    # hung model or install is reported, not cancelled.
+    timeout-minutes: 25
     steps:
       - name: Validate ci_workflows_sha is a full commit SHA
         env:
@@ -370,6 +378,62 @@ jobs:
             echo "${DELIM}"
           } >> "$GITHUB_OUTPUT"
 
+      # The Claude Code CLI this lane runs, installed at the version the job's
+      # CLAUDE_CODE_VERSION pins and handed to the action below, the same step
+      # claude-review.yml runs. Without it the action runs the CLI bundled with
+      # its release, so every action bump would change this lane's CLI too.
+      # Pinned by selftest/test_claude_lanes_cli_pin.py.
+      - name: Pre-install Claude Code binary (workaround anthropics/claude-code-action#1290)
+        id: claude_install
+        if: steps.classify.outputs.matched == 'yes'
+        # Bounded like any setup step: a stalled download fails here, which
+        # a later step can report, instead of running into the job's timeout.
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          # The version actually on disk, "" when there is no binary yet.
+          # `claude --version` prints e.g. "2.1.233 (Claude Code)".
+          installed_version() {
+            [ -x "$HOME/.local/bin/claude" ] || { echo ""; return; }
+            "$HOME/.local/bin/claude" --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+          }
+          # install.sh intermittently exits 0 WITHOUT placing the binary (#1290),
+          # which used to fail the whole review job on a coin-flip. Retry up to
+          # 3 times, then fall back to npm, before giving up. `install.sh
+          # [stable|latest|VERSION]` hands the target to `claude install`; a
+          # binary of any OTHER version counts as a failed attempt too - see
+          # CLAUDE_CODE_VERSION at the job level for why the pin is load-bearing.
+          for attempt in 1 2 3; do
+            curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION" || true
+            [ "$(installed_version)" = "$CLAUDE_CODE_VERSION" ] && break
+            echo "::warning::Claude install attempt ${attempt}/3 produced no ${CLAUDE_CODE_VERSION} binary (got '$(installed_version)'); retrying..."
+            sleep $((attempt * 5))
+          done
+          if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::warning::install.sh failed 3× — falling back to npm (@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION})"
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" || true
+            if command -v claude >/dev/null 2>&1; then
+              ln -sf "$(command -v claude)" "$HOME/.local/bin/claude"
+            fi
+          fi
+          if [ ! -x "$HOME/.local/bin/claude" ]; then
+            echo "::error::Claude Code binary not at $HOME/.local/bin/claude after 3 install attempts + npm fallback — check upstream issue #1290"
+            exit 1
+          fi
+          # FAIL CLOSED on an unpinned binary: an unexpected version means
+          # the lane is back on a floating CLI, the channel the Aug-04, Aug-14
+          # and Aug-16 incidents came through (and for claude-review, below
+          # 2.1.217 --max-budget-usd would silently stop bounding subagent
+          # spend).
+          if [ "$(installed_version)" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::error::Claude Code '$(installed_version)' installed but the pin is ${CLAUDE_CODE_VERSION} — refusing to review on an unpinned binary (the pin is the fleet's rollback lever; bump CLAUDE_CODE_VERSION at the job level deliberately, never here)"
+            exit 1
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+          echo "executable=$HOME/.local/bin/claude" >> "$GITHUB_OUTPUT"
+
       # The verifier's model runs git itself (git diff, git log and git show
       # are in its allowlist), and git leaves a submodule's pointer change out
       # of them when the .gitmodules it reads sets `submodule.<name>.ignore`.
@@ -441,13 +505,13 @@ jobs:
         if: steps.classify.outputs.matched == 'yes'
         id: verifier
         continue-on-error: true # keep the workflow running so we can post the check-run with FAILURE conclusion
-        # Step-level, 10 of the job's 20: a hung model ends here as a step
+        # Step-level, 10 of the job's 25: a hung model ends here as a step
         # failure, which continue-on-error turns into a FAILURE result posted
         # below. At the job's timeout GitHub cancels the whole job instead,
         # and a cancelled job posts nothing. The job's clock starts first, so
-        # it leaves the other 10 minutes for the setup before this step (well
-        # under 1 on real runs) and the reporting after it. Real runs take
-        # about 2 minutes in all.
+        # it leaves the other 15 minutes for the setup before this step (the
+        # CLI install and well under 1 more on real runs) and the reporting
+        # after it. Real runs take about 2 minutes in all.
         timeout-minutes: 10
         uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         # Attributes come from the base commit, never from the PR. The model
@@ -463,6 +527,7 @@ jobs:
           GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          path_to_claude_code_executable: ${{ steps.claude_install.outputs.executable }}
           prompt: ${{ steps.prompt.outputs.text }}
           # `--json-schema` forces the model to emit structured JSON; the
           # action surfaces it as `outputs.structured_output`. This replaces
