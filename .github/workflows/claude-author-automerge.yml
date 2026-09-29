@@ -276,7 +276,7 @@ on:
         type: number
         default: 20
       review_check_names:
-        description: "Job names of the review lanes the quiet gate waits for, one per line. A check run matches when its name equals an entry or ends with ' / <entry>' (a caller job id prefixes a reusable's job name). Before consulting the findings detector, the gate waits until the newest attempt of every matching check run on the head commit has completed with success, neutral or skipped, so a review still running is never overtaken by the arm, whether or not it has commented yet; a failed, cancelled or timed-out attempt waits for a re-run, up to the cap (WS2 step 1, 2026-09-29). Empty disables the wait. On a private repo this needs `checks: read` in the caller's workflow-level permissions (a public repo's check runs are readable without it); without it the gate logs one warning per run and falls back to comment activity alone."
+        description: "Job names of the review lanes the quiet gate waits for, one per line. A check run matches when its name equals an entry or ends with ' / <entry>' (a caller job id prefixes a reusable's job name). Before consulting the findings detector, the gate waits until the newest non-skipped attempt of every matching check run on the head commit has completed with success, neutral or skipped, so a review whose check run exists is not overtaken by the arm while it runs, whether or not it has commented yet; a failed, cancelled or timed-out attempt waits for a re-run, up to the cap (WS2 step 1, 2026-09-29). Empty disables the wait. On a private repo this needs `checks: read` in the caller's workflow-level permissions (a public repo's check runs are readable without it); without it the gate logs one warning per run and falls back to comment activity alone."
         required: false
         type: string
         default: |
@@ -1525,15 +1525,15 @@ jobs:
       #      arm below binds --match-head-commit so a moved head can never
       #      inherit this run's arm. Chronic chatter is bounded by a 3x
       #      cap, which declines + disarms (fail toward manual).
-      #      Since WS2 step 1 (2026-09-29) it also waits, under the same
-      #      cap, until the newest attempt of each matching review check
-      #      (per app and name) on the head commit has completed with
+      #      Since WS2 step 1 (2026-09-29) it also waits, under the same cap,
+      #      until the newest non-skipped attempt of each matching review
+      #      check (per app and name) on the head commit has completed with
       #      success, neutral or skipped (review_check_names; see
       #      review_state), so a review that has not spoken yet cannot be
       #      overtaken by the arm even when no clean comment stretches the
       #      window. The cap bounds the waiting, not the clearing: a review
-      #      that completes during the poll that crosses the cap still
-      #      clears on that poll, as the window always has.
+      #      that completes during the poll that crosses the cap still clears
+      #      on that poll, as the window always has.
       #
       #   2. CONSULT — run the unaddressed-findings check (vendored twin
       #      of dotclaude's bb-unaddressed-findings.sh, fetched from this
@@ -1696,9 +1696,13 @@ jobs:
           # from "every review has finished". Until now a lane's CLEAN
           # comment was what stretched the window while a slower lane was
           # still working; WS2 steps 2-5 stop posting those comments. So the
-          # gate also waits until the newest attempt of every review check
-          # run on the head commit has COMPLETED with success, neutral or
-          # skipped. A lane posts its comment before its job completes, so
+          # gate also waits until the newest non-skipped attempt of every
+          # review check run on the head commit has COMPLETED with success,
+          # neutral or skipped (an all-skipped check counts as done). A
+          # skipped attempt carries no review and never stands in for a real
+          # one: readying a PR seconds after a push gives the same lane a
+          # skipped draft-payload run that can carry the higher id
+          # (topcoder1/dotclaude#417). A lane posts its comment before its job completes, so
           # the detector then sees it. A failed, cancelled or timed-out
           # attempt has no accepted conclusion (it may or may not have
           # posted findings), so it waits for a re-run, up to the cap (wxa_webcat#1695: a failed Claude Review re-run posted
@@ -1738,7 +1742,8 @@ jobs:
                   | ($names | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $want
                   | [ .[] | .check_runs[] ]
                   | map(select(.name as $n | any($want[]; . as $w | $n == $w or ($n | endswith(" / " + $w)))))
-                  | group_by([(.app.id // 0), .name]) | map(max_by(.id))
+                  | group_by([(.app.id // 0), .name])
+                  | map((map(select(.conclusion != "skipped")) | max_by(.id)) // max_by(.id))
                   | map(select(.status != "completed"
                         or ((.conclusion // "") | IN("success", "neutral", "skipped") | not)))
                   | map((.name | clean)

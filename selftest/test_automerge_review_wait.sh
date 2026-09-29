@@ -11,9 +11,9 @@
 # clean comments. Without this wait the window would then be anchored on the
 # push alone, and a review that finishes after minute 20 (a slow model, a
 # queued runner) would post its finding after the arm: the wxa_vpn#1392 hole.
-# So the gate now also requires the newest attempt of each matching review
-# check (per app and name) on the head commit to have completed with success,
-# neutral or skipped before it consults the detector.
+# So the gate now also requires the newest non-skipped attempt of each
+# matching review check (per app and name) on the head commit to have
+# completed with success, neutral or skipped before it consults the detector.
 #
 # Cases:
 #   R1  THE HOLE (AC2.3): the window has passed but a review is still running
@@ -48,6 +48,11 @@
 #       fails closed, never reads as "no reviews".
 #   R18 the runner's legacy `##[command]` syntax, which it recognises
 #       anywhere in a line, is neutralised in printed names too.
+#   R19 a newer SKIPPED attempt cannot hide a running one: a PR readied
+#       seconds after a push gets a skipped draft-payload run of the same
+#       lane that can carry the higher id (topcoder1/dotclaude#417).
+#   R20 the cap bounds the waiting, not the clearing: a review that
+#       completes during the poll that crosses the cap clears on that poll.
 #   S1  structural: the read paginates and asks for every attempt (filter=all).
 #   S2  structural: HEAD_SHA and REVIEW_CHECK_NAMES are bound in THIS step's env.
 #
@@ -518,6 +523,43 @@ if grep -q '^reason=quiet-cap$' "$CASE/output" && ! grep -qF '##[add-mask]' "$CA
   echo "✓ R18 a legacy ##[command] in a check-run name is neutralised"
 else
   echo "✗ R18 a legacy ##[command] in a check-run name reached the log intact"
+  report
+  failed=1
+fi
+
+# R19. Readying a PR seconds after a push runs the review lanes twice on one
+# commit: the draft-payload run skips `review / Claude Review` (the lane is
+# gated on draft == false), and its check run can get the HIGHER id than the
+# live one (topcoder1/dotclaude#417: live 108465151842, skipped
+# 108465152578). A skipped attempt carries no review, so it must never
+# stand in for the live attempt that is still running.
+new_case
+runs 1 "10|review / Claude Review|$DONE" "11|review / Claude Review|$PAST|||skipped"
+echo "$DONE" > "$CASE/finding_at"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=0$' "$CASE/output" && grep -q '^reason=findings$' "$CASE/output" \
+   && [ "$(polls)" -eq 6 ]; then
+  echo "✓ R19 a newer skipped attempt cannot hide a running review"
+else
+  echo "✗ R19 a newer skipped attempt hid a running review"
+  report
+  failed=1
+fi
+
+# R20. The cap bounds the waiting, not the clearing. A young commit makes the
+# first sleep 1000s, so the 60s polls reach 3580s, then 3640s: past the
+# 3600s cap. The review completes at 3620s, inside that last poll, so the
+# gate clears on it (quiet window elapsed, review finished) rather than
+# declining a PR that is ready.
+new_case
+echo '[{"parents":[{"sha":"x"}],"commit":{"committer":{"date":"2026-01-01T02:00:00Z"}}}]' > "$CASE/commits.json"
+runs 1 "160|review / Codex Review|$((NOW0 + 3620))"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && grep -q '^reason=quiet+clean$' "$CASE/output" \
+   && ! grep -q 'disable-auto' "$CASE/calls.log"; then
+  echo "✓ R20 a review completing during the poll that crosses the cap still clears"
+else
+  echo "✗ R20 a review completing during the poll that crosses the cap did not clear"
   report
   failed=1
 fi
