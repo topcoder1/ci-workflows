@@ -304,9 +304,12 @@ def _automerge_workflow():
 
 
 def _codex_check_name_default():
+    # Raw, never stripped: the Option B step tests `-z "$CHECK_NAME"`, so a
+    # default of " " would switch the bypass on while a stripped comparison
+    # read it as empty (Codex round 2).
     workflow = _automerge_workflow()
     inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
-    return (inputs["codex_check_name"].get("default") or "").strip()
+    return inputs["codex_check_name"].get("default") or ""
 
 
 def test_codex_trusted_bypass_is_off_by_default():
