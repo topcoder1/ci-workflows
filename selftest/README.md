@@ -250,7 +250,9 @@ arbitrary helper scripts; that's a different kind of repo.
   `true` or a revert to the old `token:` form both fail — not the raw-file grep
   that the repo's own lesson warns against), the prettier CLI installs
   off-checkout with a pinned registry + `--ignore-scripts` + neutralized npm
-  user-config, the push auth rides an inline `http.extraheader`, and the target
+  user-config, the push auth rides an inline `http.extraheader`, the job's
+  `GITHUB_TOKEN` is read-only (every job-level scope `read` or `none`, with
+  `contents: read`; an inline value such as `write-all` fails), and the target
   list follows `--`. The canary and the credential/editorconfig guards are all
   mutation-proven. Its sibling `test_lint_prettier_check_untrusted_head.sh`
   carries the same hardening for `lint.yml`'s read-only `prettier --check`.

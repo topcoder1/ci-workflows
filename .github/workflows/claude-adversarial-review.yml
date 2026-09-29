@@ -55,8 +55,8 @@ jobs:
       # parse, or a base commit, head commit or base branch missing from the
       # checkout (checkout_depth must be 0) fails the step. Each name reaches
       # git config as one argument, and is printed only after fixed text, so
-      # no name can start a log line. codex-review.yml runs the same script;
-      # both copies are pinned by
+      # no name can start a log line. codex-review.yml and
+      # verifier-on-high-risk.yml run the same script; every copy is pinned by
       # selftest/test_review_lanes_submodule_ignore.py.
       - name: Keep submodule changes visible to the model's git
         env:
