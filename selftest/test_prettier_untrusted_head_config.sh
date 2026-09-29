@@ -28,6 +28,8 @@
 #   - Checkout uses `persist-credentials: false`; the PAT is supplied only to
 #     the push step via an inline http.extraheader, never persisted to
 #     .git/config where head-reachable code could read it.
+#   - The job's GITHUB_TOKEN is read-only: every job-level scope is `read` or
+#     `none`, with `contents: read` for checkout. Only the PAT can write.
 #   - The changed-file list is passed after `--`, so a head file literally
 #     named `--plugin=x` cannot be reparsed as a flag.
 #
@@ -402,21 +404,33 @@ fi
 # 3e. The job's GITHUB_TOKEN is read-only. The push authenticates with the PAT
 #     alone (3a, 3b), so no job-level scope needs write, and a read-only token
 #     limits what anything running over the untrusted head could do with it.
-#     Asserts on the comment-stripped job-level `permissions:` block, so the
-#     word "write" in a comment can't satisfy or trip it.
+#     The job-level `permissions:` must be a block, not an inline value such as
+#     `write-all`. Every entry must be `read` or `none` (quoted or not, with an
+#     optional trailing comment), and `contents` must be `read`. Comment-only
+#     and blank lines are ignored, so "write" in a comment can't trip it.
+perm_line=$(grep -E '^    permissions:' "$AUTOFIX" | head -n 1 || true)
+perm_inline=$(printf '%s' "$perm_line" | sed -E 's/^    permissions:[[:space:]]*//; s/[[:space:]]*#.*$//')
 perm_block=$(awk '
   /^    permissions:/ {grab=1; next}
   grab && /^    [a-z]/ {exit}
   grab {print}
-' "$AUTOFIX" | grep -vE '^[[:space:]]*#' || true)
-if [ -z "$perm_block" ]; then
-  bad "could not locate the autofix job's permissions: block — 3e cannot verify the token is read-only"
-elif printf '%s' "$perm_block" | grep -q ':[[:space:]]*write'; then
-  bad "the autofix job must not request any write scope — the push uses the PAT, so GITHUB_TOKEN stays read-only"
-elif printf '%s' "$perm_block" | grep -qE '^[[:space:]]*contents:[[:space:]]*read'; then
-  ok "the job's GITHUB_TOKEN is read-only (contents: read, no write scope)"
+' "$AUTOFIX" | grep -vE '^[[:space:]]*(#|$)' || true)
+q="[\"']"
+entry_ok="^[[:space:]]+[a-z-]+:[[:space:]]*${q}?(read|none)${q}?[[:space:]]*(#.*)?\$"
+contents_ok="^[[:space:]]+contents:[[:space:]]*${q}?read${q}?[[:space:]]*(#.*)?\$"
+if [ -z "$perm_line" ]; then
+  bad "could not locate the autofix job's permissions: key — 3e cannot verify the token is read-only"
+elif [ -n "$perm_inline" ]; then
+  bad "the autofix job's permissions must be a block of read-only scopes, not the inline value '$perm_inline'"
 else
-  bad "the autofix job must request contents: read (for checkout) and no write scope"
+  not_read=$(printf '%s\n' "$perm_block" | grep -vE "$entry_ok" || true)
+  if [ -n "$not_read" ]; then
+    bad "every autofix job scope must be read or none (the push uses the PAT, so GITHUB_TOKEN stays read-only); found: $(printf '%s' "$not_read" | head -n 1 | sed 's/^[[:space:]]*//')"
+  elif printf '%s\n' "$perm_block" | grep -qE "$contents_ok"; then
+    ok "the job's GITHUB_TOKEN is read-only (every scope read or none; contents: read)"
+  else
+    bad "the autofix job must request contents: read (checkout needs it)"
+  fi
 fi
 
 echo

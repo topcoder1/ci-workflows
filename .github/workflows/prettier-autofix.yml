@@ -6,8 +6,9 @@ name: Prettier Autofix
 #
 # Why a separate workflow vs folding write-mode into lint.yml:
 #   - lint.yml is intentionally check-only (read-only token, runs on every
-#     repo without elevated perms). Mixing write-mode would force every
-#     consumer to grant `contents: write` even if they don't want autofix.
+#     repo without elevated perms). Mixing write-mode in would force every
+#     consumer to provision and pass automerge_pat, the push credential,
+#     even if they don't want autofix.
 #   - This workflow is opt-in per repo via a sibling caller workflow.
 #
 # Why we require a PAT secret instead of GITHUB_TOKEN:
