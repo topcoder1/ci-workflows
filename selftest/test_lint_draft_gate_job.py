@@ -3,8 +3,8 @@
 The job fetches selftest/check_draft_gate_triggers.py from ci-workflows into a
 fresh directory under RUNNER_TEMP and runs it against the caller's
 .github/workflows; only ci-workflows' own self-test uses the checker in its
-checkout. The checker fails closed when that directory is missing, a symlink
-or not a directory.
+checkout. The checker fails closed when that directory is missing, not a
+directory, a symlink, or reached through one.
 
 Layers:
 1. The job, run step by step: a `run:` step executes its shipped bash with a
@@ -15,8 +15,8 @@ Layers:
    left in the workspace. A workspace entry at any path the checker might be
    written to changes nothing. An empty fetch fails the job. The self-test
    branch runs the checkout's own checker and fetches nothing.
-2. The checker: a missing workflows directory, a symlink to one, and a file in
-   its place each exit 1.
+2. The checker: a missing workflows directory, a symlink to one, a file in its
+   place, and a directory reached through a symlinked parent each exit 1.
 """
 
 import os
@@ -238,6 +238,20 @@ def test_an_empty_fetch_fails_the_job(tmp_path):
     assert "fetched an empty draft-gate checker" in result.stdout
 
 
+def test_a_symlinked_github_directory_fails_the_job(tmp_path):
+    # .github/workflows resolves, through the symlink, to clean files that are
+    # not the caller's workflows; the job must not report them as checked.
+    workspace = tmp_path / "workspace"
+    (workspace / "docs" / "workflows").mkdir(parents=True)
+    (workspace / "docs" / "workflows" / "pr-review.yml").write_text(CLEAN)
+    (workspace / ".github").symlink_to("docs")
+    result, _ = run_job(workspace, tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "is reached through the symlink .github, so the draft-gate check" in (
+        result.stdout
+    )
+
+
 def test_the_self_test_runs_the_checkouts_own_checker(tmp_path):
     workspace = workspace_with(tmp_path, {"pr-review.yml": VIOLATING})
     (workspace / "selftest").mkdir()
@@ -274,3 +288,21 @@ def test_a_workflows_path_that_is_not_a_real_directory_fails(kind, tmp_path, cap
     BROKEN[kind](workflows)
     assert checker_main([str(workflows)]) == 1
     assert f"is {kind}, so the draft-gate check" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+def test_a_workflows_directory_reached_through_a_symlinked_parent_fails(
+    absolute, tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "elsewhere" / "workflows").mkdir(parents=True)
+    (tmp_path / "elsewhere" / "workflows" / "pr-review.yml").write_text(CLEAN)
+    (tmp_path / ".github").symlink_to("elsewhere")
+    monkeypatch.chdir(tmp_path)
+    workflows = Path(".github", "workflows")
+    if absolute:
+        workflows = tmp_path / workflows
+    assert checker_main([str(workflows)]) == 1
+    symlink = tmp_path / ".github" if absolute else Path(".github")
+    assert f"is reached through the symlink {symlink}, so the draft-gate check" in (
+        capsys.readouterr().out
+    )

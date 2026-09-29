@@ -37,8 +37,9 @@ Usage:
     check_draft_gate_triggers.py <workflows-dir> [--extra-reusable name.yml ...]
 
 Exits 0 when clean, 1 when any violation is found (annotated for GitHub Actions), and 1
-when <workflows-dir> is missing, a symlink or not a directory: there is always a real one
-where lint.yml runs this, so anything else fails closed.
+when <workflows-dir> is missing, not a directory, a symlink, or reached through one (a
+symlinked .github, say): there is always a real one where lint.yml runs this, so anything
+else fails closed.
 """
 
 from __future__ import annotations
@@ -163,6 +164,20 @@ def check_dir(workflows_dir: Path, reusables: frozenset[str]) -> list[str]:
     return violations
 
 
+def first_symlink(path: Path) -> Path | None:
+    """The first component of `path`, as given, that is a symlink, or None.
+
+    Only the components the caller named are checked, so a relative path is not
+    judged by where the working directory itself sits.
+    """
+    current = Path(path.anchor)
+    for part in path.parts[1:] if path.anchor else path.parts:
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workflows_dir", type=Path)
@@ -175,13 +190,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     workflows = args.workflows_dir
-    if workflows.is_symlink() or not workflows.is_dir():
+    symlink = first_symlink(workflows)
+    if symlink is not None or not workflows.is_dir():
         # Fail closed. lint.yml runs this from a workflow in the caller's own
         # .github/workflows, so a real directory is always there. Reporting
-        # "nothing to check" for a missing one, a symlink or a file would pass
-        # the job without checking anything.
-        if workflows.is_symlink():
+        # "nothing to check" for a missing one or a file, or checking whatever
+        # a symlink at any level of the path leads to, would pass the job
+        # without checking the caller's workflows.
+        if symlink == workflows:
             kind = "a symlink"
+        elif symlink is not None:
+            kind = f"reached through the symlink {symlink}"
         elif workflows.exists():
             kind = "not a directory"
         else:
