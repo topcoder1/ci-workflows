@@ -8,10 +8,11 @@ name: Verifier on high-risk paths (reusable)
 #   - skipped (no high-risk paths in diff): conclusion=success, body="skipped"
 #   - matched + verifier dispatched + verdict=PASS + non-empty transcript: success
 #   - matched + verifier failed OR verdict=FAIL OR transcript empty/short: failure
-#   - a step fails before any result is posted (SHA check, checkout, submodule
-#     step, evidence steps, redaction, upload, or a post itself): failure,
-#     title "Verifier did not finish", posted by the job's last step. A run
-#     cancelled by a newer run of the same PR posts nothing here.
+#   - any step fails before a result is posted (computing the diff, a
+#     checkout, classification, the evidence steps, redaction, upload, or a
+#     post itself): failure, title "Verifier did not finish", posted by the
+#     job's last step. A run cancelled by a newer run of the same PR posts
+#     nothing here.
 #
 # Evidence-capture mechanic: the agent is asked to return STRUCTURED JSON
 # (via claude-code-action's `--json-schema` mode), and the workflow extracts
@@ -736,28 +737,29 @@ jobs:
 
       # === FAILURE PATH (a step failed before a result was posted) ===
 
-      # Both post steps above run on the implicit success(). A step that fails
-      # before them (the SHA check, checkout, submodule step, evidence steps,
-      # redaction, upload), or a post that itself fails, leaves the required
-      # check uncreated, and branch protection waits at "Expected — Waiting for
+      # Both post steps above run on the implicit success(). Any step that
+      # fails before them (computing the diff, which is where real runs have
+      # failed, a checkout, classification, the evidence steps, redaction,
+      # upload), or a post that itself fails, leaves the required check
+      # uncreated, and branch protection waits at "Expected — Waiting for
       # status to be reported" instead of showing a failure. This step posts
       # the check as a failure in that case. Fixed text only: nothing from the
       # PR reaches the call, and it never posts a success.
       #
-      # `failure() && !cancelled()`, not `always()` or `cancelled()`: a run
-      # that a newer run of the same PR cancels (the concurrency group above)
-      # must post nothing, or its failure could land after the newer run's
-      # result on the same head SHA. The status functions are not mutually
-      # exclusive, so a run that failed a step and was then cancelled can
-      # still see `failure()` true; `!cancelled()` rules that run out too.
-      # The model step's continue-on-error keeps its own
+      # `failure()`, not `always()` or `cancelled()`: a run that a newer run
+      # of the same PR cancels (the concurrency group above) must post
+      # nothing, or its failure could land after the newer run's result on
+      # the same head SHA. A cancel sets the job's status to cancelled, and
+      # `failure()` reads that same status, so a run that failed a step and
+      # was then cancelled posts nothing either. The model step's
+      # continue-on-error keeps its own
       # failure out of `failure()`; "Post check-run — verifier result"
       # reports that one, and the model step's own timeout, below the job's,
       # makes a hung model one of those failures. A step that hangs past the
       # job's timeout is cancelled with the job and still posts nothing.
       # Pinned by selftest/test_verifier_failure_result.py.
       - name: Post check-run — verifier did not finish
-        if: failure() && !cancelled()
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

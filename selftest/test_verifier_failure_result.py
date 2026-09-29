@@ -4,18 +4,21 @@ finish, not left waiting.
 verifier-on-high-risk.yml posts the check-run `verifier / evidence-bound`, which
 callers make a required check, from two steps that run on GitHub's implicit
 success(): "Post check-run — skipped" and "Post check-run — verifier result".
-A step that fails before them (the SHA check, checkout, the submodule step,
-evidence materialization, the transcript check, redaction, upload), or a post
-that itself fails, creates no check-run. Branch protection then sits at
+Any step that fails before them (computing the diff, a checkout,
+classification, evidence materialization, the transcript check, redaction,
+upload), or a post that itself fails, creates no check-run. Branch protection then sits at
 "Expected — Waiting for status to be reported" instead of showing a failure.
 The job's last step, "Post check-run — verifier did not finish", posts the
 check as a failure in those runs.
 
-1. Structure: the step exists once, is the last step of the job and runs on
-   exactly `failure() && !cancelled()`. Not `always()` or `cancelled()`, and not
-   `failure()` alone, since the status functions are not mutually exclusive: a
-   run that a newer run of the same PR cancels must not post a failure that
-   lands after the newer run's result on the same head SHA. Every step that posts a check-run posts
+1. Structure: the step exists once, is the last step of the job, runs on
+   exactly `failure()` and has only the keys name, if, env and run. Not
+   `always()` or `cancelled()`: a run that a newer run of the same PR cancels
+   must not post a failure that lands after the newer run's result on the same
+   head SHA, and a cancel sets the job status that `failure()` reads to
+   cancelled. Only the model step continues on error: that is what keeps its
+   failure for the result step, and any other step doing so would skip this
+   one. Every step that posts a check-run posts
    the name hardcoded here (not read from the workflow) and takes its token,
    head SHA and repository from the same expressions. The step's script says
    `conclusion=failure` and never `success`, and nothing a PR controls reaches
@@ -113,6 +116,11 @@ def posted_names(script):
 # Each check returns what is wrong, one line per problem; empty when it is right.
 
 
+# The failure step's keys: nothing that changes where or how its script runs.
+STEP_KEYS = {"name", "if", "env", "run"}
+MODEL_STEP = "Run verifier (claude-code-action)"
+
+
 def placement_problems(text):
     steps = steps_of(text)
     found = named(steps, STEP)
@@ -121,9 +129,16 @@ def placement_problems(text):
     problems = []
     if steps[-1] is not found[0]:
         problems.append(f"{STEP!r} is not the last step of job {JOB!r}")
-    if found[0].get("if") != "failure() && !cancelled()":
+    if found[0].get("if") != "failure()":
+        problems.append(f"its condition is {found[0].get('if')!r}, not 'failure()'")
+    if set(found[0]) != STEP_KEYS:
+        problems.append(f"its keys are {sorted(found[0])}, not {sorted(STEP_KEYS)}")
+    continuing = [
+        step.get("name") for step in steps if step.get("continue-on-error") is not None
+    ]
+    if continuing != [MODEL_STEP]:
         problems.append(
-            f"its condition is {found[0].get('if')!r}, not 'failure() && !cancelled()'"
+            f"steps with continue-on-error are {continuing}, not the model step"
         )
     return problems
 
@@ -180,7 +195,7 @@ def input_problems(text):
     return problems
 
 
-def test_the_step_is_the_jobs_last_and_runs_only_on_an_uncancelled_failure():
+def test_the_step_is_the_jobs_last_and_runs_on_exactly_failure():
     assert placement_problems(SHIPPED) == []
 
 
@@ -314,26 +329,56 @@ head_from_github_sha = in_step(swap("github.event.pull_request.head.sha", "githu
 # the problem that check must report)
 MUTANTS = {
     "condition always()": (
-        in_step(swap("if: failure() && !cancelled()", "if: always()")),
+        in_step(swap("if: failure()", "if: always()")),
         placement_problems,
         "'always()'",
     ),
     "condition cancelled()": (
-        in_step(swap("if: failure() && !cancelled()", "if: cancelled()")),
+        in_step(swap("if: failure()", "if: cancelled()")),
         placement_problems,
         "'cancelled()'",
     ),
-    "condition failure() alone": (
-        in_step(swap("if: failure() && !cancelled()", "if: failure()")),
-        placement_problems,
-        "'failure()'",
-    ),
     "no condition": (
-        in_step(swap("        if: failure() && !cancelled()\n", "")),
+        in_step(swap("        if: failure()\n", "")),
         placement_problems,
         "None",
     ),
     "a step after it": (add_a_step_after_it, placement_problems, "not the last step"),
+    "a working directory on the step": (
+        in_step(
+            swap(
+                "        if: failure()\n",
+                "        if: failure()\n        working-directory: x\n",
+            )
+        ),
+        placement_problems,
+        "its keys are",
+    ),
+    "a shell on the step": (
+        in_step(
+            swap(
+                "        if: failure()\n", "        if: failure()\n        shell: sh\n"
+            )
+        ),
+        placement_problems,
+        "its keys are",
+    ),
+    "the result post continues on error": (
+        swap(
+            "      - name: Post check-run — verifier result\n",
+            "      - name: Post check-run — verifier result\n        continue-on-error: true\n",
+        ),
+        placement_problems,
+        "steps with continue-on-error",
+    ),
+    "the upload continues on error": (
+        swap(
+            "      - name: Upload evidence artifact\n",
+            "      - name: Upload evidence artifact\n        continue-on-error: true\n",
+        ),
+        placement_problems,
+        "steps with continue-on-error",
+    ),
     "moved before the result step": (
         move_before_the_result_step,
         placement_problems,
@@ -435,13 +480,14 @@ def test_a_mutated_script_fails_the_behavior_check(mutant, tmp_path):
 
 # --- The model step times out before the job does ---------------------------
 
-MODEL_STEP = "Run verifier (claude-code-action)"
 # The job's timeout clock starts before the model step's does, so beyond the
 # model step's timeout it must cover the setup before that step (checkouts,
 # classification, the prompt) and the steps after it that report its failure
 # (evidence, redaction, upload, the result post).
 SETUP_BUDGET = 5
 REPORTING_HEADROOM = 3
+# Real model steps take up to about 2 minutes; the cap must sit well above.
+MIN_MODEL_MINUTES = 5
 
 
 def model_timeout_problems(text):
@@ -454,6 +500,8 @@ def model_timeout_problems(text):
     step_minutes, job_minutes = model.get("timeout-minutes"), job.get("timeout-minutes")
     if not isinstance(step_minutes, int) or not isinstance(job_minutes, int):
         problems.append("the model step or the job has no timeout-minutes")
+    elif step_minutes < MIN_MODEL_MINUTES:
+        problems.append("the model step's timeout is too short for a real run")
     elif job_minutes - step_minutes < SETUP_BUDGET + REPORTING_HEADROOM:
         problems.append("the model step's timeout leaves the job too little time")
     return problems
@@ -463,31 +511,41 @@ def test_a_hung_model_fails_its_step_before_the_job_times_out():
     assert model_timeout_problems(WORKFLOW.read_text()) == []
 
 
-@pytest.mark.parametrize(
-    "edit",
-    [
-        lambda text: text.replace("        timeout-minutes: 10\n", "", 1),
-        lambda text: text.replace(
-            "        timeout-minutes: 10\n", "        timeout-minutes: 20\n", 1
-        ),
-        lambda text: text.replace(
-            "    timeout-minutes: 20\n", "    timeout-minutes: 15\n", 1
-        ),
-        lambda text: text.replace(
+TIMEOUT_MUTANTS = {
+    "no step timeout": (
+        ("        timeout-minutes: 10\n", ""),
+        "has no timeout-minutes",
+    ),
+    "step timeout equals the job's": (
+        ("        timeout-minutes: 10\n", "        timeout-minutes: 20\n"),
+        "leaves the job too little time",
+    ),
+    "job timeout without the setup budget": (
+        ("    timeout-minutes: 20\n", "    timeout-minutes: 15\n"),
+        "leaves the job too little time",
+    ),
+    "step timeout of 0": (
+        ("        timeout-minutes: 10\n", "        timeout-minutes: 0\n"),
+        "too short for a real run",
+    ),
+    "step timeout of 1": (
+        ("        timeout-minutes: 10\n", "        timeout-minutes: 1\n"),
+        "too short for a real run",
+    ),
+    "no continue-on-error": (
+        (
             "        continue-on-error: true # keep the workflow running",
             "        continue-on-error: false # keep the workflow running",
-            1,
         ),
-    ],
-    ids=[
-        "no-step-timeout",
-        "step-timeout-equals-job",
-        "job-timeout-without-setup-budget",
-        "no-continue-on-error",
-    ],
-)
-def test_a_mutated_timeout_fails_the_check(edit):
+        "does not continue on error",
+    ),
+}
+
+
+@pytest.mark.parametrize("mutant", sorted(TIMEOUT_MUTANTS))
+def test_a_mutated_timeout_fails_the_check_for_what_it_broke(mutant):
+    (old, new), expected = TIMEOUT_MUTANTS[mutant]
     text = WORKFLOW.read_text()
-    mutated = edit(text)
-    assert mutated != text
-    assert model_timeout_problems(mutated) != []
+    assert text.count(old) == 1
+    problems = model_timeout_problems(text.replace(old, new))
+    assert any(expected in problem for problem in problems), problems
