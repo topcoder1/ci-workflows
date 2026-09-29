@@ -36,23 +36,43 @@ done
 # No pattern at all matches nothing: an error, not a verdict.
 grep -q . "$PATTERNS" || { echo "no patterns in $PATTERNS" >&2; exit 2; }
 
+# Nothing below may fail in a way that reads as "no match". Both files are
+# opened with exec, whose failure trips the ERR trap; a redirection on a loop
+# can fail without it. Each grep reads the whole paths file, with no
+# redirection of its own, and prints its exit status inside its command
+# substitution: a substitution that cannot run returns no status, not 1.
+NL=$'\n'
+first=()  # first[n]: the first pattern, in file order, matching line n of PATHS
+exec 3< "$PATTERNS"
+while IFS= read -r -u 3 pat; do
+  [[ -z "$pat" ]] && continue
+  out="$(grep -anE -e "$pat" -- "$PATHS"; echo "status=$?")"
+  status="${out##*status=}"
+  [[ "$status" == 1 ]] && continue
+  if [[ "$status" != 0 ]]; then
+    echo "pattern failed (grep status ${status:-missing}): $pat" >&2
+    exit 2
+  fi
+  hits="${out%status=*}"
+  [[ "$hits" == *"$NL" ]] || { echo "unexpected grep output for: $pat" >&2; exit 2; }
+  while [[ -n "$hits" ]]; do
+    n="${hits%%:*}"
+    hits="${hits#*"$NL"}"
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "unexpected grep output for: $pat" >&2; exit 2; }
+    [[ -n "${first[n]:-}" ]] || first[n]="$pat"
+  done
+done
+exec 3<&-
+
 matched=0
-while IFS= read -r path; do
-  [[ -z "$path" ]] && continue
-  while IFS= read -r pat; do
-    [[ -z "$pat" ]] && continue
-    # grep exits 1 for no match and 2 for a pattern it cannot use.
-    status=0
-    grep -Eq -- "$pat" <<< "$path" || status=$?
-    if [[ "$status" -eq 0 ]]; then
-      printf '%s\t(matched: %s)\n' "$path" "$pat"
-      matched=1
-      break  # one match per path is enough
-    elif [[ "$status" -ne 1 ]]; then
-      echo "pattern failed (grep exit $status): $pat" >&2
-      exit 2
-    fi
-  done < "$PATTERNS"
-done < "$PATHS"
+n=0
+exec 4< "$PATHS"
+while IFS= read -r -u 4 path; do
+  n=$((n + 1))
+  [[ -z "$path" || -z "${first[n]:-}" ]] && continue
+  printf '%s\t(matched: %s)\n' "$path" "${first[n]}"
+  matched=1
+done
+exec 4<&-
 
 [[ "$matched" -eq 1 ]] && exit 0 || exit 1

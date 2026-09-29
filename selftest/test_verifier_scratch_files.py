@@ -296,3 +296,28 @@ def test_the_classifier_exits_2_when_it_fails(tmp_path, patterns, paths, stdout)
     else:
         result = classifier(tmp_path, patterns, paths)
     assert result.returncode == 2, result.stderr
+
+
+def test_the_classifier_never_reads_a_failure_to_run_as_no_match(tmp_path):
+    # With few file descriptors left, what the classifier needs before grep
+    # can answer (a redirection, a pipe, a command substitution) fails. For a
+    # path that matches, every run must report the match (exit 0) or fail
+    # (exit 2, or bash's own abort): never exit 1, which skips the verifier.
+    (tmp_path / "patterns.txt").write_text("^src/auth/\n")
+    (tmp_path / "paths.txt").write_text(f"{LOW_RISK}\n{HIGH_RISK}\n")
+    command = f'exec bash "{CLASSIFIER}" --patterns patterns.txt --paths paths.txt'
+    seen = {}
+    for limit in range(3, 25):
+        result = subprocess.run(
+            ["bash", "-c", f"ulimit -n {limit} && {command}"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        seen[limit] = result.returncode
+        if result.returncode == 0:
+            assert result.stdout == f"{HIGH_RISK}\t(matched: ^src/auth/)\n", limit
+        assert result.returncode != 1, (limit, result.stderr)
+    # Control: the limits reach both a clean run and one that cannot finish.
+    codes = set(seen.values())
+    assert 0 in codes and codes - {0}, seen
