@@ -11,8 +11,9 @@
 # clean comments. Without this wait the window would then be anchored on the
 # push alone, and a review that finishes after minute 20 (a slow model, a
 # queued runner) would post its finding after the arm: the wxa_vpn#1392 hole.
-# So the gate now also requires every review check run on the head commit to
-# have COMPLETED before it consults the detector.
+# So the gate now also requires the newest attempt of each matching review
+# check (per app and name) on the head commit to have completed with success,
+# neutral or skipped before it consults the detector.
 #
 # Cases:
 #   R1  THE HOLE (AC2.3): the window has passed but a review is still running

@@ -1526,13 +1526,14 @@ jobs:
       #      inherit this run's arm. Chronic chatter is bounded by a 3x
       #      cap, which declines + disarms (fail toward manual).
       #      Since WS2 step 1 (2026-09-29) it also waits, under the same
-      #      cap, until every review check run on the head commit has
-      #      completed (review_check_names; see review_state), so a review
-      #      that has not spoken yet cannot be overtaken by the arm even
-      #      when no clean comment stretches the window. The cap bounds the
-      #      waiting, not the clearing: a review that completes during the
-      #      poll that crosses the cap still clears on that poll, as the
-      #      window always has.
+      #      cap, until the newest attempt of each matching review check
+      #      (per app and name) on the head commit has completed with
+      #      success, neutral or skipped (review_check_names; see
+      #      review_state), so a review that has not spoken yet cannot be
+      #      overtaken by the arm even when no clean comment stretches the
+      #      window. The cap bounds the waiting, not the clearing: a review
+      #      that completes during the poll that crosses the cap still
+      #      clears on that poll, as the window always has.
       #
       #   2. CONSULT — run the unaddressed-findings check (vendored twin
       #      of dotclaude's bb-unaddressed-findings.sh, fetched from this
@@ -1699,8 +1700,8 @@ jobs:
           # run on the head commit has COMPLETED with success, neutral or
           # skipped. A lane posts its comment before its job completes, so
           # the detector then sees it. A failed, cancelled or timed-out
-          # attempt has reviewed nothing, so it waits for a re-run, up to
-          # the cap (wxa_webcat#1695: a failed Claude Review re-run posted
+          # attempt has no accepted conclusion (it may or may not have
+          # posted findings), so it waits for a re-run, up to the cap (wxa_webcat#1695: a failed Claude Review re-run posted
           # its finding 14 s before the PR would have merged). Runs are
           # judged per app and name, so another app's same-named check
           # cannot hide a running review. A body that is empty or not the
