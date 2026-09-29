@@ -36,6 +36,72 @@ jobs:
         with:
           fetch-depth: ${{ inputs.checkout_depth }}
 
+      # git leaves a submodule's pointer change out of `git log -p` (and out
+      # of every other diff it prints) when the .gitmodules it reads sets
+      # `submodule.<name>.ignore`, and that file is the PR's. claude-code-action
+      # restores .gitmodules from the base before the model starts, but where
+      # the base has none, git falls back to the PR's copy in the index.
+      # `diff.ignoreSubmodules` cannot override .gitmodules; a
+      # `submodule.<name>.ignore` setting in any config scope does. So this
+      # step writes `ignore = none` into .git/config, which no PR controls,
+      # for every name that has an ignore key in the base's, the PR head's or
+      # the merge commit's .gitmodules. It is config, not environment,
+      # because git reads .git/config whatever environment the model's shell
+      # is given. Nothing is written when no .gitmodules sets ignore. The
+      # names are PR input: one outside [A-Za-z0-9._/-]{1,255}, more than 256
+      # of them, a .gitmodules git cannot parse, or a base or head commit
+      # missing from the checkout (checkout_depth must keep both) fails the
+      # step. codex-review.yml runs the same script; both copies are pinned
+      # by selftest/test_review_lanes_submodule_ignore.py.
+      - name: Keep submodule changes visible to the model's git
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          tmp="${RUNNER_TEMP:?RUNNER_TEMP is not set}"
+          name_re='^[A-Za-z0-9._/-]{1,255}$'
+          : > "$tmp/gitmodules-ignore-names"
+          for rev in "$BASE_SHA" "$HEAD_SHA" HEAD; do
+            if ! git cat-file -e "${rev}^{commit}"; then
+              echo "::error::commit ${rev} is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the PR's base and head commits (fetch-depth 0)."
+              exit 1
+            fi
+            blob=$(git rev-parse --verify --quiet "${rev}:.gitmodules") || continue
+            if ! git config -z --blob "$blob" --name-only --list > "$tmp/gitmodules-keys"; then
+              echo "::error::git cannot parse the .gitmodules at ${rev}. Failing closed: an ignore setting in it could hide a submodule change from the model."
+              exit 1
+            fi
+            while IFS= read -r -d '' key; do
+              case $key in
+                submodule.*.ignore) ;;
+                *) continue ;;
+              esac
+              name=${key#submodule.}
+              name=${name%.ignore}
+              if ! [[ $name =~ $name_re ]]; then
+                echo "::error::the .gitmodules at ${rev} sets ignore for a submodule whose name is not 1-255 characters of A-Z a-z 0-9 . _ / -. Failing closed: git would hide that submodule's changes from the model, and this step passes no such name to git config."
+                exit 1
+              fi
+              printf '%s\n' "$name" >> "$tmp/gitmodules-ignore-names"
+            done < "$tmp/gitmodules-keys"
+          done
+          sort -u "$tmp/gitmodules-ignore-names" > "$tmp/gitmodules-ignore-names.sorted"
+          count=$(wc -l < "$tmp/gitmodules-ignore-names.sorted" | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "No .gitmodules sets ignore for a submodule; .git/config is left as it is."
+            exit 0
+          fi
+          if [ "$count" -gt 256 ]; then
+            echo "::error::${count} submodules have an ignore setting, more than this step's cap of 256. Failing closed."
+            exit 1
+          fi
+          while IFS= read -r name; do
+            git config --local "submodule.${name}.ignore" none
+            echo "submodule.${name}.ignore=none"
+          done < "$tmp/gitmodules-ignore-names.sorted"
+
       - name: Adversarial pass
         # Pinned to v1.0.112 (2026-05-04) — see claude-review.yml for context
         # (ci-workflows#37: v1.0.113/.114 regression breaks the setup step).
