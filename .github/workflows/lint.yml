@@ -119,7 +119,7 @@ on:
         type: boolean
         default: true
       prettier_changed_only:
-        description: "On PR events, check only files added/modified/renamed in the PR diff (intersected with markdown_glob). Push events always scan the full glob. Default true. Requires `pull-requests: read` on the caller's GITHUB_TOKEN; gracefully falls back to full-glob mode if the API call fails."
+        description: "On PR events, check only files added/modified/renamed in the PR diff (intersected with markdown_glob). Push events always scan the full glob. Default true. Whatever this is set to, the caller must grant `pull-requests: read`: the prettier job requests it, so without it every run fails at startup, even with `run_prettier: false`. If listing the PR's files fails after 3 attempts, the prettier check is skipped for that run rather than widened to the full glob."
         required: false
         type: boolean
         default: true
@@ -193,14 +193,17 @@ on:
 permissions:
   contents: read
   # `pull-requests: read` is requested ONLY by the prettier job (job-level
-  # block below) so callers that don't grant it still start the workflow.
-  # Workflow-level perms here act as a hard ceiling — if a caller grants
-  # only `contents: read`, declaring `pull-requests: read` here causes
-  # GitHub to refuse to start the run with `startup_failure`, even when
-  # the prettier job itself was supposed to gracefully fall back. That
-  # ceiling-vs-job-request distinction was the bug that broke every
-  # fleet caller after #29 landed (2026-05-03 23:54 UTC). Keep this list
-  # minimal; ask for extra scopes only inside the job that needs them.
+  # block below), so the other jobs' tokens never carry it. That does NOT
+  # spare callers from granting it: GitHub treats a called workflow's
+  # permission requests, workflow-level AND job-level, as a hard ceiling
+  # against the caller's grant, and checks every job's request at startup
+  # whatever its `if:` says. A caller that grants only `contents: read`
+  # gets `startup_failure`, and its required checks hang at "Expected —
+  # Waiting for status to be reported", even with `run_prettier: false`.
+  # #29 (2026-05-03 23:54 UTC) requested the scope at workflow level and
+  # broke every such caller; #31 moved it to job level, which did not
+  # unbreak them. Callers had to grant it. Keep this list minimal; ask
+  # for extra scopes only inside the job that needs them.
 
 jobs:
   actionlint:
@@ -352,16 +355,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Used by `gh api .../pulls/N/files` in changed-only mode. If the
-      # caller's GITHUB_TOKEN doesn't grant pull-requests, this job-level
-      # request is silently capped — the gh api call 403s and the
-      # "Resolve prettier targets" step retries, warns, and skips the
-      # prettier check for that run (sets mode=none — a scoping failure
-      # is never widened to a full-tree check, which would go red on
-      # pre-existing drift in files the PR never touched). The workflow still
-      # starts because this scope is requested at job level, not workflow
-      # level — workflow-level perms are a hard ceiling that cause
-      # startup_failure if exceeded by the caller's grant.
+      # Used by `gh api .../pulls/N/files` in changed-only mode. Every
+      # caller must grant it: a job-level request is a hard ceiling too, so
+      # a caller whose GITHUB_TOKEN lacks it gets startup_failure (see the
+      # workflow-level `permissions:` comment). If the listing itself fails
+      # (an API error), "Resolve prettier targets" retries, warns, and
+      # skips the prettier check for that run (sets mode=none — a scoping
+      # failure is never widened to a full-tree check, which would go red
+      # on pre-existing drift in files the PR never touched).
       pull-requests: read
     steps:
       - uses: actions/checkout@v7
@@ -620,7 +621,7 @@ jobs:
             if [ "$attempt" -lt 3 ]; then sleep "$(( attempt * 2 ))"; fi
           done
           if [ "$LISTED" -ne 1 ]; then
-            echo "::warning::Could not list PR files after 3 attempts (transient API error, or the caller's GITHUB_TOKEN lacks 'pull-requests: read'). Skipping prettier for this run — refusing to widen scope to the full tree."
+            echo "::warning::Could not list PR files after 3 attempts (transient API error). Skipping prettier for this run — refusing to widen scope to the full tree."
             echo "mode=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
