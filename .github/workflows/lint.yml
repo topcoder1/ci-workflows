@@ -313,15 +313,13 @@ jobs:
       # over: it would miss the PR's changes, and on the PR that first adds the checker
       # @main does not have the file at all -- the job died with "No such file or
       # directory". So: use the local copy here, fetch @main everywhere else.
-      # ci-workflows is public, so a consumer's default GITHUB_TOKEN can check it out.
-      - name: Check out the checker
-        if: ${{ github.repository != 'topcoder1/ci-workflows' }}
-        uses: actions/checkout@v7
-        with:
-          repository: topcoder1/ci-workflows
-          ref: main
-          path: .ci-workflows-checker
-          persist-credentials: false
+      # ci-workflows is public, so a consumer's default GITHUB_TOKEN can read it.
+      #
+      # The fetched copy goes to a fresh directory under $RUNNER_TEMP, never into the
+      # workspace: no path in the caller's checkout decides where the checker lands, and
+      # the checkout holds nothing but the caller's own files while the check reads them.
+      # The checker imports only the standard library and pyyaml, so the one file is
+      # all it needs. Pinned by selftest/test_lint_draft_gate_job.py.
 
       # Run the install from $RUNNER_TEMP, NOT the checkout. `python3 -m X`
       # prepends the CWD to sys.path (sys.path[0]), so with the checkout as
@@ -346,11 +344,22 @@ jobs:
       - name: Check draft-gate triggers
         env:
           IS_SELF: ${{ github.repository == 'topcoder1/ci-workflows' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           if [ "$IS_SELF" = "true" ]; then
             checker=selftest/check_draft_gate_triggers.py
           else
-            checker=.ci-workflows-checker/selftest/check_draft_gate_triggers.py
+            dir=$(mktemp -d "${RUNNER_TEMP:?RUNNER_TEMP is not set}/draft-gate.XXXXXX")
+            checker="$dir/check_draft_gate_triggers.py"
+            # ?ref=main in the URL keeps this a GET pinned to main, the source this
+            # reusable documents (@main); a -f ref=main field would make it a POST.
+            gh api "repos/topcoder1/ci-workflows/contents/selftest/check_draft_gate_triggers.py?ref=main" \
+              --jq .content | base64 -d > "$checker"
+            if [ ! -s "$checker" ]; then
+              echo "::error::fetched an empty draft-gate checker from topcoder1/ci-workflows; refusing to report the check as passed."
+              exit 1
+            fi
           fi
           python3 "$checker" .github/workflows
         shell: bash

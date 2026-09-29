@@ -36,7 +36,11 @@ see it. An explicit `types:` list is a DENYLIST BY OMISSION, and GitHub's defaul
 Usage:
     check_draft_gate_triggers.py <workflows-dir> [--extra-reusable name.yml ...]
 
-Exits 0 when clean, 1 when any violation is found (annotated for GitHub Actions).
+Exits 0 when clean, 1 when any violation is found (annotated for GitHub Actions), and 1
+when <workflows-dir> is missing, not a directory, a symlink, or reached through one (a
+symlinked .github, say): there is always a real one where lint.yml runs this, so anything
+else fails closed. Pass a relative path, as lint.yml does, or a resolved one: an absolute
+path through a symlinked directory (macOS's /tmp or /var, say) is rejected too.
 """
 
 from __future__ import annotations
@@ -161,6 +165,20 @@ def check_dir(workflows_dir: Path, reusables: frozenset[str]) -> list[str]:
     return violations
 
 
+def first_symlink(path: Path) -> Path | None:
+    """The shortest prefix of `path`, as given, that is a symlink, or None.
+
+    Only the components the caller named are checked, so a relative path is not
+    judged by where the working directory itself sits.
+    """
+    current = Path(path.anchor)
+    for part in path.parts[1:] if path.anchor else path.parts:
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workflows_dir", type=Path)
@@ -172,10 +190,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.workflows_dir.is_dir():
-        # Not an error: plenty of repos have no workflows dir.
-        print(f"no workflows directory at {args.workflows_dir}; nothing to check")
-        return 0
+    workflows = args.workflows_dir
+    symlink = first_symlink(workflows)
+    if symlink is not None or not workflows.is_dir():
+        # Fail closed. lint.yml runs this from a workflow in the caller's own
+        # .github/workflows, so a real directory is always there. Reporting
+        # "nothing to check" for a missing one or a file, or checking whatever
+        # a symlink at any level of the path leads to, would pass the job
+        # without checking the caller's workflows.
+        if symlink == workflows:
+            kind = "a symlink"
+        elif symlink is not None:
+            kind = f"reached through the symlink {symlink}"
+        elif workflows.exists():
+            kind = "not a directory"
+        else:
+            kind = "missing"
+        print(
+            f"::error::the workflows directory {workflows} is {kind}, so the "
+            f"draft-gate check has nothing it can check; failing closed"
+        )
+        return 1
 
     reusables = DRAFT_GATED_REUSABLES | set(args.extra_reusable)
     violations = check_dir(args.workflows_dir, reusables)
