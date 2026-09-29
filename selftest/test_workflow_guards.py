@@ -59,6 +59,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_lint_prettier_check_untrusted_head.sh",
     "selftest/test_pr_classify_rename_sources.sh",
     "selftest/test_pr_files_listing.sh",
+    "selftest/test_prettier_glob_brace_expansion.sh",
     "selftest/test_prettier_scope_failsafe.sh",
     "selftest/test_prettier_symlink_filter.sh",
     "selftest/test_prettier_untrusted_head_config.sh",

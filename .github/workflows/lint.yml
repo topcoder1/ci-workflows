@@ -634,20 +634,67 @@ jobs:
 
           # Expand the prettier glob in the working tree.
           # `compgen -G` does pathname expansion only (incl. globstar `**`)
-          # but NOT brace expansion. Default glob is now `**/*.{md,yml,yaml,json}`,
-          # so split braced alternatives into individual globs first.
+          # but NOT brace expansion, so expand_braces first turns the glob's
+          # `{a,b}` alternatives into plain globs. The function is identical
+          # in prettier-autofix.yml, drift-checked by
+          # selftest/test_prettier_glob_brace_expansion.sh.
           shopt -s globstar nullglob
           expand_braces() {
-            local pat="$1"
-            if [[ "$pat" == *\{*\}* ]]; then
-              local prefix="${pat%%\{*}"
-              local suffix="${pat##*\}}"
-              local middle="${pat#*\{}"; middle="${middle%%\}*}"
-              local IFS=,
-              for x in $middle; do echo "${prefix}${x}${suffix}"; done
-            else
-              echo "$pat"
+            # Prints the glob's brace expansion, one pattern per line, in
+            # bash's order: any number of comma groups, nested groups, empty
+            # alternatives, and (as bash drops empty words) no empty results.
+            # A brace that opens no well-formed comma group (no top-level
+            # comma, or no closing brace) stays literal. That matches bash for
+            # any glob whose braces all form comma groups; bash's handling of
+            # other stray braces is not reproduced, nor are {1..3} sequences.
+            # No eval (a PR can edit its caller's markdown_glob), and every
+            # expansion is quoted, so no alternative is pathname-expanded
+            # before compgen sees it.
+            local pat="$1" len=0 i=0 j=0 depth=0 c="" open=-1 close=-1 comma=0
+            len=${#pat}
+            while [ "$i" -lt "$len" ]; do
+              if [ "${pat:$i:1}" = "{" ]; then
+                depth=0; comma=0; j=$i
+                while [ "$j" -lt "$len" ]; do
+                  c="${pat:$j:1}"
+                  if [ "$c" = "{" ]; then
+                    depth=$((depth + 1))
+                  elif [ "$c" = "}" ]; then
+                    depth=$((depth - 1))
+                    if [ "$depth" -eq 0 ]; then break; fi
+                  elif [ "$c" = "," ] && [ "$depth" -eq 1 ]; then
+                    comma=1
+                  fi
+                  j=$((j + 1))
+                done
+                if [ "$j" -lt "$len" ] && [ "$comma" -eq 1 ]; then
+                  open=$i; close=$j; break
+                fi
+              fi
+              i=$((i + 1))
+            done
+            if [ "$open" -lt 0 ]; then
+              if [ -n "$pat" ]; then printf '%s\n' "$pat"; fi
+              return 0
             fi
+            local prefix="${pat:0:$open}" suffix="${pat:$((close + 1))}"
+            local body="${pat:$((open + 1)):$((close - open - 1))}" alt="" k=0
+            depth=0
+            while [ "$k" -le "${#body}" ]; do
+              c="${body:$k:1}"
+              if [ "$k" -eq "${#body}" ] || { [ "$c" = "," ] && [ "$depth" -eq 0 ]; }; then
+                expand_braces "${prefix}${alt}${suffix}"
+                alt=""
+              else
+                if [ "$c" = "{" ]; then
+                  depth=$((depth + 1))
+                elif [ "$c" = "}" ]; then
+                  depth=$((depth - 1))
+                fi
+                alt="${alt}${c}"
+              fi
+              k=$((k + 1))
+            done
           }
           mapfile -t SUB_GLOBS < <(expand_braces "$GLOB")
           declare -A _SEEN=()
