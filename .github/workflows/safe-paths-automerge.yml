@@ -206,6 +206,7 @@ jobs:
           ^(docs/)?CODEOWNERS$
           ^\.github/CODEOWNERS$
           (^|/)\.gitattributes$
+          (^|/)\.gitmodules$
           ^infra/iam/.*
           ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
           ^infra/nginx.*

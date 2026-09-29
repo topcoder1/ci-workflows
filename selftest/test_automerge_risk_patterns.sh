@@ -45,6 +45,7 @@ patterns='^(.*/)?(auth|login|signin|signup|logout|session[s]?|oauth|oauth2|sso|j
 ^(docs/)?CODEOWNERS$
 ^\.github/CODEOWNERS$
 (^|/)\.gitattributes$
+(^|/)\.gitmodules$
 ^infra/iam/.*
 ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
 ^infra/nginx.*
@@ -119,13 +120,13 @@ done
 
 # --- Name-gated files: typo negative controls (2026-09-25) ---
 # The corpus proves this file's copy of the list gates compose files,
-# suffix-style Dockerfiles and CODEOWNERS. These controls run against the
-# SHIPPED patterns= block instead, read from claude-author-automerge.yml, so
-# narrowing those lines in both workflows (with this copy untouched) fails
-# here too. Each verdict must come from a line naming the file, and can FAIL:
-# misspell the name in a copy of the list, and every probe must then stop
-# matching. If one still matches, another pattern (^deploy/.*, say) is
-# carrying it. The probes are HARDCODED on purpose: a probe read back out of
+# suffix-style Dockerfiles, CODEOWNERS and .gitmodules. These controls run
+# against the SHIPPED patterns= block instead, read from
+# claude-author-automerge.yml, so narrowing those lines in both workflows
+# (with this copy untouched) fails here too. Each verdict must come from a
+# line naming the file, and can FAIL: misspell the name in a copy of the
+# list, and every probe must then stop matching. If one still matches,
+# another pattern (^deploy/.*, say) is carrying it. The probes are HARDCODED on purpose: a probe read back out of
 # the list under test agrees with that list no matter what it says.
 shipped=$(python3 - "$(dirname "$0")/../.github/workflows/claude-author-automerge.yml" <<'PY'
 import re, sys
@@ -184,6 +185,9 @@ typo_control compose cmopose 4 compose.yaml compose.yml compose.override.yaml \
 typo_control Dockerfile Dcokerfile 2 api.Dockerfile docker/proxy.Dockerfile \
   tests/.Dockerfile tests/images/api-prod.Dockerfile
 typo_control CODEOWNERS CDOEOWNERS 2 CODEOWNERS docs/CODEOWNERS
+typo_control gitmodules gitmdoules 1 .gitmodules sub/.gitmodules \
+  docs/.gitmodules tests/fixtures/.gitmodules \
+  vendor/github.com/example/lib/.gitmodules
 
 # The shipped list must still leave each near-miss alone, so WIDENING a
 # shipped line (a `.*` that crosses `/`, a dropped anchor) fails here too,
@@ -195,7 +199,9 @@ for p in docs/docker-compose-guide.md docs/compose.md composer.yaml recompose.ym
   tests/fixtures/invalid-docker-compose.yml \
   docs/api.Dockerfile.md tests/fixtures/not-a-Dockerfile \
   tests/regression/test_dockerfile_model_deps_pinned.py \
-  src/CODEOWNERS docs/team/CODEOWNERS docs/CODEOWNERS.md; do
+  src/CODEOWNERS docs/team/CODEOWNERS docs/CODEOWNERS.md \
+  docs/gitmodules.md .gitmodules.bak docs/examples/project.gitmodules \
+  tests/fixtures/_gitmodules tests/fixtures/gitmodules .gitmodules/README.md; do
   if matches_in "$shipped" "$p"; then
     echo "  ✗ $p (FAILED — the shipped list must NOT match this near-miss)"
     failed=$((failed + 1))

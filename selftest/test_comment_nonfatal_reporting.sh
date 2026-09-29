@@ -378,6 +378,7 @@ VERDICT: CLEAN'
     (
       PATH="${CODEX_PATH_OVERRIDE:-$T/bin}:$PATH" \
       CODEX_FIXTURES="$T/fixtures" \
+      CODEX_SCRIPTS="$PWD/.github/scripts" \
       GH_LOG="$T/ghlog" GH_COMMENT_FAIL="$comment_fail" \
       GH_TOKEN=stub PR=422 \
       bash "$T/codex_comment.sh"
