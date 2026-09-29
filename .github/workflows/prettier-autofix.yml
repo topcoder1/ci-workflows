@@ -6,8 +6,9 @@ name: Prettier Autofix
 #
 # Why a separate workflow vs folding write-mode into lint.yml:
 #   - lint.yml is intentionally check-only (read-only token, runs on every
-#     repo without elevated perms). Mixing write-mode would force every
-#     consumer to grant `contents: write` even if they don't want autofix.
+#     repo without elevated perms). Mixing write-mode in would force every
+#     consumer to provision and pass automerge_pat, the push credential,
+#     even if they don't want autofix.
 #   - This workflow is opt-in per repo via a sibling caller workflow.
 #
 # Why we require a PAT secret instead of GITHUB_TOKEN:
@@ -78,6 +79,8 @@ name: Prettier Autofix
 #   - Checkout uses `persist-credentials: false`; the PAT is supplied only to
 #     the single push via an inline http.extraheader, never written to
 #     .git/config where head-reachable code could read it.
+#   - The job's GITHUB_TOKEN is read-only (`contents: read`,
+#     `pull-requests: read`). Only the PAT can write, and only in the push.
 #   - The target list is passed after `--`, so a head file literally named
 #     `--plugin=x` cannot be reparsed as a prettier flag.
 #   Pinned by selftest/test_prettier_untrusted_head_config.sh. lint.yml's
@@ -155,9 +158,13 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.user.login != 'renovate[bot]'
     permissions:
-      # Needed to push the autofix commit. The PAT supplies the actual
-      # auth; declaring contents:write here just unblocks the runner.
-      contents: write
+      # Read-only token. Checkout needs `contents: read`. The autofix push
+      # authenticates with automerge_pat alone, through an inline
+      # http.extraheader, so GITHUB_TOKEN never needs write access here,
+      # and a read-only token limits what anything running over the
+      # untrusted head could do with it. Callers that still grant
+      # `contents: write` keep working: the grant is only the ceiling.
+      contents: read
       # Needed to call `gh api .../pulls/N/files` for the changed-files set.
       pull-requests: read
     steps:
