@@ -48,7 +48,10 @@ passes --ignore-submodules=none.
    binary file's does, and a matched file the PR removes, which the listing
    already covers, leave the prompt as it was. Negative control: that numstat
    without --ignore-submodules=none misses a kept submodule the PR's
-   .gitmodules ignores, whose old commit line the PR's bump deletes.
+   .gitmodules ignores, whose old commit line the PR's bump deletes. The note
+   names every such file, in the classifier's order, a file that becomes a
+   symlink included; and the step fails, writing no prompt, when the base ref
+   does not resolve or a matched path is outside the diff step's alphabet.
 """
 
 import os
@@ -96,6 +99,10 @@ class Gitlink(str):
     """A submodule commit recorded at a path (a mode 160000 entry)."""
 
 
+class Symlink(str):
+    """A symbolic link to the path it holds (a mode 120000 entry)."""
+
+
 def git_environment():
     environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     # No global or system config: diff.renames is git's own default, as on the
@@ -140,14 +147,18 @@ def bash(script, cwd, environment):
 
 
 def stage(repo, files):
-    """Stage `files`, each path mapped to its text, a Gitlink, or None to
-    delete it. Only these paths: a submodule has no work tree here, and
+    """Stage `files`, each path mapped to its text, a Gitlink, a Symlink, or
+    None to delete it. Only these paths: a submodule has no work tree here, and
     `git add -A` would stage it as deleted."""
     for path, content in files.items():
         if content is None:
             git(repo, "rm", "-q", "--cached", path)
             if (repo / path).is_file():
                 (repo / path).unlink()
+        elif isinstance(content, Symlink):
+            (repo / path).unlink(missing_ok=True)
+            (repo / path).symlink_to(content)
+            git(repo, "add", path)
         elif isinstance(content, Gitlink):
             git(
                 repo, "update-index", "--add", "--cacheinfo", f"160000,{content},{path}"
@@ -405,13 +416,15 @@ def model_git(repo, command):
     return result.stdout
 
 
-def render_prompt(checkout, matched, script=None):
+def render_prompt(checkout, *matched, script=None):
     """The verifier prompt as its shipped step, or `script`, renders it when
-    the classifier matched `matched`: in the PR checkout, as on the runner,
-    since the step runs git there."""
+    the classifier matched `matched`, in that order: in the PR checkout, as on
+    the runner, since the step runs git there."""
     repo, event = checkout
     document, step = find_step("prompt")
-    (repo / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
+    (repo / "matches.txt").write_text(
+        "".join(f"{path}\t(matched: fixture)\n" for path in matched)
+    )
     environment = {**git_environment(), **step_environment(document, step, event)}
     return bash(script or step["run"], repo, environment)
 
@@ -641,7 +654,7 @@ def test_without_the_flag_the_prs_gitmodules_hides_a_kept_submodules_deleted_lin
     _, step = find_step("prompt")
     (numstat,) = [line for line in step["run"].splitlines() if "--numstat" in line]
     unflagged = step["run"].replace(numstat, without_flag(numstat))
-    assert kept_note(render_prompt(submodule_bump, LINK, unflagged)) == ""
+    assert kept_note(render_prompt(submodule_bump, LINK, script=unflagged)) == ""
 
 
 def test_verifier_prompt_leaves_out_a_binary_file_the_pr_adds(tmp_path):
@@ -657,3 +670,70 @@ def test_verifier_prompt_leaves_out_a_binary_file_the_pr_adds(tmp_path):
     kept = pr_checkout(tmp_path / "kept", {key: "\x00key-1\n"}, {key: "\x00key-2\n"})
     assert model_git(kept[0], numstat) == f"-\t-\t{key}\n"
     assert kept_note(render_prompt(kept, key)) == note_naming(key)
+
+
+def test_verifier_prompt_names_every_kept_file_losing_lines_in_matched_order(
+    tmp_path,
+):
+    # Four matched files, in the classifier's order: two the PR keeps but
+    # deletes lines from, one it only adds to, one it removes.
+    login, policy, tokens = (
+        "src/auth/login.py",
+        "src/auth/policy.py",
+        "src/auth/tokens.py",
+    )
+    checkout = pr_checkout(
+        tmp_path,
+        {login: SOURCE, policy: SOURCE, OLD: "".join(FUNCTIONS), tokens: SOURCE},
+        {
+            login: "".join(FUNCTIONS[:4]),
+            policy: SOURCE + FUNCTIONS[5],
+            OLD: "".join(FUNCTIONS[:2]),
+            tokens: None,
+            EXISTING: "".join(FUNCTIONS[2:]),
+        },
+    )
+    prompt = render_prompt(checkout, login, policy, OLD, tokens)
+    assert kept_note(prompt) == note_naming(login, OLD)
+
+
+def test_verifier_prompt_names_a_matched_file_that_becomes_a_symlink(tmp_path):
+    # A type change (status T) keeps the path but not the file's lines.
+    checkout = pr_checkout(
+        tmp_path,
+        {OLD: "".join(FUNCTIONS), EXISTING: EXISTING_SOURCE},
+        {OLD: Symlink("../misc/utils.py")},
+    )
+    changed = f"git diff --no-renames --name-status origin/main...HEAD -- {OLD}"
+    assert model_git(checkout[0], changed) == f"T\t{OLD}\n"
+    assert kept_note(render_prompt(checkout, OLD)) == note_naming(OLD)
+
+
+@pytest.mark.parametrize(
+    ("base_ref", "matched"),
+    [("gone", OLD), ("main", "src/auth/*.py")],
+    ids=["base-ref-missing", "matched-path-outside-the-alphabet"],
+)
+def test_verifier_prompt_step_fails_before_writing_a_prompt(
+    kept_extraction, base_ref, matched
+):
+    # Never a prompt without the note it needs: a numstat that cannot run, or
+    # a matched path git would read as a pattern, fails the step first.
+    repo, event = kept_extraction
+    document, step = find_step("prompt")
+    (repo / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
+    event = {**event, "github.event.pull_request.base.ref": base_ref}
+    output = repo.parent / "github-output"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+        cwd=repo,
+        env={
+            **git_environment(),
+            **step_environment(document, step, event),
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert not output.exists()
