@@ -44,26 +44,38 @@ jobs:
       # `diff.ignoreSubmodules` cannot override .gitmodules; a
       # `submodule.<name>.ignore` setting in any config scope does. So this
       # step writes `ignore = none` into .git/config, which no PR controls,
-      # for every name that has an ignore key in the base's, the PR head's or
-      # the merge commit's .gitmodules. It is config, not environment,
+      # for every name that has an ignore key in the .gitmodules of the base
+      # commit, the PR head, the merge commit, or the base branch's tip in
+      # this checkout (the action restores from the branch, which can have
+      # moved past the event's base commit). It is config, not environment,
       # because git reads .git/config whatever environment the model's shell
       # is given. Nothing is written when no .gitmodules sets ignore. The
       # names are PR input: one outside [A-Za-z0-9._/-]{1,255}, more than 256
-      # of them, a .gitmodules git cannot parse, or a base or head commit
-      # missing from the checkout (checkout_depth must keep both) fails the
-      # step. codex-review.yml runs the same script; both copies are pinned
-      # by selftest/test_review_lanes_submodule_ignore.py.
+      # of them, a .gitmodules git cannot parse, or a base commit, head
+      # commit or base branch missing from the checkout (checkout_depth must
+      # keep them) fails the step. codex-review.yml runs the same script;
+      # both copies are pinned by
+      # selftest/test_review_lanes_submodule_ignore.py.
       - name: Keep submodule changes visible to the model's git
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           export LC_ALL=C
           tmp="${RUNNER_TEMP:?RUNNER_TEMP is not set}"
           name_re='^[A-Za-z0-9._/-]{1,255}$'
           : > "$tmp/gitmodules-ignore-names"
-          for rev in "$BASE_SHA" "$HEAD_SHA" HEAD; do
+          # claude-code-action restores .gitmodules from the base branch as it
+          # stands when the action runs, which can be past BASE_SHA, so the
+          # branch's tip in this checkout is read too.
+          if ! git check-ref-format "refs/heads/${BASE_REF}" \
+            || ! tip=$(git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}"); then
+            echo "::error::the PR's base branch is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the base branch fetched (fetch-depth 0)."
+            exit 1
+          fi
+          for rev in "$BASE_SHA" "$HEAD_SHA" HEAD "$tip"; do
             if ! git cat-file -e "${rev}^{commit}"; then
               echo "::error::commit ${rev} is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the PR's base and head commits (fetch-depth 0)."
               exit 1

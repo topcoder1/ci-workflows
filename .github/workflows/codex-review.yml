@@ -238,13 +238,22 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           export LC_ALL=C
           tmp="${RUNNER_TEMP:?RUNNER_TEMP is not set}"
           name_re='^[A-Za-z0-9._/-]{1,255}$'
           : > "$tmp/gitmodules-ignore-names"
-          for rev in "$BASE_SHA" "$HEAD_SHA" HEAD; do
+          # claude-code-action restores .gitmodules from the base branch as it
+          # stands when the action runs, which can be past BASE_SHA, so the
+          # branch's tip in this checkout is read too.
+          if ! git check-ref-format "refs/heads/${BASE_REF}" \
+            || ! tip=$(git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}"); then
+            echo "::error::the PR's base branch is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the base branch fetched (fetch-depth 0)."
+            exit 1
+          fi
+          for rev in "$BASE_SHA" "$HEAD_SHA" HEAD "$tip"; do
             if ! git cat-file -e "${rev}^{commit}"; then
               echo "::error::commit ${rev} is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the PR's base and head commits (fetch-depth 0)."
               exit 1

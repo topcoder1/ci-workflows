@@ -7,8 +7,10 @@ git leaves a submodule's pointer change out of `git diff`, `git log -p`,
 command. In the adversarial and Codex lanes the model runs git itself, so each
 lane has a step, before its model step, that writes
 `submodule.<name>.ignore=none` into the checkout's .git/config for every name
-with an `ignore` key in the base's, the PR head's or the merge commit's
-.gitmodules. A per-name setting in any config scope overrides .gitmodules;
+with an `ignore` key in the .gitmodules of the base commit, the PR head, the
+merge commit, or the base branch's tip in the checkout (claude-code-action
+restores .gitmodules from the branch, which can have moved past the event's
+base commit). A per-name setting in any config scope overrides .gitmodules;
 `diff.ignoreSubmodules` does not. .git/config is not PR-controlled, and git
 reads it whatever environment the model's shell is given.
 
@@ -18,25 +20,27 @@ Layers:
    and both copies of the step are one script that runs whenever the model
    step does.
 2. Behavior: the shipped step runs in a fixture PR checkout (a detached merge
-   commit with remote refs only, as actions/checkout leaves refs/pull/N/merge),
-   then `git diff`, `git log -p` and `git show`, under the model step's
-   environment, must print the pointer change. Shapes: a bumped pointer; a
-   submodule only the PR adds, in the working tree claude-code-action's
-   restoreConfigFromBase leaves (the base has no .gitmodules, so git reads
-   the PR's from the index); a name only the base's .gitmodules has; an
-   ignore key only the merge commit puts under its name; and the PR head
-   checked out.
+   commit with remote refs, as actions/checkout leaves refs/pull/N/merge),
+   then `git diff`, `git log -p` and `git show` of the PR, under the model
+   step's environment, must print the pointer change. Shapes: a bumped
+   pointer; a submodule only the PR adds, in the working tree
+   claude-code-action's restoreConfigFromBase leaves (the base has no
+   .gitmodules, so git reads the PR's from the index); a name only the base's
+   .gitmodules has; an ignore key only the merge commit puts under its name;
+   the PR head checked out; the base commit checked out after the branch
+   moved on; and an ignore key the base branch gained after the event, which
+   the restore brings in.
 3. Fail closed: a name outside ^[A-Za-z0-9._/-]{1,255}$ (with `=`, `$(...)`,
    a backtick, a quote, a space or 256 characters, and, through a git shim
    because git's config grammar cannot produce one, a newline), a .gitmodules
-   git cannot parse, a base commit missing from the checkout, or more than 256
-   names: exit 1, with .git/config untouched.
+   git cannot parse, a base commit or base branch missing from the checkout,
+   or more than 256 names: exit 1, with .git/config untouched.
 4. Unaffected repos: with no .gitmodules, or one that sets no ignore key, the
    step leaves .git/config byte-identical and writes no GITHUB_ENV or
    GITHUB_OUTPUT.
 5. Negative controls: each fixture hides the change from plain git, and the
-   step fails layer 2 when it writes `all`, or leaves the base, the head or
-   the merge commit unread.
+   step fails layer 2 when it writes `all`, or leaves the base commit, the
+   head, the merge commit or the base branch's tip unread.
 6. The Codex review step end to end after the new step, with a stub codex
    that diffs as its prompt asks under an environment cut down to PATH and
    HOME: the change still shows.
@@ -76,19 +80,17 @@ BEFORE = "1" * 40
 AFTER = "2" * 40
 POINTER = f"+Subproject commit {AFTER}"
 
-# What a model runs to read the PR in the merge checkout: HEAD is the merge
-# commit and HEAD^2 the PR's head.
-MERGE_COMMANDS = {
-    "diff": ["--no-pager", "diff", "origin/main...HEAD"],
-    "log": ["--no-pager", "log", "-p", "origin/main..HEAD"],
-    "show": ["--no-pager", "show", "HEAD^2"],
-}
-# The same, with the PR's head checked out instead.
-HEAD_COMMANDS = {
-    "diff": ["--no-pager", "diff", "origin/main...HEAD"],
-    "log": ["--no-pager", "log", "-p", "origin/main..HEAD"],
-    "show": ["--no-pager", "show", "HEAD"],
-}
+
+def pr_commands(checkout):
+    """What a model runs to read the PR. Which .gitmodules git applies comes
+    from the working tree, whatever commit is checked out."""
+    base, head = checkout.base, checkout.head
+    return {
+        "diff": ["--no-pager", "diff", f"{base}...{head}"],
+        "log": ["--no-pager", "log", "-p", f"{base}..{head}"],
+        "show": ["--no-pager", "show", head],
+    }
+
 
 # A ${{ }} expression.
 EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
@@ -192,6 +194,20 @@ class Checkout:
     def config_bytes(self):
         return (self.repo / ".git" / "config").read_bytes()
 
+    def advance_base(self, files):
+        """The base branch moves on after the event: origin/main, as the
+        checkout fetched it, is a commit on top of the event's base that
+        changes `files`. The merge commit stays checked out."""
+        merge = git(self.repo, "rev-parse", "HEAD").strip()
+        git(self.repo, "switch", "-qc", "advanced", self.base)
+        stage(self.repo, files)
+        git(self.repo, "commit", "-qm", "the base branch moves on")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+        git(self.repo, "fetch", "-q", "--no-recurse-submodules", "origin")
+        git(self.repo, "switch", "-q", "--detach", merge)
+        git(self.repo, "branch", "-q", "-D", "advanced")
+        return self
+
     def restore_config_from_base(self):
         """What claude-code-action's restoreConfigFromBase does to .gitmodules
         before its model starts: delete it, check out the base branch's copy
@@ -207,6 +223,10 @@ class Checkout:
     def check_out_head(self):
         """What a model with a free shell (Codex) could do before diffing."""
         git(self.repo, "checkout", "-q", "--detach", self.head)
+
+    def check_out_base(self):
+        """The same, with the event's base commit."""
+        git(self.repo, "checkout", "-q", "--detach", self.base)
 
 
 def load(workflow, text=None):
@@ -339,6 +359,14 @@ def name_only_the_base_has(root):
     )
 
 
+def base_commit_after_the_branch_moved(root):
+    """As above, but the base branch has since dropped the setting, so only
+    the event's base commit still ignores the submodule's old name."""
+    return name_only_the_base_has(root).advance_base(
+        {".gitmodules": gitmodules(("vendored", LINK))}
+    )
+
+
 def ignore_only_the_merge_sets(root):
     """The PR adds `ignore = all` under the submodule's old name while the
     target branch renames it: the clean merge puts the setting under the NEW
@@ -351,37 +379,54 @@ def ignore_only_the_merge_sets(root):
     )
 
 
-# name: (fixture, how the model's checkout is shaped, lanes, commands)
+def ignore_the_base_branch_gained(root):
+    """The PR moves the submodule; after the event, the base branch renames
+    it and sets `ignore = all`. The restore takes .gitmodules from the branch,
+    so only its tip has the name that decides."""
+    return Checkout(
+        root,
+        {".gitmodules": gitmodules(("vendor/lib", LINK)), LINK: Gitlink(BEFORE)},
+        {LINK: Gitlink(AFTER)},
+    ).advance_base({".gitmodules": gitmodules(("late", LINK, "ignore = all"))})
+
+
+# name: (fixture, how the model's checkout is shaped, lanes)
 SHAPES = {
-    "bumped pointer": (bumped_pointer, None, SUBMODULE_LANES, MERGE_COMMANDS),
+    "bumped pointer": (bumped_pointer, None, SUBMODULE_LANES),
     "added by the PR, read from the index": (
         added_by_the_pr,
         Checkout.restore_config_from_base,
         {ADVERSARIAL},
-        MERGE_COMMANDS,
     ),
     "name only the base has": (
         name_only_the_base_has,
         Checkout.restore_config_from_base,
         {ADVERSARIAL},
-        MERGE_COMMANDS,
     ),
     "ignore only the merge commit sets": (
         ignore_only_the_merge_sets,
         None,
         SUBMODULE_LANES,
-        MERGE_COMMANDS,
     ),
     "PR head checked out": (
         ignore_only_the_merge_sets,
         Checkout.check_out_head,
         {CODEX},
-        HEAD_COMMANDS,
+    ),
+    "base commit checked out after the branch moved": (
+        base_commit_after_the_branch_moved,
+        Checkout.check_out_base,
+        {CODEX},
+    ),
+    "ignore the base branch gained after the event": (
+        ignore_the_base_branch_gained,
+        Checkout.restore_config_from_base,
+        {ADVERSARIAL},
     ),
 }
 CASES = [
     pytest.param(shape, lane, id=f"{shape}-{lane[0]}")
-    for shape, (_, _, lanes, _) in SHAPES.items()
+    for shape, (_, _, lanes) in SHAPES.items()
     for lane in sorted(lanes)
 ]
 
@@ -389,13 +434,13 @@ CASES = [
 def prepare(shape, tmp_path, lane, script=None):
     """Build the shape's checkout, run the step, then shape the checkout as
     the model will see it."""
-    build, reshape, _, commands = SHAPES[shape]
+    build, reshape, _ = SHAPES[shape]
     checkout = build(tmp_path)
     result = run_step(checkout, lane, tmp_path, script=script)
     assert result.returncode == 0, result.stdout + result.stderr
     if reshape is not None:
         reshape(checkout)
-    return checkout, commands
+    return checkout
 
 
 # --- 1. Discovery --------------------------------------------------------------
@@ -426,6 +471,7 @@ def test_both_lanes_run_one_script():
     environment = {
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        "BASE_REF": "${{ github.event.pull_request.base.ref }}",
     }
     assert [step["env"] for step in steps] == [environment, environment]
 
@@ -435,17 +481,17 @@ def test_both_lanes_run_one_script():
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 def test_the_fixture_hides_the_pointer_from_plain_git(shape, tmp_path):
-    build, reshape, _, commands = SHAPES[shape]
+    build, reshape, _ = SHAPES[shape]
     checkout = build(tmp_path)
     if reshape is not None:
         reshape(checkout)
-    assert_plain_git_hides_the_pointer(checkout, commands)
+    assert_plain_git_hides_the_pointer(checkout, pr_commands(checkout))
 
 
 @pytest.mark.parametrize(("shape", "lane"), CASES)
 def test_the_models_git_shows_the_pointer_change(shape, lane, tmp_path):
-    checkout, commands = prepare(shape, tmp_path, lane)
-    assert_model_sees_the_pointer(checkout, lane, commands)
+    checkout = prepare(shape, tmp_path, lane)
+    assert_model_sees_the_pointer(checkout, lane, pr_commands(checkout))
 
 
 def test_the_step_names_what_it_sets(tmp_path):
@@ -458,24 +504,31 @@ def test_the_step_names_what_it_sets(tmp_path):
     )
 
 
-LOOP = 'for rev in "$BASE_SHA" "$HEAD_SHA" HEAD; do'
+LOOP = 'for rev in "$BASE_SHA" "$HEAD_SHA" HEAD "$tip"; do'
 # mutation: (edit, the shape it must break)
 MUTATIONS = {
     "value all": (
         lambda text: text.replace('.ignore" none', '.ignore" all'),
         "bumped pointer",
     ),
-    "base unread": (
-        lambda text: text.replace(LOOP, 'for rev in "$HEAD_SHA" HEAD; do'),
-        "name only the base has",
+    "base commit unread": (
+        lambda text: text.replace(LOOP, 'for rev in "$HEAD_SHA" HEAD "$tip"; do'),
+        "base commit checked out after the branch moved",
     ),
     "head unread": (
-        lambda text: text.replace(LOOP, 'for rev in "$BASE_SHA" HEAD; do'),
+        lambda text: text.replace(LOOP, 'for rev in "$BASE_SHA" HEAD "$tip"; do'),
         "PR head checked out",
     ),
     "merge unread": (
-        lambda text: text.replace(LOOP, 'for rev in "$BASE_SHA" "$HEAD_SHA"; do'),
+        lambda text: text.replace(
+            LOOP, 'for rev in "$BASE_SHA" "$HEAD_SHA" "$tip"; do'
+        ),
         "ignore only the merge commit sets",
+    ),
+    # The loop as it was before the tip was read.
+    "base branch tip unread": (
+        lambda text: text.replace(LOOP, 'for rev in "$BASE_SHA" "$HEAD_SHA" HEAD; do'),
+        "ignore the base branch gained after the event",
     ),
 }
 
@@ -488,9 +541,9 @@ def test_a_step_that_misses_a_source_fails(mutation, tmp_path):
     script = shipped_run(find_step(load(workflow), job, STEP))
     mutated = edit(script)
     assert mutated != script, "mutation did not apply; the anchor drifted"
-    checkout, commands = prepare(shape, tmp_path, lane, script=mutated)
+    checkout = prepare(shape, tmp_path, lane, script=mutated)
     with pytest.raises(AssertionError, match="hides the submodule change"):
-        assert_model_sees_the_pointer(checkout, lane, commands)
+        assert_model_sees_the_pointer(checkout, lane, pr_commands(checkout))
 
 
 # --- 3. Fail closed --------------------------------------------------------------
@@ -594,6 +647,18 @@ def test_a_base_commit_missing_from_the_checkout_fails_closed(tmp_path):
     event = {**checkout.event, "github.event.pull_request.base.sha": "3" * 40}
     result = run_step(checkout, ADVERSARIAL, tmp_path, event=event)
     assert_failed_closed(result, checkout, before, "is not in this checkout")
+
+
+@pytest.mark.parametrize("ref", ["release", "bad..name"])
+def test_a_base_branch_missing_from_the_checkout_fails_closed(ref, tmp_path):
+    checkout = bumped_pointer(tmp_path)
+    before = checkout.config_bytes()
+    event = {**checkout.event, "github.event.pull_request.base.ref": ref}
+    result = run_step(checkout, ADVERSARIAL, tmp_path, event=event)
+    assert_failed_closed(
+        result, checkout, before, "base branch is not in this checkout"
+    )
+    assert ref not in result.stdout + result.stderr
 
 
 def test_more_than_256_names_fails_closed(tmp_path):
