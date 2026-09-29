@@ -141,6 +141,32 @@ run_case "risk-session-dir" 0 risk-tier-hold "web/tests/e2e/session/expiry.spec.
 run_case "risk-billing-dir" 0 risk-tier-hold "web/tests/e2e/checkout/pay.spec.ts"
 # A .sql fixture under tests/ is safe-by-glob but risk-tier by content.
 run_case "risk-sql-fixture" 0 risk-tier-hold "tests/fixtures/seed.sql"
+# .gitattributes (2026-09-24). A `-diff` or `binary` attribute makes `git log
+# -p` print "Binary files ... differ", and git-mode gitleaks skips those
+# diffs. So a copy nested in a safe tree can hide the secrets beneath it from
+# the scan while the diff stays 100% docs/tests: the scan goes green, and
+# without the hold this workflow arms.
+run_case "risk-gitattributes-docs" 0 risk-tier-hold "docs/.gitattributes"
+run_case "risk-gitattributes-tests" 0 risk-tier-hold \
+  "tests/fixtures/.gitattributes" "tests/fixtures/config.json"
+# .gitmodules (2026-09-28). The regex gates it at any depth, so a copy under
+# docs/ or tests/ is safe-by-glob and risk-tier at once, and the hold must
+# agree with the regex there.
+run_case "risk-gitmodules-docs" 0 risk-tier-hold "docs/.gitmodules"
+run_case "risk-gitmodules-tests" 0 risk-tier-hold \
+  "tests/fixtures/.gitmodules" "tests/fixtures/config.json"
+# The root copy is not safe-by-glob, so claude-author-automerge's regex gates
+# it, until a caller's extra_safe_globs sweeps it in. A glob that treats git's
+# dotfiles as housekeeping is the plausible shape. For .gitmodules this is the
+# live shape: the root copy decides where CI fetches each submodule from.
+export EXTRA_GLOBS='(^|/)\.git[^/]*$'
+run_case "risk-gitattributes-via-extra-glob" 0 risk-tier-hold ".gitattributes"
+run_case "risk-gitmodules-via-extra-glob" 0 risk-tier-hold ".gitmodules"
+# Control for the cases above: the same glob still arms a plain .gitignore, so
+# the holds come from the .gitattributes and .gitmodules patterns, not from the
+# glob.
+run_case "extra-glob-arms-gitignore" 1 none ".gitignore"
+export EXTRA_GLOBS=""
 # An ADR amendment is 100% docs — safe-by-glob — and exactly the diff the
 # tier-2 hold must catch (wxa-graph gap, 2026-08-27; wxa-graph#477).
 run_case "risk-adr-amendment" 0 risk-tier-hold "docs/decisions/ADR-0003-cluster-algorithm.md"
@@ -201,6 +227,13 @@ run_case "bypass-releases-gitleaks" 1 none "tests/fixtures/.gitleaks.toml"
 # An unrelated label must NOT release it.
 LABELS="dependencies"
 run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
+# .gitattributes is tier-2 too: a label click on a PR that edits it is a human
+# deciding on that edit. Like the pricing case above, this pins the TIER.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitattributes" 1 none "docs/.gitattributes"
+# .gitmodules is tier-2 as well, for the same reason. This pins its TIER.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitmodules" 1 none "docs/.gitmodules"
 
 # 3. Tier 1 is absolute — the label does not release customer-facing legal
 #    wording. A label click is not evidence anyone read the clause.
@@ -230,6 +263,22 @@ run_case "rename-auth-out" 0 risk-tier-hold "web/tests/e2e/misc/signup2.spec.ts"
 # A rename with no risk path on either end stays safe.
 RENAMED_FROM="web/tests/e2e/kb/old.spec.ts"
 run_case "rename-benign" 1 none "web/tests/e2e/kb/new.spec.ts"
+
+# 6b. Name-gated files under docs/ or tests/ (2026-09-25). Compose files,
+#     suffix-style Dockerfiles and CODEOWNERS are gated by name, so a copy in
+#     a safe tree is safe-by-glob and risk-tier at once, and only this hold
+#     stops the arm. docs/CODEOWNERS matters most: GitHub reads it when a repo
+#     has no .github/ or root copy, so a docs-only diff could change who must
+#     review every other file.
+run_case "risk-codeowners-docs" 0 risk-tier-hold "docs/CODEOWNERS"
+run_case "risk-compose-tests" 0 risk-tier-hold "tests/integration/docker-compose.yml"
+run_case "risk-compose-v2-docs" 0 risk-tier-hold "docs/examples/compose.yaml"
+run_case "risk-dockerfile-suffix-tests" 0 risk-tier-hold "tests/e2e/e2e.Dockerfile"
+# Tier 2, not tier 1: the bypass label releases it, like the pricing case.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-codeowners" 1 none "docs/CODEOWNERS"
+# Boundary: a doc that only names the file still auto-merges.
+run_case "safe-codeowners-doc" 1 none "docs/codeowners-guide.md"
 
 # 7. DRIFT GUARD. The tier-2 list is a verbatim copy of the sibling gate's
 #    `patterns=` block. If they diverge, the two gates disagree about what

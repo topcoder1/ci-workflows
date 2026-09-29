@@ -26,8 +26,8 @@ passes --ignore-submodules=none.
    Those commands, run in the fixture, must show the rename and the edit.
 4. A PR that moves a submodule in a high-risk directory to another commit and
    sets `ignore = all` for it: the step lists the submodule and the classifier
-   matches it. Negative control: without --ignore-submodules=none only
-   .gitmodules is listed.
+   matches it, and .gitmodules, which the central list also gates. Negative
+   control: without --ignore-submodules=none only .gitmodules is listed.
 5. The prompt's commands show that change, and follow a submodule the PR
    moves out of the directory. Negative controls: each command without the
    flag.
@@ -315,15 +315,26 @@ def step_environment(document, step, event):
     return {k: EXPRESSION.sub(evaluate, str(v)) for k, v in merged.items()}
 
 
+def scratch(repo):
+    """The job's scratch directory (VERIFIER_SCRATCH), outside the checkout."""
+    directory = repo.parent / "scratch"
+    directory.mkdir(exist_ok=True)
+    return directory
+
+
 def run_step(checkout, script):
     """Run `script` as the diff step; return changed-paths.txt's lines and
     what the step wrote to $GITHUB_OUTPUT."""
     repo, event = checkout
     document, step = diff_step()
     assert "${{" not in script, "the runner would substitute into this script"
-    environment = {**git_environment(), **step_environment(document, step, event)}
+    environment = {
+        **git_environment(),
+        **step_environment(document, step, event),
+        "VERIFIER_SCRATCH": str(scratch(repo)),
+    }
     output = bash(script, repo, environment)
-    return (repo / "changed-paths.txt").read_text().splitlines(), output
+    return (scratch(repo) / "changed-paths.txt").read_text().splitlines(), output
 
 
 def classify(repo, patterns):
@@ -336,7 +347,7 @@ def classify(repo, patterns):
             "--patterns",
             patterns,
             "--paths",
-            "changed-paths.txt",
+            str(scratch(repo) / "changed-paths.txt"),
         ],
         cwd=repo,
         capture_output=True,
@@ -382,7 +393,8 @@ def test_diff_step_lists_a_submodule_its_gitmodules_ignores(submodule_bump, patt
     assert output == "changed_count=2\n"
     rc, matches = classify(submodule_bump[0], patterns)
     matched = [line.split("\t")[0] for line in matches.splitlines()]
-    assert rc == 0 and matched == [LINK], matches
+    # .gitmodules matches too: the central list gates it (2026-09-28).
+    assert rc == 0 and sorted(matched) == [".gitmodules", LINK], matches
 
 
 def test_without_the_flag_the_prs_gitmodules_hides_the_submodule(
@@ -419,13 +431,18 @@ def model_git(repo, command):
 def render_prompt(checkout, *matched, script=None):
     """The verifier prompt as its shipped step, or `script`, renders it when
     the classifier matched `matched`, in that order: in the PR checkout, as on
-    the runner, since the step runs git there."""
+    the runner, since the step runs git there, with the matches in the job's
+    scratch directory."""
     repo, event = checkout
     document, step = find_step("prompt")
-    (repo / "matches.txt").write_text(
+    (scratch(repo) / "matches.txt").write_text(
         "".join(f"{path}\t(matched: fixture)\n" for path in matched)
     )
-    environment = {**git_environment(), **step_environment(document, step, event)}
+    environment = {
+        **git_environment(),
+        **step_environment(document, step, event),
+        "VERIFIER_SCRATCH": str(scratch(repo)),
+    }
     return bash(script or step["run"], repo, environment)
 
 
@@ -721,7 +738,7 @@ def test_verifier_prompt_step_fails_before_writing_a_prompt(
     # a matched path git would read as a pattern, fails the step first.
     repo, event = kept_extraction
     document, step = find_step("prompt")
-    (repo / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
+    (scratch(repo) / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
     event = {**event, "github.event.pull_request.base.ref": base_ref}
     output = repo.parent / "github-output"
     result = subprocess.run(
@@ -730,6 +747,7 @@ def test_verifier_prompt_step_fails_before_writing_a_prompt(
         env={
             **git_environment(),
             **step_environment(document, step, event),
+            "VERIFIER_SCRATCH": str(scratch(repo)),
             "GITHUB_OUTPUT": str(output),
         },
         capture_output=True,

@@ -93,9 +93,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p .github/scripts
           # Both scripts live in this reusable's repo, not the caller's
-          # checkout, so they have to be pulled at run time. The fetch has no
+          # checkout, so they have to be pulled at run time, into a directory
+          # made for this run under RUNNER_TEMP: never into the caller's
+          # checkout, where the PR decides what each path holds. The fetch has no
           # ref, so it always serves current main even when a caller pins
           # this workflow to an older sha — deliberate, and safe because new
           # script capabilities ship behind env flags that default off
@@ -109,14 +110,16 @@ jobs:
           # whole dependency tree on every PR — ~1000 packages instead of 4 in
           # wxa-jake-ai, with a measured 7m03s worst case. codex-verdict.mjs
           # imports only node:fs and needs nothing.
+          dir="$(mktemp -d "${RUNNER_TEMP:?}/codex-review.XXXXXX")"
           for s in codex-gate.mjs codex-verdict.mjs classifier-deps.mjs; do
             gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$s" \
-              --jq '.content' | base64 -d > ".github/scripts/$s"
-            if [ ! -s ".github/scripts/$s" ]; then
+              --jq '.content' | base64 -d > "$dir/$s"
+            if [ ! -s "$dir/$s" ]; then
               echo "::error::fetched an empty $s from topcoder1/ci-workflows — refusing to run the gate."
               exit 1
             fi
           done
+          echo "CODEX_SCRIPTS=$dir" >> "$GITHUB_ENV"
 
       - name: Compute PR diff stats
         id: diff
@@ -170,7 +173,7 @@ jobs:
           CHANGED_FILES_FILE: ${{ runner.temp }}/codex-gate-paths.txt
           DIFF_LINES: ${{ steps.diff.outputs.lines }}
           SIZE_THRESHOLD: "30"
-        run: node .github/scripts/codex-gate.mjs
+        run: node "${CODEX_SCRIPTS:?}/codex-gate.mjs"
 
       - name: Install Codex CLI
         if: steps.gate.outputs.should_run == 'true'
@@ -493,7 +496,7 @@ jobs:
             VERDICT_FILE=/tmp/codex.verdict.elided FAIL_ON_REGRESSION=false \
               STRICT_FINDINGS=true \
               GITHUB_OUTPUT=/tmp/comment.classify GITHUB_STEP_SUMMARY='' \
-              node .github/scripts/codex-verdict.mjs
+              node "${CODEX_SCRIPTS:?}/codex-verdict.mjs"
             state=$(sed -n 's/^verdict_state=//p' /tmp/comment.classify)
             case "$state" in
               clean|no_verdict)
@@ -523,7 +526,7 @@ jobs:
           VERDICT_FILE=/tmp/codex.verdict.full FAIL_ON_REGRESSION=false \
             STRICT_FINDINGS=true \
             GITHUB_OUTPUT=/tmp/comment.classify GITHUB_STEP_SUMMARY='' \
-            node .github/scripts/codex-verdict.mjs
+            node "${CODEX_SCRIPTS:?}/codex-verdict.mjs"
           state=$(sed -n 's/^verdict_state=//p' /tmp/comment.classify)
           case "$state" in
             clean|no_verdict)
@@ -555,4 +558,4 @@ jobs:
           # The UNtruncated verdict — see the two-file note in the review step.
           VERDICT_FILE: /tmp/codex.verdict.full
           FAIL_ON_REGRESSION: ${{ inputs.fail_on_regression }}
-        run: node .github/scripts/codex-verdict.mjs
+        run: node "${CODEX_SCRIPTS:?}/codex-verdict.mjs"

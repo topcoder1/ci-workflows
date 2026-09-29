@@ -80,11 +80,11 @@ else
   unpaginated_ok=1
 fi
 
-# The job runs this step from the caller's checkout, where risk-paths.yml sits
-# beside the classifier and the vendored deps it imports (the previous step
-# fetches both into .github/scripts/).
-mkdir -p "$T/repo/.github/scripts" "$T/state" "$T/bin"
-cp .github/scripts/classify.mjs .github/scripts/classifier-deps.mjs "$T/repo/.github/scripts/"
+# The job runs this step from the caller's checkout, where risk-paths.yml
+# sits; the previous step fetches the classifier and the vendored deps it
+# imports into a directory under RUNNER_TEMP and exports CLASSIFY_SCRIPTS.
+mkdir -p "$T/repo/.github" "$T/scripts" "$T/state" "$T/bin"
+cp .github/scripts/classify.mjs .github/scripts/classifier-deps.mjs "$T/scripts/"
 cat > "$T/repo/.github/risk-paths.yml" <<'YAML'
 blocked:
   - 'src/auth/**'
@@ -145,6 +145,7 @@ run_step() {
   echo 0 > "$T/state/rename_calls"
   set +e
   LOG=$(cd "$T/repo" && PATH="$T/bin:$PATH" GH_TOKEN=stub PR=7 GITHUB_REPOSITORY=acme/fixture \
+    CLASSIFY_SCRIPTS="$T/scripts" \
     GITHUB_OUTPUT="$T/ghout" STUB_FILES_JSON="$T/files.json" STUB_STATE="$T/state" \
     STUB_RENAME_FAILS="$RENAME_FAILS" bash "$1" 2>&1 < /dev/null)
   RC=$?

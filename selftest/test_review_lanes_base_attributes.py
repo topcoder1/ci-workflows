@@ -297,8 +297,11 @@ def test_verifier_prompt_command_shows_what_the_pr_marks_binary(checkout, tmp_pa
     build = next(
         s for s in document["jobs"]["verify"]["steps"] if s.get("id") == "prompt"
     )
-    # In the PR checkout, as on the runner: the step runs git there.
-    (checkout.repo / "matches.txt").write_text("notes.txt\t(matched: fixture)\n")
+    # In the PR checkout, as on the runner: the step runs git there. The
+    # matches are in the job's scratch directory.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "matches.txt").write_text("notes.txt\t(matched: fixture)\n")
     output = tmp_path / "github-output"
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", shipped_run(build)],
@@ -306,6 +309,7 @@ def test_verifier_prompt_command_shows_what_the_pr_marks_binary(checkout, tmp_pa
         env={
             **git_environment(),
             **step_environment(document, "verify", build, checkout.event),
+            "VERIFIER_SCRATCH": str(scratch),
             "GITHUB_OUTPUT": str(output),
         },
         capture_output=True,
@@ -373,19 +377,22 @@ def test_verifier_classifier_lists_paths_whatever_their_attributes(checkout, tmp
     document = load("verifier-on-high-risk.yml")
     step = next(s for s in document["jobs"]["verify"]["steps"] if s.get("id") == "diff")
     output = tmp_path / "github-output"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", shipped_run(step)],
         cwd=checkout.repo,
         env={
             **git_environment(),
             **step_environment(document, "verify", step, checkout.event),
+            "VERIFIER_SCRATCH": str(scratch),
             "GITHUB_OUTPUT": str(output),
         },
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    listed = (checkout.repo / "changed-paths.txt").read_text().splitlines()
+    listed = (scratch / "changed-paths.txt").read_text().splitlines()
     assert sorted(listed) == [
         ".gitattributes",
         "conf/.gitattributes",

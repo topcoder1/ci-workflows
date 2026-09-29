@@ -87,6 +87,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Make a scratch directory outside the checkout
+        id: scratch
+        run: |
+          set -euo pipefail
+          # This job's own files live in a directory made for this run under
+          # RUNNER_TEMP, never in the PR checkout, where the PR decides what
+          # each path holds. Pinned by selftest/test_verifier_scratch_files.py.
+          scratch="$(mktemp -d "${RUNNER_TEMP:?}/verifier.XXXXXX")"
+          echo "VERIFIER_SCRATCH=${scratch}" >> "$GITHUB_ENV"
+
       - name: Compute PR diff (changed file paths, NUL-delimited)
         id: diff
         env:
@@ -94,6 +104,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          SCRATCH="${VERIFIER_SCRATCH:?}"
           # NUL-delimited so paths containing newlines/control chars stay
           # as one record and CANNOT spoof additional matches by being
           # split on a converted newline.
@@ -105,24 +116,24 @@ jobs:
           # between two commits, and `ignore = all` would leave that
           # submodule's change out of the list. Both pinned by
           # selftest/test_verifier_changed_paths_renames.py.
-          git diff -z --no-renames --ignore-submodules=none --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-paths.z
+          git diff -z --no-renames --ignore-submodules=none --name-only "$BASE_SHA"..."$HEAD_SHA" > "$SCRATCH/changed-paths.z"
           # Validate each NUL-delimited record BEFORE writing the
           # newline-delimited output the classifier consumes. Whitelist:
           # [A-Za-z0-9._/-] (no whitespace, no quotes, no shell metachars).
           # Spaces are deliberately excluded — high-risk fleet paths do not
           # contain them, and excluding them avoids the unquoted-path-
           # substitution risk in the verifier prompt's `git diff -- <file>`.
-          : > changed-paths.txt
+          : > "$SCRATCH/changed-paths.txt"
           while IFS= read -r -d '' p; do
             [[ -z "$p" ]] && continue
             if [[ ! "$p" =~ ^[A-Za-z0-9._/-]+$ ]]; then
               echo "Rejecting unsafe path bytes: $(printf '%q' "$p")" >&2
               exit 1
             fi
-            printf '%s\n' "$p" >> changed-paths.txt
-          done < changed-paths.z
-          echo "changed_count=$(wc -l < changed-paths.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
-          echo "Changed paths:"; cat changed-paths.txt
+            printf '%s\n' "$p" >> "$SCRATCH/changed-paths.txt"
+          done < "$SCRATCH/changed-paths.z"
+          echo "changed_count=$(wc -l < "$SCRATCH/changed-paths.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "Changed paths:"; cat "$SCRATCH/changed-paths.txt"
 
       - name: Checkout ci-workflows at pinned SHA (composite action source)
         uses: actions/checkout@v7
@@ -139,20 +150,25 @@ jobs:
         id: classify
         # NO continue-on-error: the script returns 0 (matched) or 1 (no match).
         # Any other exit (script bug, missing inputs) MUST fail the job —
-        # silent skip is a fail-open hole.
+        # silent skip is a fail-open hole. The output is opened before the
+        # script runs, so a failure to write it fails this step instead of
+        # reaching rc, and a no-match must also have written nothing.
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          MATCHES="${VERIFIER_SCRATCH:?}/matches.txt"
+          exec 3> "$MATCHES"
           set +e
           bash ci-workflows/scripts/verifier-classify-diff.sh \
             --patterns "${{ steps.globs.outputs.patterns_file }}" \
-            --paths changed-paths.txt > matches.txt
+            --paths "${VERIFIER_SCRATCH}/changed-paths.txt" >&3
           rc=$?
           set -e
+          exec 3>&-
           echo "rc=$rc"
           if [[ "$rc" -eq 0 ]]; then
             echo "matched=yes" >> "$GITHUB_OUTPUT"
-            echo "Matched paths:"; cat matches.txt
-          elif [[ "$rc" -eq 1 ]]; then
+            echo "Matched paths:"; cat "$MATCHES"
+          elif [[ "$rc" -eq 1 && ! -s "$MATCHES" ]]; then
             echo "matched=no" >> "$GITHUB_OUTPUT"
             echo "No high-risk path matches"
           else
@@ -170,7 +186,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          CHANGED_COUNT=$(wc -l < changed-paths.txt | tr -d ' ')
+          CHANGED_COUNT=$(wc -l < "${VERIFIER_SCRATCH:?}/changed-paths.txt" | tr -d ' ')
           gh api -X POST \
             "/repos/${REPO}/check-runs" \
             -f name="verifier / evidence-bound" \
@@ -184,6 +200,10 @@ jobs:
 
       - name: Reset evidence/ to empty (defeats pre-staged content)
         if: steps.classify.outputs.matched == 'yes'
+        # evidence/ and every step that writes or reads it live in the
+        # scratch directory, outside the PR checkout, so nothing the PR
+        # commits is there to begin with; the reset below stays as a guard.
+        working-directory: ${{ env.VERIFIER_SCRATCH }}
         run: |
           set -euo pipefail
           # The workflow's `Materialize evidence from structured_output`
@@ -217,7 +237,7 @@ jobs:
           # multi-line GITHUB_OUTPUT heredoc syntax with a random delimiter
           # so the prompt body — which itself contains a heredoc — does
           # not collide with the boundary marker.
-          MATCHES_BLOCK="$(cat matches.txt)"
+          MATCHES_BLOCK="$(cat "${VERIFIER_SCRATCH:?}/matches.txt")"
           # Matched files the PR keeps but deletes lines from, one per line.
           # Code can move out of a file that stays, into a file the PR adds
           # or one that already exists, and step 1's listing of every changed
@@ -241,7 +261,7 @@ jobs:
             if [[ -n "$deleted" && "$deleted" != "0" ]]; then
               KEPT_LOSING+="       ${path}"$'\n'
             fi
-          done < matches.txt
+          done < "${VERIFIER_SCRATCH:?}/matches.txt"
           DELIM="EOF_$(openssl rand -hex 16)"
           {
             echo "text<<${DELIM}"
@@ -418,6 +438,7 @@ jobs:
       - name: Materialize evidence from structured_output
         if: steps.classify.outputs.matched == 'yes'
         id: materialize
+        working-directory: ${{ env.VERIFIER_SCRATCH }}
         env:
           STRUCTURED_OUTPUT: ${{ steps.verifier.outputs.structured_output }}
         run: |
@@ -485,6 +506,7 @@ jobs:
       - name: Verify transcript and verdict file
         if: steps.classify.outputs.matched == 'yes'
         id: transcript_check
+        working-directory: ${{ env.VERIFIER_SCRATCH }}
         run: |
           set -euo pipefail
           mkdir -p evidence
@@ -546,6 +568,7 @@ jobs:
 
       - name: Redact secrets in evidence (pre-publish, fail-closed)
         if: steps.classify.outputs.matched == 'yes'
+        working-directory: ${{ env.VERIFIER_SCRATCH }}
         run: |
           set -euo pipefail
           mkdir -p evidence
@@ -556,7 +579,7 @@ jobs:
           shopt -s nullglob globstar
           mapfile -t evidence_files < <(find evidence -type f)
           if [[ "${#evidence_files[@]}" -gt 0 ]]; then
-            python3 ci-workflows/scripts/verifier-redact-secrets.py "${evidence_files[@]}"
+            python3 "${GITHUB_WORKSPACE}/ci-workflows/scripts/verifier-redact-secrets.py" "${evidence_files[@]}"
           else
             echo "No evidence files to scrub"
           fi
@@ -578,8 +601,8 @@ jobs:
           # artifact. The redactor step still scrubs both files before
           # upload.
           path: |
-            evidence/verdict.txt
-            evidence/transcript.md
+            ${{ env.VERIFIER_SCRATCH }}/evidence/verdict.txt
+            ${{ env.VERIFIER_SCRATCH }}/evidence/transcript.md
           if-no-files-found: warn
 
       - name: Post check-run — verifier result
@@ -599,7 +622,7 @@ jobs:
           #     → success
           #   anything else → failure (verifier crashed, transcript empty/short,
           #     verdict=fail, or sentinel missing)
-          MATCHED_COUNT=$(wc -l < matches.txt | tr -d ' ')
+          MATCHED_COUNT=$(wc -l < "${VERIFIER_SCRATCH:?}/matches.txt" | tr -d ' ')
           if [[ "${VERIFIER_OUTCOME}" == "success" && "${TRANSCRIPT_OK}" == "yes" ]]; then
             CONCL="success"
             TITLE="Verifier evidence captured (PASS)"

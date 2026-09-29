@@ -68,7 +68,8 @@ jobs:
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           # The caller checked out THEIR repo. We need our classify.mjs script,
           # which lives in topcoder1/ci-workflows. Pull it via the GitHub API
-          # so we don't pollute the caller's working tree.
+          # into a directory made for this run under RUNNER_TEMP, never into
+          # the caller's checkout, where the PR decides what each path holds.
           #
           # classifier-deps.mjs is the committed, version-pinned bundle of the
           # only two third-party packages classify.mjs uses (yaml, minimatch).
@@ -85,20 +86,21 @@ jobs:
           # Both files come from the same already-retried API call pattern, so
           # this job now depends on ONE external service instead of two; npm was
           # a fleet-wide wedge vector in front of a fail-closed gate.
-          mkdir -p .github/scripts
+          dir="$(mktemp -d "${RUNNER_TEMP:?}/pr-classify.XXXXXX")"
           fetch_script() {
             gh api "repos/topcoder1/ci-workflows/contents/.github/scripts/$1" --jq '.content'
           }
           for s in classify.mjs classifier-deps.mjs; do
-            retry fetch_script "$s" | base64 -d > ".github/scripts/$s"
+            retry fetch_script "$s" | base64 -d > "$dir/$s"
             # An empty file imports cleanly as a module with no exports, which
             # would surface much later as "parse is not a function". Fail here,
             # where the message names the actual problem.
-            if [ ! -s ".github/scripts/$s" ]; then
+            if [ ! -s "$dir/$s" ]; then
               echo "::error::fetched an empty $s from topcoder1/ci-workflows — refusing to classify."
               exit 1
             fi
           done
+          echo "CLASSIFY_SCRIPTS=$dir" >> "$GITHUB_ENV"
 
       - name: Compute highest-priority class
         id: compute
@@ -135,7 +137,7 @@ jobs:
           if [ -n "$renamed_from" ]; then
             changed=$(printf '%s\n%s' "$changed" "$renamed_from")
           fi
-          class=$(echo "$changed" | node .github/scripts/classify.mjs)
+          class=$(echo "$changed" | node "${CLASSIFY_SCRIPTS:?}/classify.mjs")
           echo "class=$class" >> "$GITHUB_OUTPUT"
           echo "Computed risk class: $class"
           echo "Classified paths (changed files, then any rename sources):"

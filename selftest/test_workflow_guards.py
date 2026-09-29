@@ -203,7 +203,7 @@ def test_codex_verdict_gate_is_wired_and_opt_in():
         "the verdict evaluation must run after the review comment is posted, "
         "so a failing job still shows the reader what Codex found"
     )
-    assert "node .github/scripts/codex-verdict.mjs" in text[evaluate_at:], (
+    assert 'node "${CODEX_SCRIPTS:?}/codex-verdict.mjs"' in text[evaluate_at:], (
         "the Evaluate Codex verdict step must itself run codex-verdict.mjs — "
         "the comment step's report-only invocation is not the enforcement"
     )
