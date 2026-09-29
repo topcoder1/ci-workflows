@@ -297,15 +297,14 @@ def test_verifier_prompt_command_shows_what_the_pr_marks_binary(checkout, tmp_pa
     build = next(
         s for s in document["jobs"]["verify"]["steps"] if s.get("id") == "prompt"
     )
-    workdir = tmp_path / "prompt"
-    workdir.mkdir()
-    (workdir / "matches.txt").write_text("notes.txt\t(matched: fixture)\n")
-    output = workdir / "github-output"
+    # In the PR checkout, as on the runner: the step runs git there.
+    (checkout.repo / "matches.txt").write_text("notes.txt\t(matched: fixture)\n")
+    output = tmp_path / "github-output"
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", shipped_run(build)],
-        cwd=workdir,
+        cwd=checkout.repo,
         env={
-            **os.environ,
+            **git_environment(),
             **step_environment(document, "verify", build, checkout.event),
             "GITHUB_OUTPUT": str(output),
         },

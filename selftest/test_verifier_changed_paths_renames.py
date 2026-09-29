@@ -39,6 +39,15 @@ passes --ignore-submodules=none.
    after a move that kept nothing, or a file that already existed, which git
    never pairs as a rename destination (negative control: the listing limited
    to added files).
+8. Code can also leave a matched file the PR keeps: here most of it moves into
+   a file that already exists. The prompt step names each matched file the PR
+   keeps but deletes lines from (its numstat, under the base's attributes) and
+   sends the model to the changed-paths listing for it, which names where the
+   code went. A kept file the PR only adds to, even one its own .gitattributes
+   marks binary, and a matched file the PR removes, which the listing already
+   covers, leave the prompt as it was. Negative control: that numstat without
+   --ignore-submodules=none misses a kept submodule the PR's .gitmodules
+   ignores, whose old commit line the PR's bump deletes.
 """
 
 import os
@@ -114,8 +123,10 @@ def git(repo, *arguments):
 
 
 def bash(script, cwd, environment):
-    """Run `script` as a workflow step; return what it wrote to $GITHUB_OUTPUT."""
+    """Run `script` as a workflow step; return what it wrote to $GITHUB_OUTPUT,
+    a file of its own as on the runner."""
     output = cwd.parent / f"{cwd.name}-github-output"
+    output.unlink(missing_ok=True)
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
         cwd=cwd,
@@ -151,7 +162,7 @@ def pr_checkout(root, base_files, pr_files):
     detached merge commit, remote refs only). The base commit holds
     `base_files`; the PR's commit changes them as `pr_files` says."""
     repo = root / "checkout"
-    repo.mkdir()
+    repo.mkdir(parents=True)
     git(repo, "init", "-q", "-b", "main")
     stage(repo, base_files)
     git(repo, "commit", "-qm", "base")
@@ -233,6 +244,21 @@ def full_rewrite(tmp_path):
     """The PR deletes OLD and adds NEW, which keeps none of its lines."""
     return pr_checkout(
         tmp_path, {OLD: "".join(FUNCTIONS)}, {OLD: None, NEW: "".join(REWRITTEN)}
+    )
+
+
+@pytest.fixture
+def kept_extraction(tmp_path):
+    """The PR moves eight of OLD's ten functions, unchanged, into EXISTING and
+    keeps OLD with the other two. Its own directory, so a test can use it
+    beside another checkout."""
+    return pr_checkout(
+        tmp_path / "kept-extraction",
+        {OLD: "".join(FUNCTIONS), EXISTING: EXISTING_SOURCE},
+        {
+            OLD: "".join(FUNCTIONS[:2]),
+            EXISTING: EXISTING_SOURCE + "".join(FUNCTIONS[2:]),
+        },
     )
 
 
@@ -378,16 +404,15 @@ def model_git(repo, command):
     return result.stdout
 
 
-def render_prompt(checkout, tmp_path, matched):
-    """The verifier prompt as its shipped step renders it when the classifier
-    matched `matched`."""
-    _, event = checkout
+def render_prompt(checkout, matched, script=None):
+    """The verifier prompt as its shipped step, or `script`, renders it when
+    the classifier matched `matched`: in the PR checkout, as on the runner,
+    since the step runs git there."""
+    repo, event = checkout
     document, step = find_step("prompt")
-    workdir = tmp_path / "prompt"
-    workdir.mkdir()
-    (workdir / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
-    environment = {**os.environ, **step_environment(document, step, event)}
-    return bash(step["run"], workdir, environment)
+    (repo / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
+    environment = {**git_environment(), **step_environment(document, step, event)}
+    return bash(script or step["run"], repo, environment)
 
 
 # What tells apart the other commands the prompt hands the model.
@@ -422,12 +447,12 @@ def without_flag(command):
     return stripped
 
 
-def test_verifier_prompt_leads_the_model_to_both_paths_of_a_rename(checkout, tmp_path):
+def test_verifier_prompt_leads_the_model_to_both_paths_of_a_rename(checkout):
     # The classifier matches only OLD, and the prompt's per-file diff of OLD
     # shows a deletion: the edited file at NEW never appears in it. The prompt
     # must hand the model commands that find the rename and show both paths.
     repo, _ = checkout
-    prompt = render_prompt(checkout, tmp_path, OLD)
+    prompt = render_prompt(checkout, OLD)
     per_file = prompt_command(prompt, "per_file")
     alone = model_git(repo, per_file.replace("<file>", OLD))
     assert "deleted file mode" in alone and "+# moved" not in alone, alone
@@ -441,23 +466,21 @@ def test_verifier_prompt_leads_the_model_to_both_paths_of_a_rename(checkout, tmp
     assert "+# moved" in shown, shown
 
 
-def test_verifier_prompt_shows_a_submodule_its_gitmodules_ignores(
-    submodule_bump, tmp_path
-):
+def test_verifier_prompt_shows_a_submodule_its_gitmodules_ignores(submodule_bump):
     repo, _ = submodule_bump
-    per_file = prompt_command(render_prompt(submodule_bump, tmp_path, LINK), "per_file")
+    per_file = prompt_command(render_prompt(submodule_bump, LINK), "per_file")
     shown = model_git(repo, per_file.replace("<file>", LINK))
     assert f"-Subproject commit {BEFORE}\n+Subproject commit {AFTER}\n" in shown, shown
     # Negative control: without the flag the model reads an empty diff.
     assert model_git(repo, without_flag(per_file).replace("<file>", LINK)) == ""
 
 
-def test_verifier_prompt_follows_a_submodule_the_pr_moves(submodule_move, tmp_path):
+def test_verifier_prompt_follows_a_submodule_the_pr_moves(submodule_move):
     # The classifier matches LINK, which the PR deletes: its .gitmodules maps
     # only MOVED_LINK, so nothing hides that half. The commands that find
     # where the submodule went must not hide the other half.
     repo, _ = submodule_move
-    prompt = render_prompt(submodule_move, tmp_path, LINK)
+    prompt = render_prompt(submodule_move, LINK)
     renames = prompt_command(prompt, "renames")
     pair = prompt_command(prompt, "pair")
     pair = pair.replace("<old>", LINK).replace("<new>", MOVED_LINK)
@@ -471,12 +494,10 @@ def test_verifier_prompt_follows_a_submodule_the_pr_moves(submodule_move, tmp_pa
         assert MOVED_LINK not in model_git(repo, without_flag(command)), command
 
 
-def test_verifier_prompt_pairs_a_move_that_rewrites_most_of_the_file(
-    rewrite_move, tmp_path
-):
+def test_verifier_prompt_pairs_a_move_that_rewrites_most_of_the_file(rewrite_move):
     # Two of ten functions kept: git scores the pair 21% similar.
     repo, _ = rewrite_move
-    prompt = render_prompt(rewrite_move, tmp_path, OLD)
+    prompt = render_prompt(rewrite_move, OLD)
     renames = prompt_command(prompt, "renames")
     assert model_git(repo, renames) == f"R021\t{OLD}\t{NEW}\n"
     paired = prompt_command(prompt, "pair")
@@ -491,13 +512,13 @@ def test_verifier_prompt_pairs_a_move_that_rewrites_most_of_the_file(
 
 
 def test_verifier_prompt_lists_what_the_pr_changes_for_a_matched_file_it_removes(
-    full_rewrite, tmp_path
+    full_rewrite,
 ):
     # A move that kept none of the file pairs at no threshold the listing
     # uses: the per-file diff shows a deletion and the rename listing is
     # empty, so neither names NEW. The changed-paths listing does.
     repo, _ = full_rewrite
-    prompt = render_prompt(full_rewrite, tmp_path, OLD)
+    prompt = render_prompt(full_rewrite, OLD)
     alone = model_git(repo, prompt_command(prompt, "per_file").replace("<file>", OLD))
     assert "deleted file mode" in alone and NEW not in alone, alone
     assert model_git(repo, prompt_command(prompt, "renames")) == ""
@@ -505,12 +526,12 @@ def test_verifier_prompt_lists_what_the_pr_changes_for_a_matched_file_it_removes
 
 
 def test_verifier_prompt_finds_code_moved_into_a_file_that_already_existed(
-    move_into_existing, tmp_path
+    move_into_existing,
 ):
     # git pairs a removed file only with an added one, so code moved into a
     # file the base already has is no rename, however much of it matches.
     repo, _ = move_into_existing
-    prompt = render_prompt(move_into_existing, tmp_path, OLD)
+    prompt = render_prompt(move_into_existing, OLD)
     alone = model_git(repo, prompt_command(prompt, "per_file").replace("<file>", OLD))
     assert "deleted file mode" in alone and EXISTING not in alone, alone
     assert model_git(repo, prompt_command(prompt, "renames")) == ""
@@ -522,3 +543,101 @@ def test_verifier_prompt_finds_code_moved_into_a_file_that_already_existed(
     )
     assert count == 1, changed
     assert model_git(repo, added_only) == ""
+
+
+def kept_note(prompt):
+    """What the prompt says between step 1's changed-paths instruction and step
+    2: the note on matched files the PR keeps but deletes lines from, or
+    nothing, as before the note existed."""
+    found = re.search(
+        r"and verify any that its code moved to\.\n(.*?)^  2\. Identify",
+        prompt,
+        re.S | re.M,
+    )
+    assert found, "step 1 no longer ends where this test looks for the note"
+    return found.group(1)
+
+
+def note_naming(*paths):
+    """The note, as the prompt must word it, naming `paths`."""
+    return (
+        "     The PR also deletes lines from these matched files, which it\n"
+        "     keeps. Code can move out of a file that stays, so for them as\n"
+        "     well, list every path the PR changes with that command and\n"
+        "     verify any that their deleted lines moved to:\n"
+    ) + "".join(f"       {path}\n" for path in paths)
+
+
+def test_verifier_prompt_follows_code_moved_out_of_a_matched_file_it_keeps(
+    kept_extraction,
+):
+    # OLD stays, so its per-file diff shows only deletions and no rename
+    # pairs it; step 1 sends the model to the changed-paths listing only for a
+    # matched file the PR removes. The note must name OLD and point at that
+    # listing, which names EXISTING.
+    repo, _ = kept_extraction
+    prompt = render_prompt(kept_extraction, OLD)
+    assert kept_note(prompt) == note_naming(OLD), prompt
+    changed = prompt_command(prompt, "changed")
+    # "that command": the note follows the changed-paths listing directly.
+    assert (
+        f"`{changed}`\n     and verify any that its code moved to.\n     The PR"
+        in prompt
+    )
+    alone = model_git(repo, prompt_command(prompt, "per_file").replace("<file>", OLD))
+    assert "deleted file mode" not in alone and "-def check_9(token):\n" in alone, alone
+    assert EXISTING not in alone, alone
+    assert model_git(repo, prompt_command(prompt, "renames")) == ""
+    assert model_git(repo, changed) == f"M\t{OLD}\nM\t{EXISTING}\n"
+
+
+@pytest.mark.parametrize(
+    ("attributes", "plain_numstat"),
+    [({}, f"3\t0\t{OLD}\n"), ({".gitattributes": f"{OLD} binary\n"}, f"-\t-\t{OLD}\n")],
+    ids=["plain", "marked-binary-by-the-pr"],
+)
+def test_verifier_prompt_is_unchanged_for_a_kept_matched_file_that_only_gains_lines(
+    tmp_path, kept_extraction, attributes, plain_numstat
+):
+    # OLD gains a function and loses nothing, so step 1 runs straight into
+    # step 2. In the second shape the PR's own .gitattributes marks OLD
+    # binary: plain git honours it (control), numstat reads "-", and only the
+    # base's attributes keep that from counting as deleted lines.
+    checkout = pr_checkout(
+        tmp_path, {OLD: SOURCE}, {OLD: SOURCE + FUNCTIONS[5], **attributes}
+    )
+    numstat = f"git diff --numstat origin/main...HEAD -- {OLD}"
+    assert model_git(checkout[0], numstat) == plain_numstat
+    assert kept_note(render_prompt(checkout, OLD)) == ""
+    # Positive control: the same probe finds the note for a file losing lines.
+    assert kept_note(render_prompt(kept_extraction, OLD)) == note_naming(OLD)
+
+
+def test_verifier_prompt_leaves_a_matched_file_the_pr_removes_as_it_was(
+    move_into_existing, kept_extraction
+):
+    # OLD loses every line (control), but the PR removes it: step 1 already
+    # sends the model to the changed-paths listing for it, so no note.
+    repo, _ = move_into_existing
+    numstat = f"git diff --no-renames --numstat origin/main...HEAD -- {OLD}"
+    assert model_git(repo, numstat) == f"0\t30\t{OLD}\n"
+    prompt = render_prompt(move_into_existing, OLD)
+    assert kept_note(prompt) == ""
+    changed = prompt_command(prompt, "changed")
+    assert model_git(repo, changed) == f"D\t{OLD}\nM\t{EXISTING}\n"
+    # Positive control: the same probe finds the note for a file the PR keeps.
+    assert kept_note(render_prompt(kept_extraction, OLD)) == note_naming(OLD)
+
+
+def test_without_the_flag_the_prs_gitmodules_hides_a_kept_submodules_deleted_line(
+    submodule_bump,
+):
+    # The PR keeps LINK and moves it to another commit, deleting the old
+    # commit line, so the note names LINK.
+    assert kept_note(render_prompt(submodule_bump, LINK)) == note_naming(LINK)
+    # Negative control: the step without --ignore-submodules=none on the
+    # numstat that picks the files. The PR's `ignore = all` hides the change.
+    _, step = find_step("prompt")
+    (numstat,) = [line for line in step["run"].splitlines() if "--numstat" in line]
+    unflagged = step["run"].replace(numstat, without_flag(numstat))
+    assert kept_note(render_prompt(submodule_bump, LINK, unflagged)) == ""
