@@ -64,10 +64,10 @@ handoff=$(sed -n 's/^[[:space:]]*CHANGED_FILES_FILE: \${{ runner\.temp }}\/\([A-
 if [ -n "$handoff" ] \
   && ! grep -qE '^[[:space:]]*CHANGED_FILES:' <<<"$gate_env" \
   && grep -qF 'DIFF_LINES: ${{ steps.diff.outputs.lines }}' <<<"$gate_env" \
-  && grep -qxE '[[:space:]]*run: node \.github/scripts/codex-gate\.mjs[[:space:]]*' <<<"$gate_env"; then
+  && grep -qxE '[[:space:]]*run: node "\$\{CODEX_SCRIPTS:\?\}/codex-gate\.mjs"[[:space:]]*' <<<"$gate_env"; then
   echo "✓ the cost gate reads the path list from the runner temp file '$handoff' and the diff step's line count"
 else
-  echo "✗ $WF's cost gate must take CHANGED_FILES_FILE under runner.temp and DIFF_LINES from the diff step, with no CHANGED_FILES env, and run 'node .github/scripts/codex-gate.mjs' as is — this test no longer models it"
+  echo "✗ $WF's cost gate must take CHANGED_FILES_FILE under runner.temp and DIFF_LINES from the diff step, with no CHANGED_FILES env, and run 'node \"\${CODEX_SCRIPTS:?}/codex-gate.mjs\"' as is — this test no longer models it"
   exit 1
 fi
 
@@ -108,11 +108,11 @@ else
   unpaginated_ok=1
 fi
 
-# The gate runs from the caller's checkout, where risk-paths.yml sits beside
-# the gate script and the vendored deps it imports (fetched by an earlier
-# step into .github/scripts/).
-mkdir -p "$T/repo/.github/scripts" "$T/state" "$T/bin" "$T/rt"
-cp .github/scripts/codex-gate.mjs .github/scripts/classifier-deps.mjs "$T/repo/.github/scripts/"
+# The gate runs from the caller's checkout, where risk-paths.yml sits; an
+# earlier step fetches the gate script and the vendored deps it imports into
+# a directory under RUNNER_TEMP (CODEX_SCRIPTS).
+mkdir -p "$T/repo/.github" "$T/scripts" "$T/state" "$T/bin" "$T/rt"
+cp .github/scripts/codex-gate.mjs .github/scripts/classifier-deps.mjs "$T/scripts/"
 cat > "$T/repo/.github/risk-paths.yml" <<'YAML'
 always_review:
   - 'src/auth/**'
@@ -200,7 +200,7 @@ expect_gate() {
   set +e
   gate_log=$(cd "$T/repo" && CHANGED_FILES_FILE="$T/rt/$handoff" DIFF_LINES="$lines" SIZE_THRESHOLD=30 \
     GITHUB_OUTPUT="$T/gateout" GITHUB_STEP_SUMMARY="$T/summary" \
-    node .github/scripts/codex-gate.mjs 2>&1 < /dev/null)
+    node "$T/scripts/codex-gate.mjs" 2>&1 < /dev/null)
   gate_rc=$?
   set -e
   got=$(sed -n 's/^should_run=//p' "$T/gateout")

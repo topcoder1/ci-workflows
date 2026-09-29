@@ -277,15 +277,26 @@ def step_environment(document, step, event):
     return {k: EXPRESSION.sub(evaluate, str(v)) for k, v in merged.items()}
 
 
+def scratch(repo):
+    """The job's scratch directory (VERIFIER_SCRATCH), outside the checkout."""
+    directory = repo.parent / "scratch"
+    directory.mkdir(exist_ok=True)
+    return directory
+
+
 def run_step(checkout, script):
     """Run `script` as the diff step; return changed-paths.txt's lines and
     what the step wrote to $GITHUB_OUTPUT."""
     repo, event = checkout
     document, step = diff_step()
     assert "${{" not in script, "the runner would substitute into this script"
-    environment = {**git_environment(), **step_environment(document, step, event)}
+    environment = {
+        **git_environment(),
+        **step_environment(document, step, event),
+        "VERIFIER_SCRATCH": str(scratch(repo)),
+    }
     output = bash(script, repo, environment)
-    return (repo / "changed-paths.txt").read_text().splitlines(), output
+    return (scratch(repo) / "changed-paths.txt").read_text().splitlines(), output
 
 
 def classify(repo, patterns):
@@ -298,7 +309,7 @@ def classify(repo, patterns):
             "--patterns",
             patterns,
             "--paths",
-            "changed-paths.txt",
+            str(scratch(repo) / "changed-paths.txt"),
         ],
         cwd=repo,
         capture_output=True,
@@ -387,7 +398,11 @@ def render_prompt(checkout, tmp_path, matched):
     workdir = tmp_path / "prompt"
     workdir.mkdir()
     (workdir / "matches.txt").write_text(f"{matched}\t(matched: fixture)\n")
-    environment = {**os.environ, **step_environment(document, step, event)}
+    environment = {
+        **os.environ,
+        **step_environment(document, step, event),
+        "VERIFIER_SCRATCH": str(workdir),
+    }
     return bash(step["run"], workdir, environment)
 
 
