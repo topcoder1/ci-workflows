@@ -4,8 +4,8 @@ git leaves a submodule's pointer change out of `git diff`, `git log -p`,
 `git show` and `git diff-tree` when the .gitmodules it reads sets
 `submodule.<name>.ignore` (`all` hides it), and that file comes from the PR.
 #250 passes `--ignore-submodules=none` wherever a workflow writes the git
-command. In the adversarial and Codex lanes the model runs git itself, so each
-lane has a step, before its model step, that writes
+command. In the adversarial, Codex and verifier lanes the model runs git
+itself, so each lane has a step, before its model step, that writes
 `submodule.<name>.ignore=none` into the checkout's .git/config for every name
 with an `ignore` key in the .gitmodules of the base commit, the PR head, the
 merge commit, or the base branch's tip in the checkout (claude-code-action
@@ -15,10 +15,11 @@ base commit). A per-name setting in any config scope overrides .gitmodules;
 reads it whatever environment the model's shell is given.
 
 Layers:
-1. Discovery: the lanes with the step, plus the exempt verifier, are exactly
-   the model-git LANES that test_review_lanes_base_attributes.py discovers,
-   and both copies of the step are one script that runs whenever the model
-   step does.
+1. Discovery: the lanes with the step are exactly the model-git LANES that
+   test_review_lanes_base_attributes.py discovers, and the three copies of
+   the step are one script that runs whenever the model step does. The
+   verifier's copy writes the PR checkout's .git/config, not the pinned
+   ci-workflows checkout's inside it.
 2. Behavior: the shipped step runs in a fixture PR checkout (a detached merge
    commit with remote refs, as actions/checkout leaves refs/pull/N/merge),
    then `git diff`, `git log -p` and `git show` of the PR, under the model
@@ -72,12 +73,9 @@ ADVERSARIAL = (
     "Adversarial pass",
 )
 CODEX = ("codex-review.yml", "codex-review", "Run Codex adversarial review")
+VERIFIER = ("verifier-on-high-risk.yml", "verify", "Run verifier (claude-code-action)")
 # (workflow, job id, model step) of each lane that runs the step.
-SUBMODULE_LANES = {ADVERSARIAL, CODEX}
-# The verifier's prompt hands its model git commands that carry
-# --ignore-submodules=none (#250); test_verifier_changed_paths_renames.py pins
-# them.
-EXEMPT = {("verifier-on-high-risk.yml", "verify", "Run verifier (claude-code-action)")}
+SUBMODULE_LANES = {ADVERSARIAL, CODEX, VERIFIER}
 
 LINK = "vendor/lib"  # the submodule's path
 # Submodule commits. The superproject records them without holding them.
@@ -401,12 +399,12 @@ SHAPES = {
     "added by the PR, read from the index": (
         added_by_the_pr,
         Checkout.restore_config_from_base,
-        {ADVERSARIAL},
+        {ADVERSARIAL, VERIFIER},
     ),
     "name only the base has": (
         name_only_the_base_has,
         Checkout.restore_config_from_base,
-        {ADVERSARIAL},
+        {ADVERSARIAL, VERIFIER},
     ),
     "ignore only the merge commit sets": (
         ignore_only_the_merge_sets,
@@ -426,7 +424,7 @@ SHAPES = {
     "ignore the base branch gained after the event": (
         ignore_the_base_branch_gained,
         Checkout.restore_config_from_base,
-        {ADVERSARIAL},
+        {ADVERSARIAL, VERIFIER},
     ),
 }
 CASES = [
@@ -451,9 +449,8 @@ def prepare(shape, tmp_path, lane, script=None):
 # --- 1. Discovery --------------------------------------------------------------
 
 
-def test_every_model_git_lane_runs_the_step_or_is_exempt():
-    assert SUBMODULE_LANES | EXEMPT == LANES
-    assert not SUBMODULE_LANES & EXEMPT
+def test_every_model_git_lane_runs_the_step():
+    assert SUBMODULE_LANES == LANES
 
 
 @pytest.mark.parametrize("lane", sorted(SUBMODULE_LANES), ids=lambda lane: lane[0])
@@ -467,18 +464,36 @@ def test_the_step_runs_before_the_model_step_whenever_it_runs(lane):
     assert step.get("if") == model.get("if")
 
 
-def test_both_lanes_run_one_script():
+def test_every_lane_runs_one_script():
     steps = [
         find_step(load(workflow), job, STEP)
         for workflow, job, _ in sorted(SUBMODULE_LANES)
     ]
-    assert steps[0]["run"] == steps[1]["run"]
+    assert len(steps) == 3
+    assert all(step["run"] == steps[0]["run"] for step in steps)
     environment = {
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
         "BASE_REF": "${{ github.event.pull_request.base.ref }}",
     }
-    assert [step["env"] for step in steps] == [environment, environment]
+    assert [step["env"] for step in steps] == [environment] * 3
+
+
+def test_the_verifiers_step_writes_the_pr_checkouts_config(tmp_path):
+    # The verifier job also checks out this repository at a pinned SHA into
+    # ci-workflows/ inside the workspace: a repository of its own there.
+    checkout = bumped_pointer(tmp_path)
+    pinned = checkout.repo / "ci-workflows"
+    pinned.mkdir()
+    git(pinned, "init", "-q")
+    pinned_config = (pinned / ".git" / "config").read_bytes()
+    result = run_step(checkout, VERIFIER, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (pinned / ".git" / "config").read_bytes() == pinned_config
+    assert git(checkout.repo, "config", "--local", "submodule.vendor/lib.ignore") == (
+        "none\n"
+    )
+    assert_model_sees_the_pointer(checkout, VERIFIER, pr_commands(checkout))
 
 
 # --- 2 and 5. Behavior and negative controls -----------------------------------
