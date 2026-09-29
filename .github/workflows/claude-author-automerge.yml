@@ -2181,8 +2181,13 @@ jobs:
             echo ""
             echo "This Claude-authored PR modifies files matching the risk-tier patterns"
             echo "defined in the global CLAUDE.md policy (auth / secrets / migrations /"
-            echo "billing / production infra). Manual click-merge required, OR use one of"
-            echo "the bypass paths below."
+            if [ -n "$BYPASS_LABEL" ] || [ -n "$CODEX_CHECK" ]; then
+              echo "billing / production infra). Manual click-merge required, OR use one of"
+              echo "the bypass paths below."
+            else
+              echo "billing / production infra). Manual click-merge required: this caller"
+              echo "configures no bypass (risk_bypass_label and codex_check_name are empty)."
+            fi
             echo ""
             echo "Matched files:"
             echo '```'
@@ -2192,8 +2197,10 @@ jobs:
             printf '%s' "$MATCHED"
             echo '```'
             echo ""
-            echo "**Bypass options (no PR detail navigation needed):**"
-            echo ""
+            if [ -n "$BYPASS_LABEL" ] || [ -n "$CODEX_CHECK" ]; then
+              echo "**Bypass options (no PR detail navigation needed):**"
+              echo ""
+            fi
             if [ -n "$BYPASS_LABEL" ]; then
               echo "- Apply the \`$BYPASS_LABEL\` label to this PR. The workflow will re-run on"
               echo "  the label event and enable auto-merge. One click from the PR list page."
