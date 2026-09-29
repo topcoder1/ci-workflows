@@ -385,6 +385,9 @@ jobs:
       - name: Pre-install Claude Code binary (workaround anthropics/claude-code-action#1290)
         id: claude_install
         if: steps.classify.outputs.matched == 'yes'
+        # Bounded like any setup step: a stalled download fails here, which
+        # a later step can report, instead of running into the job's timeout.
+        timeout-minutes: 4
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"

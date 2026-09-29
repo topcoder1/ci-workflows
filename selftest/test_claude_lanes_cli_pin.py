@@ -80,6 +80,33 @@ def lane_problems(name, job, index):
     return problems
 
 
+# The lanes whose install step this repo added bound it themselves; in the
+# verifier the job's time must still cover the model step and the steps that
+# report a failure after an install stall.
+INSTALL_TIMEOUT_LANES = {"claude-adversarial-review.yml", "verifier-on-high-risk.yml"}
+MAX_INSTALL_MINUTES = 5
+# What the verifier's job keeps beyond the model and install timeouts: the
+# other setup steps (checkouts, classification, the prompt) and the steps that
+# report a failure afterwards, about 3 minutes each at most.
+VERIFIER_RESERVE_MINUTES = 6
+
+
+def install_timeout_problems(name, job, index):
+    steps = job["steps"]
+    installs = [step for step in steps if step.get("id") == INSTALL_ID]
+    if name not in INSTALL_TIMEOUT_LANES or len(installs) != 1:
+        return []
+    minutes = installs[0].get("timeout-minutes")
+    if not isinstance(minutes, int) or not 1 <= minutes <= MAX_INSTALL_MINUTES:
+        return [f"{name}: the install step's timeout-minutes is {minutes!r}"]
+    job_minutes = job.get("timeout-minutes")
+    model_minutes = steps[index].get("timeout-minutes")
+    if isinstance(job_minutes, int) and isinstance(model_minutes, int):
+        if job_minutes - model_minutes - minutes < VERIFIER_RESERVE_MINUTES:
+            return [f"{name}: install and model timeouts leave the job too little time"]
+    return []
+
+
 def all_problems(texts):
     lanes = action_lanes(texts)
     problems = []
@@ -88,6 +115,7 @@ def all_problems(texts):
         problems.append(f"lanes not found: {sorted(set(EXPECTED_PINS) - names)}")
     for name, job, index in lanes:
         problems += lane_problems(name, job, index)
+        problems += install_timeout_problems(name, job, index)
     scripts = {
         step["run"]
         for _, job, _ in lanes
@@ -166,6 +194,30 @@ MUTANTS = {
         "run 2 scripts, not 1",
     ),
     "a new lane without a pin": (add_workflow, "new-lane.yml: CLAUDE_CODE_VERSION"),
+    "verifier install unbounded": (
+        swap(
+            VERIFIER,
+            "        timeout-minutes: 4\n        run: |\n",
+            "        run: |\n",
+        ),
+        "the install step's timeout-minutes is None",
+    ),
+    "verifier install bound past the reserve": (
+        swap(
+            VERIFIER,
+            "        timeout-minutes: 4\n        run: |\n",
+            "        timeout-minutes: 5\n        run: |\n",
+        ),
+        "leave the job too little time",
+    ),
+    "adversarial install bound too long": (
+        swap(
+            ADVERSARIAL,
+            "        timeout-minutes: 4\n        run: |\n",
+            "        timeout-minutes: 30\n        run: |\n",
+        ),
+        "the install step's timeout-minutes is 30",
+    ),
 }
 
 
