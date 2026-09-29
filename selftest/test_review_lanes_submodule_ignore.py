@@ -482,6 +482,26 @@ def test_every_lane_runs_one_script():
 def test_the_verifiers_step_writes_the_pr_checkouts_config(tmp_path):
     # The verifier job also checks out this repository at a pinned SHA into
     # ci-workflows/ inside the workspace: a repository of its own there.
+    # The step and the model step run at the workspace root, where the PR
+    # checkout is: nothing in the workflow moves them into ci-workflows/.
+    workflow_file, job_id, model_name = VERIFIER
+    document = load(workflow_file)
+    job = document["jobs"][job_id]
+    assert "working-directory" not in (
+        (document.get("defaults") or {}).get("run") or {}
+    )
+    assert "working-directory" not in ((job.get("defaults") or {}).get("run") or {})
+    for name in (STEP, model_name):
+        assert "working-directory" not in find_step(document, job_id, name)
+    checkouts = [
+        step
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert [(step.get("with") or {}).get("path") for step in checkouts] == [
+        None,
+        "ci-workflows",
+    ]
     checkout = bumped_pointer(tmp_path)
     pinned = checkout.repo / "ci-workflows"
     pinned.mkdir()
