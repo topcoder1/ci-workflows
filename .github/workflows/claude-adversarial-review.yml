@@ -13,7 +13,7 @@ on:
   workflow_call:
     inputs:
       checkout_depth:
-        description: "git fetch-depth. 0 = full history (needed for diff against base)."
+        description: "git fetch-depth. Must be 0 (full history): the diff against base needs it, and the step that keeps submodule changes visible fails closed without the PR's base and head commits and the base branch."
         required: false
         type: number
         default: 0
@@ -50,10 +50,12 @@ jobs:
       # moved past the event's base commit). It is config, not environment,
       # because git reads .git/config whatever environment the model's shell
       # is given. Nothing is written when no .gitmodules sets ignore. The
-      # names are PR input: one outside [A-Za-z0-9._/-]{1,255}, more than 256
-      # of them, a .gitmodules git cannot parse, or a base commit, head
-      # commit or base branch missing from the checkout (checkout_depth must
-      # keep them) fails the step. codex-review.yml runs the same script;
+      # names are PR input: an empty one, one longer than 255 bytes or with a
+      # control character, more than 256 of them, a .gitmodules git cannot
+      # parse, or a base commit, head commit or base branch missing from the
+      # checkout (checkout_depth must be 0) fails the step. Each name reaches
+      # git config as one argument, and is printed only after fixed text, so
+      # no name can start a log line. codex-review.yml runs the same script;
       # both copies are pinned by
       # selftest/test_review_lanes_submodule_ignore.py.
       - name: Keep submodule changes visible to the model's git
@@ -65,7 +67,7 @@ jobs:
           set -euo pipefail
           export LC_ALL=C
           tmp="${RUNNER_TEMP:?RUNNER_TEMP is not set}"
-          name_re='^[A-Za-z0-9._/-]{1,255}$'
+          name_re='^[^[:cntrl:]]{1,255}$'
           : > "$tmp/gitmodules-ignore-names"
           # claude-code-action restores .gitmodules from the base branch as it
           # stands when the action runs, which can be past BASE_SHA, so the
@@ -93,7 +95,7 @@ jobs:
               name=${key#submodule.}
               name=${name%.ignore}
               if ! [[ $name =~ $name_re ]]; then
-                echo "::error::the .gitmodules at ${rev} sets ignore for a submodule whose name is not 1-255 characters of A-Z a-z 0-9 . _ / -. Failing closed: git would hide that submodule's changes from the model, and this step passes no such name to git config."
+                echo "::error::the .gitmodules at ${rev} sets ignore for a submodule whose name is empty, longer than 255 bytes or holds a control character. Failing closed: git would hide that submodule's changes from the model, and this step passes no such name to git config."
                 exit 1
               fi
               printf '%s\n' "$name" >> "$tmp/gitmodules-ignore-names"

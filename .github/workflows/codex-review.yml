@@ -243,7 +243,7 @@ jobs:
           set -euo pipefail
           export LC_ALL=C
           tmp="${RUNNER_TEMP:?RUNNER_TEMP is not set}"
-          name_re='^[A-Za-z0-9._/-]{1,255}$'
+          name_re='^[^[:cntrl:]]{1,255}$'
           : > "$tmp/gitmodules-ignore-names"
           # claude-code-action restores .gitmodules from the base branch as it
           # stands when the action runs, which can be past BASE_SHA, so the
@@ -271,7 +271,7 @@ jobs:
               name=${key#submodule.}
               name=${name%.ignore}
               if ! [[ $name =~ $name_re ]]; then
-                echo "::error::the .gitmodules at ${rev} sets ignore for a submodule whose name is not 1-255 characters of A-Z a-z 0-9 . _ / -. Failing closed: git would hide that submodule's changes from the model, and this step passes no such name to git config."
+                echo "::error::the .gitmodules at ${rev} sets ignore for a submodule whose name is empty, longer than 255 bytes or holds a control character. Failing closed: git would hide that submodule's changes from the model, and this step passes no such name to git config."
                 exit 1
               fi
               printf '%s\n' "$name" >> "$tmp/gitmodules-ignore-names"

@@ -30,11 +30,16 @@ Layers:
    the PR head checked out; the base commit checked out after the branch
    moved on; and an ignore key the base branch gained after the event, which
    the restore brings in.
-3. Fail closed: a name outside ^[A-Za-z0-9._/-]{1,255}$ (with `=`, `$(...)`,
-   a backtick, a quote, a space or 256 characters, and, through a git shim
-   because git's config grammar cannot produce one, a newline), a .gitmodules
-   git cannot parse, a base commit or base branch missing from the checkout,
-   or more than 256 names: exit 1, with .git/config untouched.
+3. Names: one of 1-255 bytes with no control character reaches git config as
+   itself, one argument, printed only after fixed text, and the pointer shows
+   (`@`, a space, non-ASCII, `+`, `:`, `~`, `#`, `=`, `;`, a quote, `$(...)`,
+   a backtick, `::set-output`, `%0A`). Fail closed, exit 1 with .git/config
+   untouched: a name with a control character (tab, escape, SOH, DEL, CR,
+   and, through a git shim because git's config grammar cannot produce one,
+   a newline) or of 256 bytes, a .gitmodules git cannot parse, a base commit
+   or base branch missing from the checkout, or more than 256 names (256
+   across revisions pass). A NUL cuts git's own reading of the section
+   short: no ignore key is listed, none applies, and the pointer shows.
 4. Unaffected repos: with no .gitmodules, or one that sets no ignore key, the
    step leaves .git/config byte-identical and writes no GITHUB_ENV or
    GITHUB_OUTPUT.
@@ -502,6 +507,10 @@ def test_the_step_names_what_it_sets(tmp_path):
     assert git(checkout.repo, "config", "--local", "--get-regexp", "^submodule\\.") == (
         "submodule.vendor/lib.ignore none\n"
     )
+    # It writes config only: nothing reaches a later step's environment or
+    # outputs.
+    assert not (tmp_path / "github-env").exists()
+    assert not (tmp_path / "github-output").exists()
 
 
 LOOP = 'for rev in "$BASE_SHA" "$HEAD_SHA" HEAD "$tip"; do'
@@ -564,34 +573,115 @@ def assert_failed_closed(result, checkout, before, message):
     assert checkout.config_bytes() == before, ".git/config was written"
 
 
-# Each is written into .gitmodules with `"` and `\` escaped.
-MALICIOUS_NAMES = {
+def quoted(name):
+    """`name` as a .gitmodules section header holds it."""
+    return name.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def bumped_pointer_named(root, name):
+    """The PR sets `ignore = all` for the submodule called `name` and moves
+    it."""
+    section = f'[submodule "{quoted(name)}"]\n\tpath = {LINK}\n'
+    return Checkout(
+        root,
+        {".gitmodules": section, LINK: Gitlink(BEFORE)},
+        {".gitmodules": section + "\tignore = all\n", LINK: Gitlink(AFTER)},
+    )
+
+
+# Names git allows and this step passes through as data.
+NAMES_GIT_ALLOWS = {
+    "at sign": "vendor/@scope/pkg",
+    "space": "third party/lib",
+    "non-ASCII": "libé",
+    "plus": "a+b",
+    "colon": "c:d",
+    "tilde": "e~f",
+    "hash": "g#h",
     "equals sign": "vendor=lib",
+    "semicolon": "vendor;lib",
+    "double quote": 'vendor"lib',
+    "backslash": "vendor\\lib",
     "command substitution": "$(touch pwned)",
     "backtick": "`touch pwned`",
-    "double quote": 'vendor"lib',
-    "space": "vendor lib",
-    "semicolon": "vendor;lib",
-    "256 characters": "n" * 256,
 }
 
 
-@pytest.mark.parametrize("name", sorted(MALICIOUS_NAMES))
+@pytest.mark.parametrize("name", sorted(NAMES_GIT_ALLOWS))
 @pytest.mark.parametrize("lane", sorted(SUBMODULE_LANES), ids=lambda lane: lane[0])
-def test_a_name_outside_the_pattern_fails_closed(name, lane, tmp_path):
-    raw = MALICIOUS_NAMES[name]
-    quoted = raw.replace("\\", "\\\\").replace('"', '\\"')
+def test_a_name_git_allows_reaches_git_config_as_itself(name, lane, tmp_path):
+    raw = NAMES_GIT_ALLOWS[name]
+    checkout = bumped_pointer_named(tmp_path, raw)
+    result = run_step(checkout, lane, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == f"submodule.{raw}.ignore=none\n"
+    assert git(checkout.repo, "config", "--local", f"submodule.{raw}.ignore") == (
+        "none\n"
+    )
+    assert not (checkout.repo / "pwned").exists(), "part of a name ran"
+    assert_model_sees_the_pointer(checkout, lane, pr_commands(checkout))
+
+
+@pytest.mark.parametrize(
+    "raw", ["::set-output name=out::value", "%0A::error::injected"]
+)
+@pytest.mark.parametrize("lane", sorted(SUBMODULE_LANES), ids=lambda lane: lane[0])
+def test_a_name_cannot_start_a_workflow_command(raw, lane, tmp_path):
+    checkout = bumped_pointer_named(tmp_path, raw)
+    result = run_step(checkout, lane, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # The runner reads a workflow command only at the start of a line.
+    assert result.stdout == f"submodule.{raw}.ignore=none\n"
+    assert not (tmp_path / "github-env").exists()
+    assert not (tmp_path / "github-output").exists()
+    assert_model_sees_the_pointer(checkout, lane, pr_commands(checkout))
+
+
+# Each is written into .gitmodules with `"` and `\` escaped; git lists each.
+CONTROL_NAMES = {
+    "tab": "vendor\tlib",
+    "escape": "vendor\x1blib",
+    "start of heading": "vendor\x01lib",
+    "delete": "vendor\x7flib",
+    "carriage return": "vendor\rlib",
+    "256 bytes": "n" * 256,
+}
+
+
+@pytest.mark.parametrize("name", sorted(CONTROL_NAMES))
+@pytest.mark.parametrize("lane", sorted(SUBMODULE_LANES), ids=lambda lane: lane[0])
+def test_a_name_with_a_control_character_or_too_long_fails_closed(name, lane, tmp_path):
+    raw = CONTROL_NAMES[name]
     checkout = with_pr_gitmodules(
-        tmp_path, f'[submodule "{quoted}"]\n\tpath = {LINK}\n\tignore = all\n'
+        tmp_path, f'[submodule "{quoted(raw)}"]\n\tpath = {LINK}\n\tignore = all\n'
     )
     before = checkout.config_bytes()
     result = run_step(checkout, lane, tmp_path)
     assert_failed_closed(
         result, checkout, before, "sets ignore for a submodule whose name"
     )
-    # The name is never echoed, and nothing in it ran.
+    # The name is never echoed.
     assert raw not in result.stdout + result.stderr
-    assert not (checkout.repo / "pwned").exists()
+
+
+def test_a_nul_in_a_name_reaches_no_git_config(tmp_path):
+    # git reads the section header as ending at the NUL, so it lists no
+    # ignore key for it and applies none: nothing to write, nothing hidden.
+    section = f'[submodule "vendor\x00lib"]\n\tpath = {LINK}\n\tignore = all\n'
+    checkout = Checkout(
+        tmp_path,
+        {"app.py": "x = 1\n", LINK: Gitlink(BEFORE)},
+        {".gitmodules": section, LINK: Gitlink(AFTER)},
+    )
+    before = checkout.config_bytes()
+    result = run_step(checkout, CODEX, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == (
+        "No .gitmodules sets ignore for a submodule; .git/config is left as it is.\n"
+    )
+    assert checkout.config_bytes() == before
+    for arguments in pr_commands(checkout).values():
+        assert POINTER in git(checkout.repo, *arguments)
 
 
 def test_a_name_of_255_characters_passes(tmp_path):
@@ -659,6 +749,27 @@ def test_a_base_branch_missing_from_the_checkout_fails_closed(ref, tmp_path):
         result, checkout, before, "base branch is not in this checkout"
     )
     assert ref not in result.stdout + result.stderr
+
+
+def test_256_names_across_revisions_pass(tmp_path):
+    # The cap counts distinct names: the base sets ignore for s000-s127 and
+    # the PR for s064-s255, so s064-s127 appear in every revision read.
+    def sections(numbers):
+        return "".join(
+            f'[submodule "s{n:03}"]\n\tpath = s{n:03}\n\tignore = all\n'
+            for n in numbers
+        )
+
+    checkout = Checkout(
+        tmp_path,
+        {"app.py": "x = 1\n", ".gitmodules": sections(range(128))},
+        {".gitmodules": sections(range(64, 256))},
+    )
+    result = run_step(checkout, CODEX, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == "".join(
+        f"submodule.s{n:03}.ignore=none\n" for n in range(256)
+    )
 
 
 def test_more_than_256_names_fails_closed(tmp_path):
