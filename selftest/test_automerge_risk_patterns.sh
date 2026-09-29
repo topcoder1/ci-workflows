@@ -122,12 +122,11 @@ done
 # The corpus proves this file's copy of the list gates compose files,
 # suffix-style Dockerfiles, CODEOWNERS and .gitmodules. These controls run
 # against the SHIPPED patterns= block instead, read from
-# claude-author-automerge.yml, so
-# narrowing those lines in both workflows (with this copy untouched) fails
-# here too. Each verdict must come from a line naming the file, and can FAIL:
-# misspell the name in a copy of the list, and every probe must then stop
-# matching. If one still matches, another pattern (^deploy/.*, say) is
-# carrying it. The probes are HARDCODED on purpose: a probe read back out of
+# claude-author-automerge.yml, so narrowing those lines in both workflows
+# (with this copy untouched) fails here too. Each verdict must come from a
+# line naming the file, and can FAIL: misspell the name in a copy of the
+# list, and every probe must then stop matching. If one still matches,
+# another pattern (^deploy/.*, say) is carrying it. The probes are HARDCODED on purpose: a probe read back out of
 # the list under test agrees with that list no matter what it says.
 shipped=$(python3 - "$(dirname "$0")/../.github/workflows/claude-author-automerge.yml" <<'PY'
 import re, sys

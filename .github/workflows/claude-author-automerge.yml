@@ -101,9 +101,10 @@ name: Claude-author Auto-merge (reusable)
 #       the PR's .gitmodules (wxa_vpn's deploy workflows check out with
 #       `submodules: recursive`). `ignore = all` hides a moved submodule
 #       pointer from a plain `git diff` or `git log -p` in the PR's checkout;
-#       `-c diff.ignoreSubmodules=none` does not bring it back, only
-#       `--ignore-submodules=none` does. The superproject never reads a
-#       nested copy, but it is gated too, the same (^|/) shape as
+#       `-c diff.ignoreSubmodules=none` does not bring it back, while
+#       `--ignore-submodules=none` or a per-name
+#       `-c submodule.<name>.ignore=none` does. The superproject never
+#       reads a nested copy, but it is gated too, the same (^|/) shape as
 #       .gitattributes. Measured on git 2.50.1, 2026-09-28.
 #     - ML serving/model-promotion: ml/predictor.py (live scoring path),
 #       ml/retrain.py (model-promotion gate). Lesson 2026-06-02: a serving-path

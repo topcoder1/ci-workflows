@@ -317,12 +317,14 @@ RISKY: sub/.gitmodules
 RISKY: docs/.gitmodules
 RISKY: tests/fixtures/.gitmodules
 RISKY: vendor/github.com/example/lib/.gitmodules
-# Still SAFE: git reads no other name. The template-style name also pins the
-# (^|/) anchor, fixtures renamed the way packagers rename dotfiles
-# (_gitmodules, gitmodules) pin the escaped, required dot, and a .gitmodules/
-# directory, which git never reads, pins the file-name scope. Case-sensitive,
-# like .gitattributes: the fleet's jobs run git on Linux, where only this
-# exact name is read.
+# Still SAFE: on a case-sensitive filesystem git reads no other name. The
+# template-style name also pins the (^|/) anchor, fixtures renamed the way
+# packagers rename dotfiles (_gitmodules, gitmodules) pin the escaped,
+# required dot, and a .gitmodules/ directory, which git never reads, pins the
+# file-name scope. Case-sensitive, like .gitattributes: wxa_vpn's submodule
+# checkouts run on ubuntu-latest. On a case-insensitive filesystem (macOS,
+# Windows) git also reads .GITMODULES, so a job moved to such a runner needs
+# a case-insensitive rule.
 SAFE: docs/gitmodules.md
 SAFE: .gitmodules.bak
 SAFE: docs/examples/project.gitmodules
