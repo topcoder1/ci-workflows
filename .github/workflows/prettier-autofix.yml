@@ -399,7 +399,7 @@ jobs:
             if [ "$attempt" -lt 3 ]; then sleep "$(( attempt * 2 ))"; fi
           done
           if [ "$LISTED" -ne 1 ]; then
-            echo "::warning::Could not list PR files after 3 attempts (transient API error, or the caller's GITHUB_TOKEN lacks 'pull-requests: read'). Skipping prettier for this run — refusing to widen scope to the full tree."
+            echo "::warning::Could not list PR files after 3 attempts (transient API error). Skipping prettier for this run — refusing to widen scope to the full tree."
             echo "mode=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
