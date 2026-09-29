@@ -27,8 +27,9 @@
 #      targets the changed files that a two-group glob names.
 #
 # Blocks are EXTRACTED from the workflow YAML and executed, so this
-# exercises the shipped bash. Sections 1-3 run on any bash (incl. macOS
-# 3.2); section 4 needs bash >= 4 (mapfile, declare -A), as CI has.
+# exercises the shipped bash. Sections 1 and 2 run on any bash (incl. macOS
+# 3.2); sections 3 and 4 need bash >= 4 (globstar, mapfile, declare -A), as
+# CI has.
 #
 # Run from the repo root:
 #   bash selftest/test_prettier_glob_brace_expansion.sh
@@ -98,7 +99,7 @@ for p in \
   'a{b' \
   'a}b{c,d}'; do
   want=$(oracle "$p")
-  got=$(expand_braces "$p")
+  got=$(expand_braces "$p" 2>&1) || got="<exit $?> $got"
   if [ "$got" = "$want" ]; then
     echo "✓ expand_braces '$p' matches bash ($(printf '%s' "$want" | tr '\n' ' '))"
   else
@@ -136,7 +137,7 @@ fuzz_n=300; fuzz_bad=0; fuzz_i=0
 while [ "$fuzz_i" -lt "$fuzz_n" ]; do
   G=""; gen 2
   want=$(oracle "$G")
-  got=$(expand_braces "$G")
+  got=$(expand_braces "$G" 2>&1) || got="<exit $?> $got"
   if [ "$got" != "$want" ]; then
     fuzz_bad=$((fuzz_bad + 1))
     if [ "$fuzz_bad" -le 3 ]; then
@@ -164,7 +165,7 @@ else
   mkdir -p "$T/g/docs"
   : > "$T/g/a.md"
   : > "$T/g/docs/b.md"
-  got=$(cd "$T/g" && shopt -s globstar nullglob && expand_braces '{**/*.md,x}')
+  got=$(cd "$T/g" && shopt -s globstar nullglob && expand_braces '{**/*.md,x}' 2>&1) || got="<exit $?> $got"
   want=$(printf '%s\n' '**/*.md' 'x')
   if [ "$got" = "$want" ]; then
     echo "✓ alternatives stay patterns (not pathname-expanded) under globstar+nullglob"

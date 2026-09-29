@@ -416,8 +416,9 @@ jobs:
             # alternatives, and (as bash drops empty words) no empty results.
             # A brace that opens no well-formed comma group (no top-level
             # comma, or no closing brace) stays literal. That matches bash for
-            # any glob whose braces all form comma groups; bash's handling of
-            # other stray braces is not reproduced, nor are {1..3} sequences.
+            # any glob whose braces all form comma groups and that has no
+            # backslash escapes; bash's handling of other stray braces is not
+            # reproduced, nor are escapes or {1..3} sequences.
             # No eval (a PR can edit its caller's markdown_glob), and every
             # expansion is quoted, so no alternative is pathname-expanded
             # before compgen sees it.
