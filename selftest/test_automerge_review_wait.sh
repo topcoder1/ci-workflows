@@ -38,9 +38,15 @@
 #   R12 a failed attempt nobody re-runs declines at the cap, named with its
 #       conclusion.
 #   R13 a queued review (not yet in_progress) holds the gate.
-#   R14 an empty HEAD_SHA fails closed without reading anything.
+#   R14 an empty HEAD_SHA fails closed without reading check runs.
 #   R15 a control character in a check-run name cannot start a workflow
 #       command in the log.
+#   R16 two apps publishing the same check name are judged separately: one
+#       app's finished run cannot hide another app's running review.
+#   R17 a successful read whose body is empty or not the documented shape
+#       fails closed, never reads as "no reviews".
+#   R18 the runner's legacy `##[command]` syntax, which it recognises
+#       anywhere in a line, is neutralised in printed names too.
 #   S1  structural: the read paginates and asks for every attempt (filter=all).
 #   S2  structural: HEAD_SHA and REVIEW_CHECK_NAMES are bound in THIS step's env.
 #
@@ -141,6 +147,7 @@ echo "$*" >> "$T_DIR/gh.log"
 case "$*" in
   *commits/*/check-runs*)
     if [ -f "$T_DIR/checkruns_error" ]; then cat "$T_DIR/checkruns_error" >&2; exit 1; fi
+    if [ -f "$T_DIR/checkruns_raw" ]; then cat "$T_DIR/checkruns_raw"; exit 0; fi
     now=$(cat "$T_NOW")
     for page in "$T_DIR"/checkruns_page*.json; do
       case "$page" in
@@ -148,7 +155,7 @@ case "$*" in
         *) case "$*" in *--paginate*) ;; *) continue ;; esac ;;
       esac
       jq -c --argjson now "$now" '{total_count: length, check_runs: map(select($now >= (.appear_at // 0))
-        | {id, name,
+        | {id, name, app: {id: (.app_id // 1)},
            status: (if $now >= .done_at then "completed" else (.before // "in_progress") end),
            conclusion: (if $now >= .done_at then (.conclusion // "success") else null end)})}' "$page"
     done
@@ -443,7 +450,7 @@ exec_gate "$DEFAULT_NAMES" ""
 if [ "$RC" -eq 1 ] && ! grep -q '^clear=' "$CASE/output" && ! grep -q 'check-runs' "$CASE/gh.log"; then
   echo "✓ R14 an empty HEAD_SHA fails closed without a check-runs read"
 else
-  echo "✗ R14 an empty HEAD_SHA did not fail closed before reading"
+  echo "✗ R14 an empty HEAD_SHA did not fail closed before reading check runs"
   report
   failed=1
 fi
@@ -459,6 +466,57 @@ if grep -q '^reason=quiet-cap$' "$CASE/output" && ! grep -q '^::error::injected'
   echo "✓ R15 a control character in a check-run name cannot start a workflow command"
 else
   echo "✗ R15 a check-run name reached the log with its control characters"
+  report
+  failed=1
+fi
+
+# R16. Two apps can publish a check with the same name. Judging by name
+# alone keeps only the highest id, so app 2's finished run would hide app
+# 1's running review. Each app's newest attempt is judged on its own.
+new_case
+jq -n --argjson finish "$DONE" --argjson past "$PAST" \
+  '[{id: 130, app_id: 1, name: "review / Codex Review", done_at: $finish},
+    {id: 131, app_id: 2, name: "review / Codex Review", done_at: $past}]' > "$CASE/checkruns_page1.json"
+exec_gate "$DEFAULT_NAMES"
+if [ "$RC" -eq 0 ] && grep -q '^clear=1$' "$CASE/output" && [ "$(polls)" -eq 6 ]; then
+  echo "✓ R16 one app's finished check cannot hide another app's running review"
+else
+  echo "✗ R16 a same-named check from another app hid a running review"
+  report
+  failed=1
+fi
+
+# R17. gh exits 0 but the body is empty, an object without check_runs, or
+# check_runs null. None of those says "no reviews": each fails closed.
+r17_ok=1
+for body in '' '{}' '{"check_runs":null}' '[]'; do
+  new_case
+  runs 1 "140|review / Codex Review|$NEVER"
+  printf '%s' "$body" > "$CASE/checkruns_raw"
+  exec_gate "$DEFAULT_NAMES"
+  if [ "$RC" -ne 1 ] || grep -q '^clear=' "$CASE/output"; then
+    echo "✗ R17 a check-runs body of '${body}' did not fail closed"
+    report
+    r17_ok=0
+  fi
+done
+if [ "$r17_ok" -eq 1 ]; then
+  echo "✓ R17 an empty or malformed check-runs body fails closed"
+else
+  failed=1
+fi
+
+# R18. The runner still parses the legacy ##[command] syntax anywhere in a
+# line (actions/runner ActionCommand.TryParse uses IndexOf), so a job name
+# carrying it must not reach the poll or cap lines intact.
+new_case
+jq -n --argjson never "$NEVER" '[{id: 150, name: "##[add-mask]true / Codex Review", done_at: $never}]' \
+  > "$CASE/checkruns_page1.json"
+exec_gate "$DEFAULT_NAMES"
+if grep -q '^reason=quiet-cap$' "$CASE/output" && ! grep -qF '##[add-mask]' "$CASE/stdout"; then
+  echo "✓ R18 a legacy ##[command] in a check-run name is neutralised"
+else
+  echo "✗ R18 a legacy ##[command] in a check-run name reached the log intact"
   report
   failed=1
 fi

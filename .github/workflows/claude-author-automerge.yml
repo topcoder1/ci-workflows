@@ -417,8 +417,9 @@ jobs:
       # policy-free, and then the global risk-tier regex below still
       # gates, which matches pre-classifier behavior (automerge-only
       # repos without pr-classify stay supported). No `checks: read` is
-      # needed for any of this; only the quiet gate's review-completion wait
-      # reads check runs (review_check_names). (The wxa-secrets caller used
+      # needed for any of this; the quiet gate's review-completion wait reads
+      # check runs (review_check_names), and so does the opt-in Codex bypass
+      # below. (The wxa-secrets caller used
       # to omit it to keep the Codex bypass off; since 2026-09-29 the bypass
       # is opt-in via codex_check_name, so that reason is gone.)
       #
@@ -1528,7 +1529,10 @@ jobs:
       #      cap, until every review check run on the head commit has
       #      completed (review_check_names; see review_state), so a review
       #      that has not spoken yet cannot be overtaken by the arm even
-      #      when no clean comment stretches the window.
+      #      when no clean comment stretches the window. The cap bounds the
+      #      waiting, not the clearing: a review that completes during the
+      #      poll that crosses the cap still clears on that poll, as the
+      #      window always has.
       #
       #   2. CONSULT — run the unaddressed-findings check (vendored twin
       #      of dotclaude's bb-unaddressed-findings.sh, fetched from this
@@ -1697,9 +1701,13 @@ jobs:
           # the detector then sees it. A failed, cancelled or timed-out
           # attempt has reviewed nothing, so it waits for a re-run, up to
           # the cap (wxa_webcat#1695: a failed Claude Review re-run posted
-          # its finding 14 s before the PR would have merged). Names are
-          # printed with control characters replaced: a PR can set a job
-          # name, and a newline in one must not start a workflow command.
+          # its finding 14 s before the PR would have merged). Runs are
+          # judged per app and name, so another app's same-named check
+          # cannot hide a running review. A body that is empty or not the
+          # documented shape fails closed. Names are printed with control
+          # characters replaced and the runner's legacy `##[` command prefix
+          # broken: a PR can set a job name, the runner parses `::` commands
+          # only at the start of a line, but `##[` anywhere in one.
           # Prints one of:
           #   none-configured        REVIEW_CHECK_NAMES is empty: no wait
           #   done                   no matching check run is still running
@@ -1722,11 +1730,14 @@ jobs:
               if out=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=all&per_page=100" --paginate 2>"$err"); then
                 rm -f "$err"
                 printf '%s' "$out" | jq -rs --arg names "$REVIEW_CHECK_NAMES" '
-                  def clean: explode | map(if . < 32 or . == 127 then 63 else . end) | implode;
-                  ($names | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $want
-                  | [ .[] | .check_runs[]? ]
+                  def clean: explode | map(if . < 32 or . == 127 then 63 else . end) | implode
+                    | gsub("##\\["; "#?[");
+                  if length == 0 or any(.[]; type != "object" or (.check_runs | type) != "array")
+                  then error("unexpected check-runs response") else . end
+                  | ($names | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $want
+                  | [ .[] | .check_runs[] ]
                   | map(select(.name as $n | any($want[]; . as $w | $n == $w or ($n | endswith(" / " + $w)))))
-                  | group_by(.name) | map(max_by(.id))
+                  | group_by([(.app.id // 0), .name]) | map(max_by(.id))
                   | map(select(.status != "completed"
                         or ((.conclusion // "") | IN("success", "neutral", "skipped") | not)))
                   | map((.name | clean)
