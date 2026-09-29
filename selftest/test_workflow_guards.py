@@ -304,12 +304,15 @@ def _automerge_workflow():
 
 
 def _codex_check_name_default():
-    # Raw, never stripped: the Option B step tests `-z "$CHECK_NAME"`, so a
+    # Raw and uncoerced. The Option B step tests `-z "$CHECK_NAME"`, so a
     # default of " " would switch the bypass on while a stripped comparison
-    # read it as empty (Codex round 2).
+    # read it as empty (Codex round 2). PyYAML reads `default: off` or `no`
+    # as False, but GitHub's reader keeps them as the strings "off" and
+    # "no", so only a missing default counts as empty (Codex round 3).
     workflow = _automerge_workflow()
     inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
-    return inputs["codex_check_name"].get("default") or ""
+    default = inputs["codex_check_name"].get("default")
+    return "" if default is None else default
 
 
 def test_codex_trusted_bypass_is_off_by_default():
@@ -318,17 +321,17 @@ def test_codex_trusted_bypass_is_off_by_default():
     It shipped default-on as "review / Codex Review" but never fired on a
     private caller: the automerge job's own `permissions:` block omitted
     `checks`, so its check-runs read was refused and bypass stayed 0. WS2
-    step 1 (2026-09-29) lets the job inherit the caller's `checks: read`,
-    which would switch the bypass on in every caller that grants it: a
-    policy change riding a timing fix. A cost-gated Codex skip still
+    step 1 (2026-09-29) is to let the job inherit the caller's `checks:
+    read`; with a non-empty default that would switch the bypass on in every
+    caller that grants it: a policy change riding a timing fix. A cost-gated Codex skip still
     concludes `success`, so a trusted name can bypass the risk gate with
     Codex having read nothing. The default is therefore empty; a repo that
     wants the bypass sets `codex_check_name` explicitly.
     """
     assert _codex_check_name_default() == "", (
-        "codex_check_name must default to empty: with the job inheriting the "
-        "caller's checks: read, a non-empty default turns the Codex-trusted "
-        "risk-gate bypass on for every caller at once"
+        "codex_check_name must default to empty: once the job inherits the "
+        "caller's checks: read (WS2 step 1), a non-empty default turns the "
+        "Codex-trusted risk-gate bypass on in every caller that grants it"
     )
 
 
@@ -379,21 +382,26 @@ def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
         f"PRs too (both are '{sensitive_job}')"
     )
 
-    # And the standard lane's id must not be one claude-author-automerge
-    # can be told to trust. The default is empty since 2026-09-29
-    # (test_codex_trusted_bypass_is_off_by_default), so check the name a
-    # caller opts in with, as documented, and the default if one is ever set
-    # again: an opt-in caller must not trust the standard lane's cost-skip.
+    # And the standard lane's check must not be one the bypass is documented
+    # or defaulted to trust. The default is empty since 2026-09-29
+    # (test_codex_trusted_bypass_is_off_by_default), so check the documented
+    # opt-in name, plus the default if one is ever set again: an opt-in
+    # caller must not trust the standard lane's cost-skip. (A caller can
+    # still pass any name, e.g. the standard lane's own; that is a caller's
+    # choice this repo cannot test.)
     trusted_names = {"review / Codex Review"}
-    if _codex_check_name_default():
-        trusted_names.add(_codex_check_name_default())
+    default = _codex_check_name_default()
+    if isinstance(default, str) and default:
+        trusted_names.add(default)
     for trusted in sorted(trusted_names):
-        trusted_job = trusted.split(" / ")[0].strip()
-        assert standard_job != trusted_job, (
-            f"the risk:standard lane uses job id '{standard_job}', which is the "
-            f"bypass-trusted check name '{trusted_job} / Codex Review' — a "
-            "cost-gated SKIP would then read as a passed review and bypass the "
-            "risk-tier manual-merge gate"
+        job, _, check = trusted.partition(" / ")
+        if check.strip() != "Codex Review":
+            continue  # names some other check; not this lane's concern
+        assert standard_job != job.strip(), (
+            f"the risk:standard lane uses job id '{standard_job}', so its check "
+            f"is '{trusted}', a name the bypass trusts — a cost-gated SKIP "
+            "would then read as a passed review and bypass the risk-tier "
+            "manual-merge gate"
         )
 
 

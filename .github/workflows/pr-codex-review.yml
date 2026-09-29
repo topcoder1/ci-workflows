@@ -62,8 +62,8 @@ jobs:
   # TWO jobs, never both. They differ ONLY in job id, and that difference is
   # load-bearing: the check name GitHub publishes is "<job id> / Codex
   # Review", and claude-author-automerge.yml's `codex_check_name` input,
-  # when a caller opts in with "review / Codex Review" (it has no default
-  # since 2026-09-29), names THIS job's check as the one whose SUCCESS
+  # when a caller opts in with "review / Codex Review" (its default is
+  # empty since 2026-09-29), names THIS job's check as the one whose SUCCESS
   # bypasses the risk-tier manual-merge gate.
   #
   # That bypass trusts a conclusion, not a review. When codex-gate.mjs
