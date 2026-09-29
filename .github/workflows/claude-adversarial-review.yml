@@ -117,9 +117,9 @@ jobs:
           done < "$tmp/gitmodules-ignore-names.sorted"
 
       - name: Adversarial pass
-        # Pinned to v1.0.112 (2026-05-04) — see claude-review.yml for context
-        # (ci-workflows#37: v1.0.113/.114 regression breaks the setup step).
-        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        # Pinned by full SHA; claude-review.yml's action step says why this
+        # version and how the pin moves.
+        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         # Attributes come from the base commit, never from the PR. `gh pr diff`
         # is GitHub's server-side diff, which ignores .gitattributes, but the
         # allowlisted `git log` prints patches too (-p), and git takes

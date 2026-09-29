@@ -367,7 +367,7 @@ jobs:
         if: steps.classify.outputs.matched == 'yes'
         id: verifier
         continue-on-error: true # keep the workflow running so we can post the check-run with FAILURE conclusion
-        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         # Attributes come from the base commit, never from the PR. The model
         # reads each file with `git diff` in the PR checkout, and git takes
         # .gitattributes from that checkout: a path the PR itself marks
