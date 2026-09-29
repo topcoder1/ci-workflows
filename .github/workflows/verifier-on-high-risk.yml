@@ -438,6 +438,11 @@ jobs:
         if: steps.classify.outputs.matched == 'yes'
         id: verifier
         continue-on-error: true # keep the workflow running so we can post the check-run with FAILURE conclusion
+        # Step-level, below the job's 15: a hung model ends here as a step
+        # failure, which continue-on-error turns into a FAILURE result posted
+        # below. At the job's timeout GitHub cancels the whole job instead,
+        # and a cancelled job posts nothing. Real runs take about 2 minutes.
+        timeout-minutes: 10
         uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         # Attributes come from the base commit, never from the PR. The model
         # reads each file with `git diff` in the PR checkout, and git takes
@@ -739,7 +744,10 @@ jobs:
       # nothing, or its failure could land after the newer run's result on the
       # same head SHA. The model step's continue-on-error keeps its own
       # failure out of `failure()`; "Post check-run — verifier result"
-      # reports that one. Pinned by selftest/test_verifier_failure_result.py.
+      # reports that one, and the model step's own timeout, below the job's,
+      # makes a hung model one of those failures. A step that hangs past the
+      # job's timeout is cancelled with the job and still posts nothing.
+      # Pinned by selftest/test_verifier_failure_result.py.
       - name: Post check-run — verifier did not finish
         if: failure()
         env:

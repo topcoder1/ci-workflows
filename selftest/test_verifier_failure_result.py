@@ -423,3 +423,60 @@ def test_a_mutated_script_fails_the_behavior_check(mutant, tmp_path):
     assert mutated != SHIPPED
     problems = behavior_problems(mutated, tmp_path)
     assert any(expected in problem for problem in problems), problems
+
+
+# --- The model step times out before the job does ---------------------------
+
+MODEL_STEP = "Run verifier (claude-code-action)"
+# Minutes the job keeps after the model step's timeout for the steps that
+# report its failure (evidence, redaction, upload, the result post).
+REPORTING_HEADROOM = 3
+
+
+def model_timeout_problems(text):
+    document = yaml.safe_load(text)
+    job = document["jobs"]["verify"]
+    (model,) = named(job["steps"], MODEL_STEP)
+    problems = []
+    if model.get("continue-on-error") is not True:
+        problems.append("the model step does not continue on error")
+    step_minutes, job_minutes = model.get("timeout-minutes"), job.get("timeout-minutes")
+    if not isinstance(step_minutes, int) or not isinstance(job_minutes, int):
+        problems.append("the model step or the job has no timeout-minutes")
+    elif job_minutes - step_minutes < REPORTING_HEADROOM:
+        problems.append("the model step's timeout leaves the job too little time")
+    return problems
+
+
+def test_a_hung_model_fails_its_step_before_the_job_times_out():
+    assert model_timeout_problems(WORKFLOW.read_text()) == []
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda text: text.replace("        timeout-minutes: 10\n", "", 1),
+        lambda text: text.replace(
+            "        timeout-minutes: 10\n", "        timeout-minutes: 15\n", 1
+        ),
+        lambda text: text.replace(
+            "    timeout-minutes: 15\n", "    timeout-minutes: 12\n", 1
+        ),
+        lambda text: text.replace(
+            "        continue-on-error: true # keep the workflow running",
+            "        continue-on-error: false # keep the workflow running",
+            1,
+        ),
+    ],
+    ids=[
+        "no-step-timeout",
+        "step-timeout-equals-job",
+        "job-timeout-too-close",
+        "no-continue-on-error",
+    ],
+)
+def test_a_mutated_timeout_fails_the_check(edit):
+    text = WORKFLOW.read_text()
+    mutated = edit(text)
+    assert mutated != text
+    assert model_timeout_problems(mutated) != []
