@@ -149,13 +149,22 @@ run_case "risk-sql-fixture" 0 risk-tier-hold "tests/fixtures/seed.sql"
 run_case "risk-gitattributes-docs" 0 risk-tier-hold "docs/.gitattributes"
 run_case "risk-gitattributes-tests" 0 risk-tier-hold \
   "tests/fixtures/.gitattributes" "tests/fixtures/config.json"
+# .gitmodules (2026-09-28). The regex gates it at any depth, so a copy under
+# docs/ or tests/ is safe-by-glob and risk-tier at once, and the hold must
+# agree with the regex there.
+run_case "risk-gitmodules-docs" 0 risk-tier-hold "docs/.gitmodules"
+run_case "risk-gitmodules-tests" 0 risk-tier-hold \
+  "tests/fixtures/.gitmodules" "tests/fixtures/config.json"
 # The root copy is not safe-by-glob, so claude-author-automerge's regex gates
 # it, until a caller's extra_safe_globs sweeps it in. A glob that treats git's
-# dotfiles as housekeeping is the plausible shape.
+# dotfiles as housekeeping is the plausible shape. For .gitmodules this is the
+# live shape: the root copy decides where CI fetches each submodule from.
 export EXTRA_GLOBS='(^|/)\.git[^/]*$'
 run_case "risk-gitattributes-via-extra-glob" 0 risk-tier-hold ".gitattributes"
-# Control for the case above: the same glob still arms a plain .gitignore, so
-# the hold comes from the .gitattributes pattern, not from the glob.
+run_case "risk-gitmodules-via-extra-glob" 0 risk-tier-hold ".gitmodules"
+# Control for the cases above: the same glob still arms a plain .gitignore, so
+# the holds come from the .gitattributes and .gitmodules patterns, not from the
+# glob.
 run_case "extra-glob-arms-gitignore" 1 none ".gitignore"
 export EXTRA_GLOBS=""
 # An ADR amendment is 100% docs — safe-by-glob — and exactly the diff the
@@ -222,6 +231,9 @@ run_case "unrelated-label-holds" 0 risk-tier-hold "web/tests/e2e/auth/signup.spe
 # deciding on that edit. Like the pricing case above, this pins the TIER.
 LABELS="auto-merge-approved"
 run_case "bypass-releases-gitattributes" 1 none "docs/.gitattributes"
+# .gitmodules is tier-2 as well, for the same reason. This pins its TIER.
+LABELS="auto-merge-approved"
+run_case "bypass-releases-gitmodules" 1 none "docs/.gitmodules"
 
 # 3. Tier 1 is absolute — the label does not release customer-facing legal
 #    wording. A label click is not evidence anyone read the clause.

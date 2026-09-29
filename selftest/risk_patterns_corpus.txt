@@ -301,6 +301,37 @@ SAFE: docs/gitattributes.md
 SAFE: .gitattributes.bak
 SAFE: docs/examples/Python.gitattributes
 
+# ── RISKY: .gitmodules — where CI fetches submodules, what a diff shows (2026-09-28)
+# Git reads the root .gitmodules. A PR that repoints a submodule's `url`
+# changes where CI fetches it from: `git submodule sync` + `update --init`,
+# which actions/checkout runs for `submodules:`, read the PR's copy. wxa_vpn's
+# deploy workflows check out with `submodules: recursive`. `ignore = all`
+# hides a moved submodule pointer from a plain `git diff` in the PR's
+# checkout. Both measured on git 2.50.1. The superproject never reads a nested
+# copy (measured), but it is gated too, the same (^|/) shape as
+# .gitattributes, so a vendored copy like the one below costs a click. Under
+# docs/ or tests/ it is also safe-by-glob, so safe-paths-automerge.yml's
+# tier-2 hold is what stops it there.
+RISKY: .gitmodules
+RISKY: sub/.gitmodules
+RISKY: docs/.gitmodules
+RISKY: tests/fixtures/.gitmodules
+RISKY: vendor/github.com/example/lib/.gitmodules
+# Still SAFE: on a case-sensitive filesystem git reads no other name. The
+# template-style name also pins the (^|/) anchor, fixtures renamed the way
+# packagers rename dotfiles (_gitmodules, gitmodules) pin the escaped,
+# required dot, and a .gitmodules/ directory, which git never reads, pins the
+# file-name scope. Case-sensitive, like .gitattributes: wxa_vpn's submodule
+# checkouts run on ubuntu-latest. On a case-insensitive filesystem (macOS,
+# Windows) git also reads .GITMODULES, so a job moved to such a runner needs
+# a case-insensitive rule.
+SAFE: docs/gitmodules.md
+SAFE: .gitmodules.bak
+SAFE: docs/examples/project.gitmodules
+SAFE: tests/fixtures/_gitmodules
+SAFE: tests/fixtures/gitmodules
+SAFE: .gitmodules/README.md
+
 # ── RISKY: fleet CI templates (2026-07-16 gap — dotclaude#157) ─────────────
 # The caller templates + fleet automation under templates/ci-workflows/ are the
 # SOURCE of every repo's .github/workflows/*.yml. A Claude PR editing them
