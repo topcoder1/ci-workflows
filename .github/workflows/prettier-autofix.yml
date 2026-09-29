@@ -43,7 +43,9 @@ name: Prettier Autofix
 #     bot-skip in claude-review.yml. Dependency bumps don't need autofix.
 #   - With `changed_only: true` (the default), PRs that changed no file
 #     matching `markdown_glob` (markdown, YAML and JSON by default): skipped
-#     (no-op).
+#     (no-op). In this mode bash expands the glob (globstar, no dotglob), so
+#     dotfiles and anything under a dot-directory (`.github/`, `.claude/`)
+#     never match and are never formatted.
 #   - Changed-file listing failures (transient API errors): skipped after
 #     3 attempts — a scoping failure is never widened to a full-tree run
 #     (wxa-secrets#27: the old full-tree fallback reformatted pre-existing

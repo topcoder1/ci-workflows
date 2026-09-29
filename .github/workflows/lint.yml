@@ -75,7 +75,10 @@ name: Lint
 #     (intersected with `markdown_glob`). Set `prettier_changed_only: false`
 #     to scan the full glob on PRs instead. Rationale: a single
 #     badly-formatted file landing on main otherwise poisons every subsequent
-#     docs PR's lint check across the fleet.
+#     docs PR's lint check across the fleet. In this mode bash expands the
+#     glob (globstar, no dotglob), so dotfiles and anything under a
+#     dot-directory (`.github/`, `.claude/`) never match and are never
+#     checked.
 #   - shellcheck on .sh files is OFF by default for the same reason as
 #     actionlint's shellcheck: most repos have pre-existing style/info
 #     drift. When opted in, defaults to severity=error so only real bugs
