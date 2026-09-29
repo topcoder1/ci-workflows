@@ -245,8 +245,10 @@ def test_main_exits_0_when_clean(tmp_path):
     assert main([str(d)]) == 0
 
 
-def test_main_exits_0_when_no_workflows_dir(tmp_path):
-    assert main([str(tmp_path / "nope")]) == 0
+def test_main_fails_closed_when_no_workflows_dir(tmp_path):
+    # lint.yml always runs this where a real workflows directory exists, so a
+    # missing one must not pass as "nothing to check".
+    assert main([str(tmp_path / "nope")]) == 1
 
 
 def test_extra_reusable_flag_extends_the_registry(tmp_path):

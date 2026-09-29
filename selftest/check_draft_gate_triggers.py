@@ -36,7 +36,9 @@ see it. An explicit `types:` list is a DENYLIST BY OMISSION, and GitHub's defaul
 Usage:
     check_draft_gate_triggers.py <workflows-dir> [--extra-reusable name.yml ...]
 
-Exits 0 when clean, 1 when any violation is found (annotated for GitHub Actions).
+Exits 0 when clean, 1 when any violation is found (annotated for GitHub Actions), and 1
+when <workflows-dir> is missing, a symlink or not a directory: there is always a real one
+where lint.yml runs this, so anything else fails closed.
 """
 
 from __future__ import annotations
@@ -172,10 +174,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.workflows_dir.is_dir():
-        # Not an error: plenty of repos have no workflows dir.
-        print(f"no workflows directory at {args.workflows_dir}; nothing to check")
-        return 0
+    workflows = args.workflows_dir
+    if workflows.is_symlink() or not workflows.is_dir():
+        # Fail closed. lint.yml runs this from a workflow in the caller's own
+        # .github/workflows, so a real directory is always there. Reporting
+        # "nothing to check" for a missing one, a symlink or a file would pass
+        # the job without checking anything.
+        if workflows.is_symlink():
+            kind = "a symlink"
+        elif workflows.exists():
+            kind = "not a directory"
+        else:
+            kind = "missing"
+        print(
+            f"::error::the workflows directory {workflows} is {kind}, so the "
+            f"draft-gate check has nothing it can check; failing closed"
+        )
+        return 1
 
     reusables = DRAFT_GATED_REUSABLES | set(args.extra_reusable)
     violations = check_dir(args.workflows_dir, reusables)
