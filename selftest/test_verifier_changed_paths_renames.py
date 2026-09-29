@@ -26,8 +26,8 @@ passes --ignore-submodules=none.
    Those commands, run in the fixture, must show the rename and the edit.
 4. A PR that moves a submodule in a high-risk directory to another commit and
    sets `ignore = all` for it: the step lists the submodule and the classifier
-   matches it. Negative control: without --ignore-submodules=none only
-   .gitmodules is listed.
+   matches it, and .gitmodules, which the central list also gates. Negative
+   control: without --ignore-submodules=none only .gitmodules is listed.
 5. The prompt's commands show that change, and follow a submodule the PR
    moves out of the directory. Negative controls: each command without the
    flag.
@@ -344,7 +344,8 @@ def test_diff_step_lists_a_submodule_its_gitmodules_ignores(submodule_bump, patt
     assert output == "changed_count=2\n"
     rc, matches = classify(submodule_bump[0], patterns)
     matched = [line.split("\t")[0] for line in matches.splitlines()]
-    assert rc == 0 and matched == [LINK], matches
+    # .gitmodules matches too: the central list gates it (2026-09-28).
+    assert rc == 0 and sorted(matched) == [".gitmodules", LINK], matches
 
 
 def test_without_the_flag_the_prs_gitmodules_hides_the_submodule(
