@@ -19,9 +19,10 @@
 # Pins:
 #   1. A docs/legal/** file is NOT safe (all_safe=0, reason=unsafe-override).
 #   2. The override wins even when mixed with genuinely-safe files.
-#   3. Ordinary docs/** are STILL safe — the fix must not over-block and
-#      regress the carve-out this workflow exists to provide.
-#   4. tests/** remain safe.
+#   3. Ordinary docs/** are STILL safe (all_safe=1, reason empty) — the fix
+#      must not over-block and regress the carve-out this workflow exists
+#      to provide.
+#   4. tests/** remain safe (all_safe=1, reason empty).
 #
 # The classify block is EXTRACTED from the workflow YAML and executed, so
 # this exercises the shipped bash rather than a mirrored copy that can drift.
@@ -75,7 +76,16 @@ export GH_TOKEN=stub REPO=owner/repo PR=1 EXTRA_GLOBS=""
 # Reset after every run_case so it never leaks between cases.
 RENAMED_FROM=""
 
-# run_case <name> <expected all_safe> <expected reason|-> <file>...
+# run_case <name> <expected all_safe> <expected reason|none|-> <file>...
+#
+# `none` asserts reason is EMPTY; `-` skips the reason check and is only for
+# a case that claims the arm decision alone. Every case here without an
+# explicit reason claims an empty one, arming runs included: the revoke
+# step's reason checks ignore all_safe, so a stray unsafe-override /
+# risk-tier-hold / file-list-truncated disarms whatever is armed — a
+# sibling's arm on a deferred diff, a human's on a safe one. Section 6 once
+# passed `-` for its "not the override reason" claim, so an override
+# widened to src/ passed every case (2026-09-24).
 run_case() {
   local name="$1" want_safe="$2" want_reason="$3"
   shift 3
@@ -94,22 +104,26 @@ run_case() {
     return
   fi
 
-  local got_safe got_reason
+  local got_safe got_reason reason_ok=1
   got_safe=$(grep -E '^all_safe=' "$T/gh_output" | tail -1 | cut -d= -f2)
   got_reason=$(grep -E '^reason=' "$T/gh_output" | tail -1 | cut -d= -f2- || true)
-  [ -n "$got_reason" ] || got_reason="-"
 
   if [ "$got_safe" != "$want_safe" ]; then
     echo "FAIL[$name]: all_safe=$got_safe, want $want_safe (files: $*)"
     failed=1
     return
   fi
-  if [ "$want_reason" != "-" ] && [ "$got_reason" != "$want_reason" ]; then
-    echo "FAIL[$name]: reason=$got_reason, want $want_reason"
+  case "$want_reason" in
+    -)    ;;
+    none) [ -z "$got_reason" ] || reason_ok=0 ;;
+    *)    [ "$got_reason" = "$want_reason" ] || reason_ok=0 ;;
+  esac
+  if [ "$reason_ok" -eq 0 ]; then
+    echo "FAIL[$name]: reason='$got_reason', want $want_reason"
     failed=1
     return
   fi
-  echo "ok[$name] all_safe=$got_safe reason=$got_reason"
+  echo "ok[$name] all_safe=$got_safe reason='$got_reason'"
 }
 
 # 1. The incident case: legal wording alone must NOT be safe.
@@ -125,16 +139,16 @@ run_case "legal-mixed-tests" 0 unsafe-override \
 
 # 3. Regression guard: ordinary docs must STILL auto-merge. Over-blocking
 #    would defeat the carve-out this workflow exists to provide.
-run_case "plain-docs" 1 - "docs/architecture.md"
-run_case "docs-nested" 1 - "docs/runbooks/webnx-cutover.md"
-run_case "docs-multi" 1 - "docs/a.md" "docs/b/c.md"
+run_case "plain-docs" 1 none "docs/architecture.md"
+run_case "docs-nested" 1 none "docs/runbooks/webnx-cutover.md"
+run_case "docs-multi" 1 none "docs/a.md" "docs/b/c.md"
 
 # 4. A path that merely CONTAINS "legal" deeper in the tree is not the
 #    override target — the pattern is anchored at docs/legal/.
-run_case "not-anchored" 1 - "docs/notes/legal-review-process.md"
+run_case "not-anchored" 1 none "docs/notes/legal-review-process.md"
 
 # 5. tests/** unaffected.
-run_case "tests-only" 1 - "tests/test_a.py" "tests/test_b.py"
+run_case "tests-only" 1 none "tests/test_a.py" "tests/test_b.py"
 
 # 5b. Rename BYPASS (codex R1 P2): moving a legal doc out of docs/legal/
 #     into another safe tree reports only the DESTINATION in .filename.
@@ -152,11 +166,12 @@ run_case "legal-renamed-in" 0 unsafe-override "docs/legal/acceptable-use-policy.
 # 5d. A rename with no legal path on EITHER end stays safe — the
 #     previous_filename lookup must not blanket-block ordinary doc moves.
 RENAMED_FROM="docs/old-name.md"
-run_case "docs-renamed-benign" 1 - "docs/new-name.md"
+run_case "docs-renamed-benign" 1 none "docs/new-name.md"
 
-# 6. Genuinely unsafe code still defers via the normal path (not the
-#    override reason) — proves the override didn't swallow the old branch.
-run_case "src-code" 0 - "src/app/main.py"
+# 6. Genuinely unsafe code still defers via the normal path (reason EMPTY,
+#    not the override's) — proves the override didn't swallow the old
+#    branch.
+run_case "src-code" 0 none "src/app/main.py"
 
 # 7. The override is evaluated BEFORE the 3000-file truncation exit. An
 #    already-armed PR grown past the listing cap must still report
