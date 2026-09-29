@@ -225,6 +225,11 @@ jobs:
         id: prompt
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # The numstat below reads attributes from the base, as the model's
+          # git does (see "Run verifier"). With the PR's, a PR that marks a
+          # matched file binary turns its counts into "-", which the rule
+          # below counts as deleted lines.
+          GIT_ATTR_SOURCE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Pre-substitute matches.txt content into the prompt because
@@ -233,10 +238,38 @@ jobs:
           # so the prompt body — which itself contains a heredoc — does
           # not collide with the boundary marker.
           MATCHES_BLOCK="$(cat "${VERIFIER_SCRATCH:?}/matches.txt")"
+          # Matched files the PR keeps but deletes lines from, one per line.
+          # Code can move out of a file that stays, into a file the PR adds
+          # or one that already exists, and step 1's listing of every changed
+          # path is otherwise only for a matched file the PR removes.
+          # --diff-filter=da leaves out removed files, which that listing
+          # covers, and added ones, which lose nothing. Any deleted line
+          # counts, numstat's second column, since a security check can be
+          # one line long; so does "-", a diff git cannot count. With no such
+          # file the prompt reads exactly as it did without this rule. Each
+          # path is re-checked against the diff step's alphabet and read as a
+          # literal path, never a pattern. Pinned by
+          # selftest/test_verifier_changed_paths_renames.py.
+          KEPT_LOSING=""
+          # Opened with exec: bash 3.2 skips a loop whose own redirection
+          # fails without failing the step, which would drop the note.
+          exec 3< "${VERIFIER_SCRATCH:?}/matches.txt"
+          while IFS=$'\t' read -r -u 3 path _; do
+            if [[ ! "$path" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "Rejecting unsafe matched path: $(printf '%q' "$path")" >&2
+              exit 1
+            fi
+            numstat="$(GIT_LITERAL_PATHSPECS=1 git diff --ignore-submodules=none --no-renames --diff-filter=da --numstat "origin/${BASE_REF}...HEAD" -- "$path")"
+            IFS=$'\t' read -r _ deleted _ <<< "$numstat"
+            if [[ -n "$deleted" && "$deleted" != "0" ]]; then
+              KEPT_LOSING+="       ${path}"$'\n'
+            fi
+          done
+          exec 3<&-
           DELIM="EOF_$(openssl rand -hex 16)"
           {
             echo "text<<${DELIM}"
-            # HEREDOC TRAP: the PROMPT_BODY heredoc below is UNQUOTED so
+            # HEREDOC TRAP: the PROMPT_BODY heredocs below are UNQUOTED so
             # ${BASE_REF} and ${MATCHES_BLOCK} interpolate. That ALSO means
             # bare `command` (backtick) and $(command) substitute and would
             # execute commands during prompt build (running as the runner
@@ -288,6 +321,17 @@ jobs:
                also list every path the PR changes with
                \`git diff --ignore-submodules=none --no-renames --name-status origin/${BASE_REF}...HEAD\`
                and verify any that its code moved to.
+          PROMPT_BODY
+            if [[ -n "${KEPT_LOSING}" ]]; then
+              cat <<PROMPT_BODY
+               The PR also deletes lines from these matched files, which it
+               keeps. Code can move out of a file that stays, so for them as
+               well, list every path the PR changes with that command and
+               verify any that their deleted lines moved to:
+          PROMPT_BODY
+              printf '%s' "${KEPT_LOSING}"
+            fi
+            cat <<PROMPT_BODY
             2. Identify the threat class (auth bypass, secret leak, migration data loss, billing logic change, etc.).
             3. Run read-only verification commands (git inspection, grep, file reads) that probe whether the change is safe.
             4. Record the command + truncated output (≤500 chars per command) in your transcript.
