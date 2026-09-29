@@ -77,8 +77,10 @@ name: Lint
 #     badly-formatted file landing on main otherwise poisons every subsequent
 #     docs PR's lint check across the fleet. In this mode bash expands the
 #     glob (globstar, no dotglob), so dotfiles and anything under a
-#     dot-directory (`.github/`, `.claude/`) never match and are never
-#     checked.
+#     dot-directory (`.github/`, `.claude/`) match only where a glob segment
+#     starts with a literal `.`. The default glob never matches them, so
+#     they're never checked; to include them, name them, e.g.
+#     `{**/*.md,.github/**/*.md}` (one brace level only).
 #   - shellcheck on .sh files is OFF by default for the same reason as
 #     actionlint's shellcheck: most repos have pre-existing style/info
 #     drift. When opted in, defaults to severity=error so only real bugs
@@ -571,9 +573,11 @@ jobs:
       #
       # Why bash-glob expansion vs hand-rolled regex: prettier's glob
       # dialect (micromatch) and bash's `shopt -s globstar` agree on the
-      # cases we care about (`**/*.md`, `docs/**/*.md`, `**/*.{md,markdown}`)
-      # and bash is already in the runner. A regex translator would either
-      # be wrong on edge cases or large enough to need its own tests.
+      # cases we care about (`**/*.md`, `docs/**/*.md`, `**/*.{md,markdown}`),
+      # except on dot-paths: prettier matches them, bash without dotglob
+      # skips them (see the header). Bash is already in the runner. A regex
+      # translator would either be wrong on edge cases or large enough to
+      # need its own tests.
       - name: Resolve prettier targets
         id: targets
         env:
