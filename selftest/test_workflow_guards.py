@@ -335,6 +335,28 @@ def test_codex_trusted_bypass_is_off_by_default():
     )
 
 
+def test_codex_bypass_step_reads_the_input_verbatim():
+    """The Option B step uses codex_check_name exactly as the caller passed it.
+
+    test_codex_trusted_bypass_is_off_by_default pins the declared default,
+    but a fallback added in the step itself would switch the bypass back on
+    in every caller while that test still passed: an env expression such as
+    `${{ inputs.codex_check_name || 'review / Codex Review' }}`, or a script
+    line `CHECK_NAME="${CHECK_NAME:-review / Codex Review}"` (independent
+    review, 2026-09-29).
+    """
+    workflow = _automerge_workflow()
+    step = next(
+        s for s in workflow["jobs"]["automerge"]["steps"] if s.get("id") == "bypass_codex"
+    )
+    assert step["env"]["CHECK_NAME"] == "${{ inputs.codex_check_name }}", (
+        f"the Option B step must read the input verbatim, got {step['env']['CHECK_NAME']!r}"
+    )
+    assert not re.search(r"(^|[^A-Za-z0-9_])CHECK_NAME=", step["run"]), (
+        "the Option B step's script must not reassign CHECK_NAME"
+    )
+
+
 def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
     """The risk:standard Codex lane must not publish the bypass-trusted check.
 
@@ -402,6 +424,30 @@ def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
             f"is '{trusted}', a name the bypass trusts — a cost-gated SKIP "
             "would then read as a passed review and bypass the risk-tier "
             "manual-merge gate"
+        )
+
+    # The check name GitHub publishes is "<caller job name, or its id when it
+    # has none> / Codex Review", so the id comparison above misses a
+    # standard-capable job that carries `name: review`, or the trusted job's
+    # own `if:` also admitting 'standard' (independent review, 2026-09-29).
+    # Judge every job that calls codex-review.yml and can run on a standard
+    # PR by the prefix it would actually publish.
+    trusted_jobs = {
+        t.partition(" / ")[0].strip()
+        for t in trusted_names
+        if t.partition(" / ")[2].strip() == "Codex Review"
+    }
+    lanes = yaml.safe_load(text)["jobs"]
+    for job_id, job in lanes.items():
+        if "codex-review.yml" not in str(job.get("uses", "")):
+            continue
+        cond = str(job.get("if", ""))
+        runs_on_standard = "'standard'" in cond or "risk_class" not in cond
+        prefix = job.get("name") or job_id
+        assert not (runs_on_standard and prefix in trusted_jobs), (
+            f"job '{job_id}' can run on risk:standard PRs and publishes "
+            f"'{prefix} / Codex Review', a name the bypass trusts — a cost-gated "
+            "SKIP would then read as a passed review"
         )
 
 

@@ -314,13 +314,14 @@ jobs:
       # next Claude PR (caught on whois-api-llc/wxa-mcp-server#80, run
       # 25292746179, before broad rollout).
       #
-      # Callers that want Option B working should add `checks: read` to
-      # THEIR workflow-level permissions block. The Codex bypass step
-      # below already handles missing permission gracefully (returns
-      # bypass=0 with no crash via `gh api ... || echo '{}'` + jq `try`),
-      # so callers without `checks: read` simply never bypass via Codex —
-      # the label bypass (Option A) and the original "no risky paths"
-      # path still work.
+      # Option B also needs `codex_check_name` set: it is empty by default
+      # since 2026-09-29, which turns the bypass off. And this job-level
+      # block leaves `checks` at none whatever the caller grants, so on a
+      # private repo the Codex bypass step's check-runs read is refused and
+      # it returns bypass=0 with no crash (`gh api ... || echo '{}'` + jq
+      # `try`); a public repo's check runs are readable without the grant.
+      # The label bypass (Option A) and the original "no risky paths" path
+      # are unaffected.
     steps:
       - name: Checkout PR head
         id: checkout
