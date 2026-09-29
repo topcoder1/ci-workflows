@@ -172,6 +172,50 @@ jobs:
           SIZE_THRESHOLD: "30"
         run: node .github/scripts/codex-gate.mjs
 
+      # Codex takes project-level config and instructions from the directory
+      # it runs in, and in this checkout that is the PR's tree. Traced at
+      # startup on codex-cli 0.158.0 running `review` as below, it reads
+      # AGENTS.md and AGENTS.override.md at the repo root, .codex/
+      # (config.toml, skills/, rules/, hooks.json, agents/, plugin
+      # manifests), .agents/ (skills/, plugin manifests), and the plugin
+      # manifests under .codex-plugin/, .claude-plugin/ and .cursor-plugin/.
+      # This step makes the working tree's copies of those paths the base
+      # commit's, and removes any the base does not have, so the review runs
+      # with the base branch's Codex project config, as claude-code-action's
+      # restoreConfigFromBase does for the Claude lanes. It runs before Codex
+      # is installed or logged in. Only the working tree changes: the index
+      # and the commits keep the PR's versions, so the review still reads the
+      # PR's changes to these paths through git. When the PR leaves them as
+      # the base has them, nothing is touched. A base version that points
+      # elsewhere in the repo (a symlink, or a fallback filename in its own
+      # config) still reads that file from the PR's tree. A Codex release
+      # that reads another project path needs it added here. Pinned by
+      # selftest/test_codex_review_base_project_config.py.
+      - name: Review with the base branch's Codex project config
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          paths=(AGENTS.md AGENTS.override.md .codex .agents .codex-plugin .claude-plugin .cursor-plugin)
+          if ! git cat-file -e "${BASE_SHA}^{commit}"; then
+            echo "::error::the PR's base commit is not in this checkout, so Codex's project config cannot be taken from it. Failing closed."
+            exit 1
+          fi
+          rc=0
+          git diff --quiet --no-renames --ignore-submodules=none "$BASE_SHA" HEAD -- "${paths[@]}" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "The PR leaves Codex's project config as the base has it."
+            exit 0
+          elif [ "$rc" -ne 1 ]; then
+            echo "::error::could not compare Codex's project config with the base commit (git diff exit ${rc}). Failing closed."
+            exit 1
+          fi
+          git diff --name-only --no-renames --ignore-submodules=none -z "$BASE_SHA" HEAD -- "${paths[@]}" \
+            | git restore --source="$BASE_SHA" --worktree --pathspec-from-file=- --pathspec-file-nul
+          count=$(git diff --name-only --no-renames --ignore-submodules=none "$BASE_SHA" HEAD -- "${paths[@]}" | wc -l | tr -d ' ')
+          echo "Codex's project config is the base commit's: ${count} path(s) in the working tree put back as the base has them."
+
       - name: Install Codex CLI
         if: steps.gate.outputs.should_run == 'true'
         run: |
@@ -217,6 +261,13 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          # CODEX_HOME is a directory this job creates under the runner's temp
+          # dir, not ~/.codex, so Codex's user-level config holds exactly what
+          # this job puts there: the login below. GITHUB_ENV hands the same
+          # directory to the review step.
+          export CODEX_HOME="${RUNNER_TEMP:?RUNNER_TEMP is not set}/codex-home"
+          mkdir -p "$CODEX_HOME"
+          echo "CODEX_HOME=$CODEX_HOME" >> "$GITHUB_ENV"
           # Codex defaults to ChatGPT subscription auth; force API-key mode
           # by writing the key to ~/.codex/auth.json via the login command.
           # Without this, the action fails with `refresh_token_reused` 401s.
