@@ -54,6 +54,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_codex_review_rename_sources.sh",
     "selftest/test_codex_verdict_gate.sh",
     "selftest/test_comment_nonfatal_reporting.sh",
+    "selftest/test_dependabot_pat_warning.sh",
     "selftest/test_findings_reply_narrowing.sh",
     "selftest/test_lint_prettier_check_untrusted_head.sh",
     "selftest/test_pr_classify_rename_sources.sh",
@@ -66,6 +67,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_ruff_ruleset_warning.sh",
     "selftest/test_safe_paths_classifier_hold.sh",
     "selftest/test_safe_paths_output_injection.sh",
+    "selftest/test_safe_paths_rename_sources.sh",
     "selftest/test_safe_paths_risk_tier_hold.sh",
     "selftest/test_safe_paths_unsafe_overrides.sh",
     # These two shipped unlisted (#152 and #160) and ran in CI never —

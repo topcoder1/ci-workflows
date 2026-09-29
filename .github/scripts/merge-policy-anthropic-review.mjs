@@ -377,20 +377,40 @@ function parseJSON(source) {
   if (index !== source.length) return bad();
   return result;
 }
+const ENVELOPE_FIELDS = Object.freeze([
+  "id",
+  "type",
+  "role",
+  "model",
+  "content",
+  "stop_reason",
+  "stop_sequence",
+  "usage",
+]);
+const ENVELOPE_OPTIONAL = Object.freeze(["container", "stop_details"]);
 function reviewResult(message, comparison) {
+  // The API adds top-level fields within a version (2026-09-24: `diagnostics:
+  // null` on every response, staging run 36049558488). An unrecognised field
+  // is accepted only when it is null: it carries nothing, and a non-null
+  // surprise still fails closed.
+  const additive =
+    message !== null &&
+    typeof message === "object" &&
+    !types.isProxy(message) &&
+    !Array.isArray(message)
+      ? Object.keys(message).filter(
+          (key) =>
+            !ENVELOPE_FIELDS.includes(key) && !ENVELOPE_OPTIONAL.includes(key),
+        )
+      : [];
   shape(
     message,
-    [
-      "id",
-      "type",
-      "role",
-      "model",
-      "content",
-      "stop_reason",
-      "stop_sequence",
-      "usage",
-    ],
-    ["container", "stop_details"],
+    ENVELOPE_FIELDS,
+    [...ENVELOPE_OPTIONAL, ...additive],
+    "invalid_response",
+  );
+  requireThat(
+    additive.every((key) => message[key] === null),
     "invalid_response",
   );
   requireThat(
