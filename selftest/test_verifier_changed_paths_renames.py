@@ -44,10 +44,11 @@ passes --ignore-submodules=none.
    keeps but deletes lines from (its numstat, under the base's attributes) and
    sends the model to the changed-paths listing for it, which names where the
    code went. A kept file the PR only adds to, even one its own .gitattributes
-   marks binary, and a matched file the PR removes, which the listing already
-   covers, leave the prompt as it was. Negative control: that numstat without
-   --ignore-submodules=none misses a kept submodule the PR's .gitmodules
-   ignores, whose old commit line the PR's bump deletes.
+   marks binary, a binary file the PR adds, whose numstat reads "-" as a kept
+   binary file's does, and a matched file the PR removes, which the listing
+   already covers, leave the prompt as it was. Negative control: that numstat
+   without --ignore-submodules=none misses a kept submodule the PR's
+   .gitmodules ignores, whose old commit line the PR's bump deletes.
 """
 
 import os
@@ -641,3 +642,18 @@ def test_without_the_flag_the_prs_gitmodules_hides_a_kept_submodules_deleted_lin
     (numstat,) = [line for line in step["run"].splitlines() if "--numstat" in line]
     unflagged = step["run"].replace(numstat, without_flag(numstat))
     assert kept_note(render_prompt(submodule_bump, LINK, unflagged)) == ""
+
+
+def test_verifier_prompt_leaves_out_a_binary_file_the_pr_adds(tmp_path):
+    # git cannot count a binary file's lines: numstat prints "-", which counts
+    # as deleted lines for a file the PR keeps. A file the PR adds lost
+    # nothing, so it gets no note.
+    key = "src/auth/signing.key"
+    added = pr_checkout(tmp_path / "added", {OLD: SOURCE}, {key: "\x00key-1\n"})
+    numstat = f"git diff --numstat origin/main...HEAD -- {key}"
+    assert model_git(added[0], numstat) == f"-\t-\t{key}\n"
+    assert kept_note(render_prompt(added, key)) == ""
+    # Positive control: the same file, kept and changed, gets the note.
+    kept = pr_checkout(tmp_path / "kept", {key: "\x00key-1\n"}, {key: "\x00key-2\n"})
+    assert model_git(kept[0], numstat) == f"-\t-\t{key}\n"
+    assert kept_note(render_prompt(kept, key)) == note_naming(key)

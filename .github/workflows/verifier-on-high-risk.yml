@@ -221,15 +221,16 @@ jobs:
           # Matched files the PR keeps but deletes lines from, one per line.
           # Code can move out of a file that stays, into a file the PR adds
           # or one that already exists, and step 1's listing of every changed
-          # path is otherwise only for a matched file the PR removes
-          # (--diff-filter=d leaves those out here). Any deleted line counts,
-          # numstat's second column, since a security check can be one line
-          # long; so does "-", a diff git cannot count. With no such file the
-          # prompt reads exactly as it did without this rule. Pinned by
-          # selftest/test_verifier_changed_paths_renames.py.
+          # path is otherwise only for a matched file the PR removes.
+          # --diff-filter=da leaves out removed files, which that listing
+          # covers, and added ones, which lose nothing. Any deleted line
+          # counts, numstat's second column, since a security check can be
+          # one line long; so does "-", a diff git cannot count. With no such
+          # file the prompt reads exactly as it did without this rule. Pinned
+          # by selftest/test_verifier_changed_paths_renames.py.
           KEPT_LOSING=""
           while IFS=$'\t' read -r path _; do
-            numstat="$(git diff --ignore-submodules=none --no-renames --diff-filter=d --numstat "origin/${BASE_REF}...HEAD" -- "$path")"
+            numstat="$(git diff --ignore-submodules=none --no-renames --diff-filter=da --numstat "origin/${BASE_REF}...HEAD" -- "$path")"
             IFS=$'\t' read -r _ deleted _ <<< "$numstat"
             if [[ -n "$deleted" && "$deleted" != "0" ]]; then
               KEPT_LOSING+="       ${path}"$'\n'
