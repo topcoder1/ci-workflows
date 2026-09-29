@@ -22,11 +22,15 @@ Layers:
    PR's changes to those paths: against a commit (working tree included),
    against the index, and between commits. A PR that swaps AGENTS.md for a
    symlink gets the base's regular file back. Every path the step hands git
-   is literal: PR files named like pathspec globs or magic are taken off
-   disk, and the restore touches no path the PR did not change.
-3. Unaffected PRs: when the PR leaves those paths as the base has them, or
-   the repo has none of them, the step changes nothing in the checkout and
-   the review prompt is unchanged.
+   is literal, and PR files named like pathspec globs or magic come off disk.
+   A PR that changes only the root .gitattributes (a working-tree-encoding or
+   eol conversion) gets the project files back as the base's attributes
+   write them; the checkout in these fixtures writes every file afresh from
+   the merge commit, as actions/checkout does.
+3. Unaffected PRs: when the PR leaves those paths and the root
+   .gitattributes as the base has them, or the repo has no project files,
+   the step changes nothing in the checkout and the review prompt is
+   unchanged.
 4. Fail closed: a base commit missing from the checkout exits 1 with the
    working tree untouched.
 5. End to end: the step, then the shipped review step with a stub codex that
@@ -187,6 +191,13 @@ class Checkout:
         git(self.repo, "merge", "-q", "--no-ff", "-m", "Merge pr into main", self.head)
         git(self.repo, "branch", "-q", "-D", "main", "pr")
         self.merge = git(self.repo, "rev-parse", "HEAD").strip()
+        # Every file written afresh from the merge commit, as actions/checkout's
+        # clean checkout does: the merge commit's .gitattributes decide the
+        # bytes on disk.
+        for path in git(self.repo, "ls-files", "-z").split("\0"):
+            if path:
+                (self.repo / path).unlink(missing_ok=True)
+        git(self.repo, "checkout", "-q", "--", ".")
         self.event = {
             "github.event.pull_request.base.sha": self.base,
             "github.event.pull_request.base.ref": "main",
@@ -313,9 +324,7 @@ def test_the_working_tree_gets_the_base_project_config(checkout):
     assert checkout.state()[:3] == before
     assert git(checkout.repo, "show", "HEAD:AGENTS.md") == PR_FILES["AGENTS.md"]
     assert checkout.marker.exists()
-    assert result.stdout.endswith(
-        "11 path(s) in the working tree put back as the base has them.\n"
-    )
+    assert result.stdout.endswith("written with the base's attributes: 12 path(s).\n")
 
 
 def test_every_git_diff_still_shows_the_prs_changes(checkout):
@@ -382,20 +391,68 @@ def test_a_pr_file_named_like_a_pathspec_is_taken_off_disk(crafted, tmp_path):
     assert listed == crafted + "\0"
 
 
-def test_the_restore_touches_only_the_paths_the_pr_changed(tmp_path):
-    # Each name git diff lists is one literal path. Read as a glob,
-    # `[b]ase` would also select the base's own skill and rewrite it; a
-    # working-tree edit to that file stands in for a copy the step must
-    # leave alone.
-    checkout = Checkout(
-        tmp_path,
-        {".codex/skills/base/SKILL.md": "base skill\n"},
-        {".codex/skills/[b]ase/SKILL.md": "PR-head skill\n"},
-    )
-    (checkout.repo / ".codex/skills/base/SKILL.md").write_text("local edit\n")
+# A PR that changes only the root .gitattributes still changes the bytes the
+# checkout writes for the project files; they must end as the base renders
+# them.
+ATTRIBUTE_BASE = {
+    "AGENTS.md": "base instructions\n",
+    ".codex/config.toml": '# base config\nmodel = "x"\n',
+    "app.py": "x = 1\n",
+}
+ATTRIBUTE_CHANGES = {
+    "working-tree-encoding on AGENTS.md": (
+        "AGENTS.md working-tree-encoding=UTF-16\n",
+        "AGENTS.md",
+    ),
+    "eol conversion on .codex/config.toml": (
+        ".codex/config.toml eol=crlf\n",
+        ".codex/config.toml",
+    ),
+}
+
+
+@pytest.mark.parametrize("change", sorted(ATTRIBUTE_CHANGES))
+def test_a_pr_that_changes_only_gitattributes_gets_the_base_rendering(change, tmp_path):
+    attributes, path = ATTRIBUTE_CHANGES[change]
+    checkout = Checkout(tmp_path, ATTRIBUTE_BASE, {".gitattributes": attributes})
+    # Negative control: the checkout wrote the PR's rendering.
+    assert (checkout.repo / path).read_bytes() != ATTRIBUTE_BASE[path].encode()
     result = run_step(checkout)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert checkout.tree() == {".codex/skills/base/SKILL.md": "local edit\n"}
+    for name in ("AGENTS.md", ".codex/config.toml"):
+        assert (checkout.repo / name).read_bytes() == ATTRIBUTE_BASE[name].encode()
+    assert checkout.marker.exists()
+    # A Codex process reads the base's text from disk.
+    seen, _ = review_sees(checkout, tmp_path)
+    assert "base instructions" in seen
+    assert "# base config" in seen
+
+
+def test_the_step_writes_with_the_base_attributes(tmp_path):
+    attributes, path = ATTRIBUTE_CHANGES["working-tree-encoding on AGENTS.md"]
+    checkout = Checkout(tmp_path, ATTRIBUTE_BASE, {".gitattributes": attributes})
+    script = shipped_run(find_step(load(), STEP))
+    mutated = script.replace('GIT_ATTR_SOURCE="$BASE_SHA" git restore', "git restore")
+    assert mutated != script, "mutation did not apply; the anchor drifted"
+    result = run_step(checkout, script=mutated)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # With the PR's attributes the restore writes the PR's rendering again.
+    assert (checkout.repo / path).read_bytes() != ATTRIBUTE_BASE[path].encode()
+
+
+def test_a_gitattributes_change_with_no_project_files_touches_nothing(tmp_path):
+    checkout = Checkout(
+        tmp_path, {"app.py": "x = 1\n"}, {".gitattributes": "* eol=crlf\n"}
+    )
+    tree, state = checkout.tree(), checkout.state()
+    result = run_step(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == (
+        "Neither the base nor the PR has Codex project files; nothing to put back.\n"
+    )
+    assert checkout.tree() == tree
+    assert checkout.state() == state
+    assert not checkout.marker.exists()
 
 
 # --- 3. Unaffected PRs -------------------------------------------------------------
@@ -404,6 +461,10 @@ def test_the_restore_touches_only_the_paths_the_pr_changed(tmp_path):
 UNAFFECTED = {
     "project config untouched": (BASE_FILES, {"app.py": "x = 2\n"}),
     "no project config": ({"app.py": "x = 1\n"}, {"app.py": "x = 2\n"}),
+    "attributes outside the project paths": (
+        BASE_FILES,
+        {"src/.gitattributes": "* eol=crlf\n", "src/x.py": "y = 1\n"},
+    ),
 }
 
 
@@ -413,7 +474,10 @@ def test_a_pr_that_leaves_the_project_config_alone_changes_nothing(repo, tmp_pat
     tree, state = checkout.tree(), checkout.state()
     result = run_step(checkout)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout == "The PR leaves Codex's project config as the base has it.\n"
+    assert result.stdout == (
+        "The PR leaves Codex's project config, and the attributes git writes it "
+        "with, as the base has them.\n"
+    )
     assert checkout.tree() == tree
     assert checkout.state() == state
     assert not checkout.marker.exists()
@@ -520,7 +584,7 @@ def test_without_the_step_the_review_reads_the_checkouts_files(checkout, tmp_pat
         assert marker in seen
 
 
-NOTE = "Their copies on disk are the base branch's"
+NOTE = "are the base branch's copies on disk"
 
 
 def test_the_prompt_says_so_only_when_the_step_restored_files(tmp_path):
@@ -545,9 +609,9 @@ def test_the_prompt_says_so_only_when_the_step_restored_files(tmp_path):
 MUTATIONS = {
     "restore dropped": (
         lambda text: text.replace(
-            '| git restore --source="$BASE_SHA" --worktree --pathspec-from-file=- '
-            "--pathspec-file-nul",
-            "| cat > /dev/null",
+            'GIT_ATTR_SOURCE="$BASE_SHA" git restore --source="$BASE_SHA" --worktree '
+            '--pathspec-from-file="$list" --pathspec-file-nul',
+            ":",
         ),
         assert_sees_the_base_config,
     ),
