@@ -25,14 +25,17 @@ Layers:
    git diff still shows the PR's changes to those paths: against a commit
    (working tree included), against the index, and between commits. A PR
    that puts a symlink, a gitlink or a directory where the base has a
-   project path gets the base's back; a project file the PR turns into a
-   directory stops the step. Every path the step hands git is literal, and
-   PR files named like pathspec globs or magic come off disk. A PR that
-   changes only a .gitattributes, at the root or deeper (a
-   working-tree-encoding or eol conversion), gets the project files back as
-   the base's attributes write them; the checkout in these fixtures writes
-   every file afresh from the merge commit, as actions/checkout does. Names
-   that a UTF-8 collation sorts as equal are each restored.
+   project path gets the base's back, and git still lists the PR's files
+   under a scoped AGENTS name it made a directory; a project file the PR
+   turns into a directory in a root project directory stops the step.
+   Every path the step hands git is literal, and PR files named like
+   pathspec globs or magic come off disk. A PR that changes only a
+   .gitattributes, at the root or deeper (a working-tree-encoding or eol
+   conversion), gets the project files back as the base's attributes write
+   them; the checkout in these fixtures writes every file afresh from the
+   merge commit, as actions/checkout does. Names that a UTF-8 collation
+   sorts as equal are each restored, and so is a name that is not UTF-8
+   where the filesystem can store one (Linux; APFS cannot).
 3. Unaffected PRs: when the PR changes none of those paths and no
    .gitattributes, or the repo has no project files, the step changes nothing
    in the checkout, the index file's bytes included, and the review prompt is
@@ -40,7 +43,9 @@ Layers:
 4. Fail closed: a base commit missing from the checkout, a file on disk under
    those paths that the PR commit does not have, a failing git or grep call,
    and a git without attribute sources each stop the step with a nonzero
-   exit and no note for the review step.
+   exit and no note for the review step. A committed file with unnormalized
+   line endings that git reads as modified stops it too, with a hint to
+   renormalize the file.
 5. End to end: the step, then the shipped review step with a stub codex that
    prints the project files Codex would load and runs `git diff --stat
    origin/main`: it loads the base's files and git lists the PR's changes to
@@ -56,6 +61,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -177,12 +183,15 @@ def git_environment():
 
 
 def git(repo, *arguments):
+    # surrogateescape, as for file names: a name that is not UTF-8 comes back
+    # as a str that writes and reads the same bytes.
     result = subprocess.run(
         ["git", *arguments],
         cwd=repo,
         env=git_environment(),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     )
     assert result.returncode == 0, result.stderr
     return result.stdout
@@ -343,7 +352,8 @@ def run_step(checkout, script=None, event=None, environment=None):
             **(environment or {}),
         },
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     )
 
 
@@ -646,6 +656,31 @@ def test_a_directory_swap_at_a_project_path_is_put_back(swap, tmp_path):
     assert checkout.tree() == after
 
 
+def test_files_under_a_scoped_agents_name_stay_in_gits_view(tmp_path):
+    # The PR turns src/AGENTS.md into a directory. Putting the base's file
+    # back takes the PR's files under that name off disk, and git must still
+    # list them as the PR's.
+    checkout = Checkout(
+        tmp_path,
+        {"src/AGENTS.md": "base scoped instructions\n", "src/app.py": "x = 1\n"},
+        {"src/AGENTS.md": None, "src/AGENTS.md/x.js": "PR-head\n"},
+    )
+    result = run_step(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert checkout.tree() == {
+        "src/AGENTS.md": "base scoped instructions\n",
+        "src/app.py": "x = 1\n",
+    }
+    # The diff against the base, working tree included, is the commit diff.
+    against_base = git(checkout.repo, "diff", "--name-status", "origin/main")
+    assert against_base == "D\tsrc/AGENTS.md\nA\tsrc/AGENTS.md/x.js\n"
+    assert against_base == git(
+        checkout.repo, "diff", "--name-status", "origin/main", "HEAD"
+    )
+    # The base's file on disk is the only thing git does not account for.
+    assert git(checkout.repo, "status", "--porcelain") == "?? src/AGENTS.md\n"
+
+
 def test_a_project_file_the_pr_turns_into_a_directory_stops_the_step(tmp_path):
     # git restore reads the base's file over the PR's directory and then
     # finds nothing for the PR's file under it, so it refuses the list; the
@@ -719,6 +754,51 @@ def test_names_a_utf8_collation_sorts_as_equal_are_each_restored(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert checkout.tree() == {"app.py": "x = 1\n"}
     assert result.stdout.endswith(": 2 path(s).\n")
+
+
+# A PR file whose directory name is not UTF-8. In a UTF-8 locale, GNU grep
+# takes such a name for binary data: it leaves the name out of its output
+# and still exits 0.
+NON_UTF8_NAME = os.fsdecode(b"x\xff/AGENTS.override.md")
+UTF8_LOCALE = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
+
+
+def filesystem_stores_a_non_utf8_name():
+    """Whether a file here can have a name that is not UTF-8. APFS refuses
+    one; ext4, as on the Linux runners, stores it."""
+    with tempfile.TemporaryDirectory() as directory:
+        name = os.path.join(os.fsencode(directory), b"x\xff")
+        try:
+            os.close(os.open(name, os.O_CREAT | os.O_WRONLY, 0o600))
+        except OSError:
+            return False
+    return True
+
+
+@pytest.mark.skipif(
+    not filesystem_stores_a_non_utf8_name(),
+    reason="this filesystem cannot store a file name that is not UTF-8",
+)
+def test_a_project_file_whose_name_is_not_utf8_comes_off_disk(tmp_path):
+    # Control: in the UTF-8 locale, a grep without LC_ALL=C drops the name
+    # and exits 0.
+    control = subprocess.run(
+        ["grep", "-zE", "AGENTS"],
+        input=os.fsencode(NON_UTF8_NAME) + b"\0",
+        env={**os.environ, **UTF8_LOCALE},
+        capture_output=True,
+    )
+    assert control.returncode == 0, control.stderr
+    assert os.fsencode(NON_UTF8_NAME) not in control.stdout, control.stdout
+    checkout = Checkout(
+        tmp_path,
+        {"app.py": "x = 1\n"},
+        {NON_UTF8_NAME: "PR-head scoped override\n"},
+    )
+    result = run_step(checkout, environment=UTF8_LOCALE)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert checkout.tree() == {"app.py": "x = 1\n"}
+    assert result.stdout.endswith(": 1 path(s).\n")
 
 
 # A PR that changes only the root .gitattributes still changes the bytes the
@@ -926,6 +1006,34 @@ def test_a_file_on_disk_that_the_pr_commit_lacks_fails_closed(drift, tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "differ from the PR's commit before Codex runs" in result.stdout
     assert checkout.tree() == tree
+    assert not checkout.marker.exists()
+
+
+def test_an_unnormalized_project_file_fails_closed_with_a_hint(tmp_path):
+    # AGENTS.md went in with CRLF line endings before .gitattributes marked
+    # it text, so its blob is not what git's conversion makes of the file.
+    # Once the index entry no longer vouches for the file (racy on a runner,
+    # a new mtime here), git reads it as modified.
+    checkout = Checkout(
+        tmp_path,
+        {
+            "AGENTS.md": "base\r\ninstructions\r\n",
+            ".gitattributes": "AGENTS.md text\n",
+            "app.py": "x = 1\n",
+        },
+        {"app.py": "x = 2\n"},
+    )
+    agents = checkout.repo / "AGENTS.md"
+    assert agents.read_bytes() == b"base\r\ninstructions\r\n"
+    later = agents.stat().st_mtime_ns + 10**9
+    os.utime(agents, ns=(later, later))
+    # Control: git lists the file as modified though its bytes are the
+    # commit's.
+    assert git(checkout.repo, "ls-files", "--modified") == "AGENTS.md\n"
+    result = run_step(checkout)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "differ from the PR's commit before Codex runs" in result.stdout
+    assert "git add --renormalize" in result.stdout
     assert not checkout.marker.exists()
 
 

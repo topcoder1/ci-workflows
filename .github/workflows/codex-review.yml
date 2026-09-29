@@ -241,11 +241,13 @@ jobs:
           # The check below compares commits, so a file on disk under these
           # paths that is not the PR commit's would reach Codex whatever it
           # decides. --others without --exclude-standard lists ignored files
-          # too.
+          # too. A committed file whose line endings its text or eol
+          # attribute would change can read as modified here too; the error
+          # says how to renormalize it.
           git ls-files -z --others --modified > "$dir/not-committed"
           select_names "$protected" < "$dir/not-committed" > "$dir/drift"
           if [ -s "$dir/drift" ]; then
-            echo "::error::files under Codex's project paths differ from the PR's commit before Codex runs. Failing closed."
+            echo "::error::files under Codex's project paths differ from the PR's commit before Codex runs. Failing closed. A project file with unnormalized line endings reads as modified after checkout; git add --renormalize on that file in the PR fixes it."
             exit 1
           fi
           git diff --name-only --no-renames --ignore-submodules=none -z "$BASE_SHA" HEAD > "$dir/changed"
@@ -279,9 +281,12 @@ jobs:
           # take those entries from the index instead of the working tree:
           # `git diff`, `git diff <commit>` and `git status` then read as if
           # the PR's files were on disk. A path the PR deleted is not in the
-          # index; its base copy shows as untracked.
+          # index; its base copy shows as untracked. Entries under a
+          # directory named AGENTS.md or AGENTS.override.md count too: when
+          # the base has a file of that name, putting it back takes them off
+          # disk.
           git ls-files -z > "$dir/index"
-          select_names "$protected" < "$dir/index" > "$dir/index-protected"
+          select_names "$protected"'|(^|/)AGENTS(\.override)?\.md/' < "$dir/index" > "$dir/index-protected"
           git update-index -z --skip-worktree --stdin < "$dir/index-protected"
           # Tells the review step to say so in its prompt.
           : > "$RUNNER_TEMP/codex-base-project-config"
