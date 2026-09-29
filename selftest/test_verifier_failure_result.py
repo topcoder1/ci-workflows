@@ -12,9 +12,10 @@ The job's last step, "Post check-run — verifier did not finish", posts the
 check as a failure in those runs.
 
 1. Structure: the step exists once, is the last step of the job and runs on
-   exactly `failure()`. Not `always()` or `cancelled()`: a run that a newer run
-   of the same PR cancels must not post a failure that lands after the newer
-   run's result on the same head SHA. Every step that posts a check-run posts
+   exactly `failure() && !cancelled()`. Not `always()` or `cancelled()`, and not
+   `failure()` alone, since the status functions are not mutually exclusive: a
+   run that a newer run of the same PR cancels must not post a failure that
+   lands after the newer run's result on the same head SHA. Every step that posts a check-run posts
    the name hardcoded here (not read from the workflow) and takes its token,
    head SHA and repository from the same expressions. The step's script says
    `conclusion=failure` and never `success`, and nothing a PR controls reaches
@@ -120,8 +121,10 @@ def placement_problems(text):
     problems = []
     if steps[-1] is not found[0]:
         problems.append(f"{STEP!r} is not the last step of job {JOB!r}")
-    if found[0].get("if") != "failure()":
-        problems.append(f"its condition is {found[0].get('if')!r}, not 'failure()'")
+    if found[0].get("if") != "failure() && !cancelled()":
+        problems.append(
+            f"its condition is {found[0].get('if')!r}, not 'failure() && !cancelled()'"
+        )
     return problems
 
 
@@ -177,7 +180,7 @@ def input_problems(text):
     return problems
 
 
-def test_the_step_is_the_jobs_last_and_runs_on_exactly_failure():
+def test_the_step_is_the_jobs_last_and_runs_only_on_an_uncancelled_failure():
     assert placement_problems(SHIPPED) == []
 
 
@@ -311,17 +314,22 @@ head_from_github_sha = in_step(swap("github.event.pull_request.head.sha", "githu
 # the problem that check must report)
 MUTANTS = {
     "condition always()": (
-        in_step(swap("if: failure()", "if: always()")),
+        in_step(swap("if: failure() && !cancelled()", "if: always()")),
         placement_problems,
         "'always()'",
     ),
     "condition cancelled()": (
-        in_step(swap("if: failure()", "if: cancelled()")),
+        in_step(swap("if: failure() && !cancelled()", "if: cancelled()")),
         placement_problems,
         "'cancelled()'",
     ),
+    "condition failure() alone": (
+        in_step(swap("if: failure() && !cancelled()", "if: failure()")),
+        placement_problems,
+        "'failure()'",
+    ),
     "no condition": (
-        in_step(swap("        if: failure()\n", "")),
+        in_step(swap("        if: failure() && !cancelled()\n", "")),
         placement_problems,
         "None",
     ),

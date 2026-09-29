@@ -744,17 +744,20 @@ jobs:
       # the check as a failure in that case. Fixed text only: nothing from the
       # PR reaches the call, and it never posts a success.
       #
-      # `failure()`, not `always()` or `cancelled()`: a run that a newer run
-      # of the same PR cancels (the concurrency group above) must post
-      # nothing, or its failure could land after the newer run's result on the
-      # same head SHA. The model step's continue-on-error keeps its own
+      # `failure() && !cancelled()`, not `always()` or `cancelled()`: a run
+      # that a newer run of the same PR cancels (the concurrency group above)
+      # must post nothing, or its failure could land after the newer run's
+      # result on the same head SHA. The status functions are not mutually
+      # exclusive, so a run that failed a step and was then cancelled can
+      # still see `failure()` true; `!cancelled()` rules that run out too.
+      # The model step's continue-on-error keeps its own
       # failure out of `failure()`; "Post check-run — verifier result"
       # reports that one, and the model step's own timeout, below the job's,
       # makes a hung model one of those failures. A step that hangs past the
       # job's timeout is cancelled with the job and still posts nothing.
       # Pinned by selftest/test_verifier_failure_result.py.
       - name: Post check-run — verifier did not finish
-        if: failure()
+        if: failure() && !cancelled()
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
