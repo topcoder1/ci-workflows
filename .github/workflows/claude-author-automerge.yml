@@ -95,6 +95,16 @@ name: Claude-author Auto-merge (reusable)
 #       secrets in any commit, its own included, from a REQUIRED gitleaks
 #       check; a nested copy does the same for its subtree. Lesson
 #       2026-09-24, measured on gitleaks 8.21.2 and 8.30.1.
+#     - .gitmodules at any depth. Git reads the root copy. A PR that repoints
+#       a submodule's `url` changes where CI fetches it from: a checkout with
+#       `submodules:` runs `git submodule sync` + `update --init`, which read
+#       the PR's .gitmodules (wxa_vpn's deploy workflows check out with
+#       `submodules: recursive`). `ignore = all` hides a moved submodule
+#       pointer from a plain `git diff` or `git log -p` in the PR's checkout;
+#       `-c diff.ignoreSubmodules=none` does not bring it back, only
+#       `--ignore-submodules=none` does. The superproject never reads a
+#       nested copy, but it is gated too, the same (^|/) shape as
+#       .gitattributes. Measured on git 2.50.1, 2026-09-28.
 #     - ML serving/model-promotion: ml/predictor.py (live scoring path),
 #       ml/retrain.py (model-promotion gate). Lesson 2026-06-02: a serving-path
 #       fix auto-merged because ml/ had no risk glob; now explicitly matched.
@@ -1331,6 +1341,7 @@ jobs:
           ^(docs/)?CODEOWNERS$
           ^\.github/CODEOWNERS$
           (^|/)\.gitattributes$
+          (^|/)\.gitmodules$
           ^infra/iam/.*
           ^infra/(deploy|terraform|pulumi|k8s|cloudformation|ansible|digitalocean|scanner-id)/.*
           ^infra/nginx.*
