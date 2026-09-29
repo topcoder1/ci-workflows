@@ -21,7 +21,9 @@ Layers:
    the rest of the tree keep the PR's. Every form of git diff still shows the
    PR's changes to those paths: against a commit (working tree included),
    against the index, and between commits. A PR that swaps AGENTS.md for a
-   symlink gets the base's regular file back.
+   symlink gets the base's regular file back. Every path the step hands git
+   is literal: PR files named like pathspec globs or magic are taken off
+   disk, and the restore touches no path the PR did not change.
 3. Unaffected PRs: when the PR leaves those paths as the base has them, or
    the repo has none of them, the step changes nothing in the checkout and
    the review prompt is unchanged.
@@ -145,7 +147,7 @@ def stage(repo, files):
     for path, content in files.items():
         target = repo / path
         if content is None:
-            git(repo, "rm", "-q", path)
+            git(repo, "--literal-pathspecs", "rm", "-q", "--", path)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_symlink() or target.exists():
@@ -154,7 +156,7 @@ def stage(repo, files):
             target.symlink_to(content)
         else:
             target.write_text(content)
-        git(repo, "add", path)
+        git(repo, "--literal-pathspecs", "add", "--", path)
 
 
 class Checkout:
@@ -351,6 +353,49 @@ def test_a_symlink_the_pr_puts_in_place_of_agents_md_is_undone(tmp_path):
         "AGENTS.md": "base instructions\n",
         "docs/notes.md": "PR-head instructions\n",
     }
+
+
+# PR-added names that would be globs or magic if read as pathspecs, each
+# beside the base's skill that a glob would also select.
+CRAFTED = [
+    ".codex/skills/[b]ase/SKILL.md",
+    ".codex/skills/*/SKILL.md",
+    ".codex/skills/ba?e/SKILL.md",
+    ".codex/skills/b" + chr(92) + "ase/SKILL.md",
+    ".codex/**",
+    ".codex/skills/:(exclude)base/SKILL.md",
+]
+
+
+@pytest.mark.parametrize("crafted", CRAFTED)
+def test_a_pr_file_named_like_a_pathspec_is_taken_off_disk(crafted, tmp_path):
+    checkout = Checkout(
+        tmp_path,
+        {".codex/skills/base/SKILL.md": "base skill\n"},
+        {crafted: "PR-head skill\n"},
+    )
+    result = run_step(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert checkout.tree() == {".codex/skills/base/SKILL.md": "base skill\n"}
+    # git still shows the PR's file, as added.
+    listed = git(checkout.repo, "diff", "--name-only", "-z", "origin/main")
+    assert listed == crafted + "\0"
+
+
+def test_the_restore_touches_only_the_paths_the_pr_changed(tmp_path):
+    # Each name git diff lists is one literal path. Read as a glob,
+    # `[b]ase` would also select the base's own skill and rewrite it; a
+    # working-tree edit to that file stands in for a copy the step must
+    # leave alone.
+    checkout = Checkout(
+        tmp_path,
+        {".codex/skills/base/SKILL.md": "base skill\n"},
+        {".codex/skills/[b]ase/SKILL.md": "PR-head skill\n"},
+    )
+    (checkout.repo / ".codex/skills/base/SKILL.md").write_text("local edit\n")
+    result = run_step(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert checkout.tree() == {".codex/skills/base/SKILL.md": "local edit\n"}
 
 
 # --- 3. Unaffected PRs -------------------------------------------------------------

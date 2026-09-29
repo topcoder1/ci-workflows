@@ -199,6 +199,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # Every path handed to git below is literal: the names `git diff`
+          # prints come from the PR, and as pathspecs `*`, `?`, `[` and `\`
+          # would be globs and a leading `:` magic.
+          export GIT_LITERAL_PATHSPECS=1
           paths=(AGENTS.md AGENTS.override.md .codex .agents .codex-plugin .claude-plugin .cursor-plugin)
           if ! git cat-file -e "${BASE_SHA}^{commit}"; then
             echo "::error::the PR's base commit is not in this checkout, so Codex's project config cannot be taken from it. Failing closed."
