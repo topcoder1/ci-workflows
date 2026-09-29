@@ -18,17 +18,22 @@ Layers:
    refs, as actions/checkout leaves refs/pull/N/merge) whose PR changes, adds
    and deletes files under those paths, the working tree ends with the base's
    versions and none of the PR's additions, while the index, the commits and
-   the rest of the tree keep the PR's. A PR that swaps AGENTS.md for a symlink
-   gets the base's regular file back.
+   the rest of the tree keep the PR's. Every form of git diff still shows the
+   PR's changes to those paths: against a commit (working tree included),
+   against the index, and between commits. A PR that swaps AGENTS.md for a
+   symlink gets the base's regular file back.
 3. Unaffected PRs: when the PR leaves those paths as the base has them, or
-   the repo has none of them, the step changes nothing in the checkout.
+   the repo has none of them, the step changes nothing in the checkout and
+   the review prompt is unchanged.
 4. Fail closed: a base commit missing from the checkout exits 1 with the
    working tree untouched.
 5. End to end: the step, then the shipped review step with a stub codex that
-   prints the project files Codex would load; it sees the base's. Without the
-   step it sees the checkout's own files (negative control), and mutated
-   steps (the index restored instead of the working tree, a path left off
-   the list) fail.
+   prints the project files Codex would load and runs `git diff --stat
+   origin/main`: it loads the base's files and git lists the PR's changes to
+   them, and the prompt carries a note only when files were restored.
+   Without the step it sees the checkout's own files (negative control), and
+   mutated steps (the restore dropped, a path left off the list,
+   skip-worktree not set) fail.
 6. CODEX_HOME: the login step makes it a directory under RUNNER_TEMP and hands
    it to later steps through GITHUB_ENV before logging in.
 """
@@ -160,6 +165,9 @@ class Checkout:
     def __init__(self, root, base_files, pr_files):
         self.repo = root / "checkout"
         self.repo.mkdir()
+        self.runner_temp = root / "runner-temp"
+        self.runner_temp.mkdir()
+        self.marker = self.runner_temp / "codex-base-project-config"
         git(self.repo, "init", "-q", "-b", "main")
         stage(self.repo, base_files)
         git(self.repo, "commit", "-qm", "base")
@@ -255,6 +263,7 @@ def run_step(checkout, script=None, event=None):
         env={
             **git_environment(),
             **step_environment(document, step, event or checkout.event),
+            "RUNNER_TEMP": str(checkout.runner_temp),
         },
         capture_output=True,
         text=True,
@@ -301,8 +310,29 @@ def test_the_working_tree_gets_the_base_project_config(checkout):
     # PR's versions stay readable through git.
     assert checkout.state()[:3] == before
     assert git(checkout.repo, "show", "HEAD:AGENTS.md") == PR_FILES["AGENTS.md"]
+    assert checkout.marker.exists()
     assert result.stdout.endswith(
         "11 path(s) in the working tree put back as the base has them.\n"
+    )
+
+
+def test_every_git_diff_still_shows_the_prs_changes(checkout):
+    # The model picks its own diff; each form must read the PR's versions of
+    # the restored files, not the base copies on disk.
+    result = run_step(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    against_base = git(checkout.repo, "--no-pager", "diff", "origin/main")
+    assert "+PR-head instructions" in against_base
+    assert "+# PR-head config" in against_base
+    assert "+PR-head override" in against_base
+    assert against_base == git(
+        checkout.repo, "--no-pager", "diff", "origin/main", "HEAD"
+    )
+    assert git(checkout.repo, "--no-pager", "diff") == ""
+    # The base copy of a file the PR deleted is the only thing on disk git
+    # does not account for.
+    assert (
+        git(checkout.repo, "status", "--porcelain") == "?? .codex/skills/base-skill/\n"
     )
 
 
@@ -341,6 +371,7 @@ def test_a_pr_that_leaves_the_project_config_alone_changes_nothing(repo, tmp_pat
     assert result.stdout == "The PR leaves Codex's project config as the base has it.\n"
     assert checkout.tree() == tree
     assert checkout.state() == state
+    assert not checkout.marker.exists()
 
 
 # --- 4. Fail closed -----------------------------------------------------------------
@@ -354,6 +385,7 @@ def test_a_base_commit_missing_from_the_checkout_fails_closed(checkout):
     assert "base commit is not in this checkout" in result.stdout
     assert checkout.tree() == tree
     assert checkout.state() == state
+    assert not checkout.marker.exists()
 
 
 # --- 5. End to end --------------------------------------------------------------------
@@ -361,20 +393,29 @@ def test_a_base_commit_missing_from_the_checkout_fails_closed(checkout):
 
 def review_sees(checkout, tmp_path):
     """Run the shipped review step with a stub codex that prints the project
-    files Codex would load; return what it printed."""
+    files Codex would load, then the diff a model would most likely run
+    (against the base branch, working tree included). Return what it printed
+    and the prompt it was given."""
     document = load()
     step = find_step(document, REVIEW)
     stub = tmp_path / "bin" / "codex"
     stub.parent.mkdir()
+    prompt_file = tmp_path / "prompt.txt"
     stub.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "--version" ]; then echo "codex-cli 0.0.0-fixture"; exit 0; fi\n'
+        "for prompt; do :; done\n"
+        f"printf '%s' \"$prompt\" > '{prompt_file}'\n"
+        "base=$(printf '%s\\n' \"$prompt\" | grep -oE 'origin/[A-Za-z0-9._/-]+' | head -n 1)\n"
         'echo "model: $CODEX_MODEL"\n'
         "for f in AGENTS.override.md AGENTS.md .codex/config.toml; do\n"
         '  [ -f "$f" ] && cat "$f"\n'
         "done\n"
         "find .codex .agents .codex-plugin .claude-plugin .cursor-plugin "
         "-type f -exec cat {} + 2>/dev/null\n"
+        'echo "== git diff --stat $base"\n'
+        'git --no-pager diff --stat "$base"\n'
+        'echo "== end"\n'
         "printf 'codex\\nVERDICT: CLEAN\\n'\n"
     )
     stub.chmod(0o755)
@@ -398,12 +439,13 @@ def review_sees(checkout, tmp_path):
             **step_environment(document, step, checkout.event),
             "PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}",
             "GITHUB_STEP_SUMMARY": str(summary),
+            "RUNNER_TEMP": str(checkout.runner_temp),
         },
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    return (out / "codex.out").read_text()
+    return (out / "codex.out").read_text(), prompt_file.read_text()
 
 
 def assert_sees_the_base_config(seen):
@@ -413,35 +455,81 @@ def assert_sees_the_base_config(seen):
         assert marker not in seen, f"Codex loaded the PR's {marker!r}:\n{seen}"
 
 
+def assert_git_shows_the_prs_changes(seen):
+    stat = seen.split("== git diff --stat origin/main\n", 1)[1].split("== end\n")[0]
+    for path in ("AGENTS.md", ".codex/config.toml", "AGENTS.override.md"):
+        assert f" {path} " in stat, f"git hid the PR's change to {path}:\n{stat}"
+
+
 def test_codex_loads_the_base_project_config(checkout, tmp_path):
     result = run_step(checkout)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert_sees_the_base_config(review_sees(checkout, tmp_path))
+    seen, _ = review_sees(checkout, tmp_path)
+    assert_sees_the_base_config(seen)
+    assert_git_shows_the_prs_changes(seen)
 
 
 def test_without_the_step_the_review_reads_the_checkouts_files(checkout, tmp_path):
-    seen = review_sees(checkout, tmp_path)
+    seen, _ = review_sees(checkout, tmp_path)
     for marker in PR_MARKERS:
         assert marker in seen
 
 
+NOTE = "Their copies on disk are the base branch's"
+
+
+def test_the_prompt_says_so_only_when_the_step_restored_files(tmp_path):
+    for root in ("untouched", "restored"):
+        (tmp_path / root).mkdir()
+    untouched = Checkout(
+        tmp_path / "untouched", *UNAFFECTED["project config untouched"]
+    )
+    assert run_step(untouched).returncode == 0
+    _, plain = review_sees(untouched, tmp_path / "untouched")
+    assert NOTE not in plain
+    restored = Checkout(tmp_path / "restored", BASE_FILES, PR_FILES)
+    assert run_step(restored).returncode == 0
+    _, noted = review_sees(restored, tmp_path / "restored")
+    # The same prompt, with the note added after it.
+    assert noted.startswith(plain + "\n\n")
+    assert NOTE in noted[len(plain) :]
+    assert "git show HEAD:<path>" in noted[len(plain) :]
+
+
+# mutation: (edit, the check it must break)
 MUTATIONS = {
-    "the index restored instead of the working tree": lambda text: text.replace(
-        "--worktree", "--staged"
+    "restore dropped": (
+        lambda text: text.replace(
+            '| git restore --source="$BASE_SHA" --worktree --pathspec-from-file=- '
+            "--pathspec-file-nul",
+            "| cat > /dev/null",
+        ),
+        assert_sees_the_base_config,
     ),
-    "AGENTS.md off the list": lambda text: text.replace("paths=(AGENTS.md ", "paths=("),
+    "AGENTS.md off the list": (
+        lambda text: text.replace("paths=(AGENTS.md ", "paths=("),
+        assert_sees_the_base_config,
+    ),
+    "skip-worktree not set": (
+        lambda text: text.replace(
+            "| git update-index -z --skip-worktree --stdin", "| cat > /dev/null"
+        ),
+        assert_git_shows_the_prs_changes,
+    ),
 }
 
 
 @pytest.mark.parametrize("mutation", sorted(MUTATIONS))
-def test_a_step_that_keeps_the_prs_project_config_fails(mutation, checkout, tmp_path):
+def test_a_step_that_misses_either_half_fails(mutation, checkout, tmp_path):
+    edit, check = MUTATIONS[mutation]
     script = shipped_run(find_step(load(), STEP))
-    mutated = MUTATIONS[mutation](script)
+    mutated = edit(script)
     assert mutated != script, "mutation did not apply; the anchor drifted"
     result = run_step(checkout, script=mutated)
     assert result.returncode == 0, result.stdout + result.stderr
-    with pytest.raises(AssertionError, match="loaded the PR's|did not load the base's"):
-        assert_sees_the_base_config(review_sees(checkout, tmp_path))
+    seen, _ = review_sees(checkout, tmp_path)
+    with pytest.raises(AssertionError):
+        check(seen)
 
 
 # --- 6. CODEX_HOME --------------------------------------------------------------------

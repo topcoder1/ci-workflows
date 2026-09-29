@@ -184,9 +184,11 @@ jobs:
       # with the base branch's Codex project config, as claude-code-action's
       # restoreConfigFromBase does for the Claude lanes. It runs before Codex
       # is installed or logged in. Only the working tree changes: the index
-      # and the commits keep the PR's versions, so the review still reads the
-      # PR's changes to these paths through git. When the PR leaves them as
-      # the base has them, nothing is touched. A base version that points
+      # and the commits keep the PR's versions, and the restored index
+      # entries are marked skip-worktree, so every git diff and git status
+      # still shows the PR's changes to these paths while Codex reads the
+      # base's from disk. The review prompt then says so. When the PR leaves
+      # them as the base has them, nothing is touched. A base version that points
       # elsewhere in the repo (a symlink, or a fallback filename in its own
       # config) still reads that file from the PR's tree. A Codex release
       # that reads another project path needs it added here. Pinned by
@@ -213,6 +215,16 @@ jobs:
           fi
           git diff --name-only --no-renames --ignore-submodules=none -z "$BASE_SHA" HEAD -- "${paths[@]}" \
             | git restore --source="$BASE_SHA" --worktree --pathspec-from-file=- --pathspec-file-nul
+          # git must go on showing the PR's versions, whatever diff the model
+          # picks. The index still holds them, and skip-worktree makes git
+          # take those entries from the index instead of the working tree:
+          # `git diff`, `git diff <commit>` and `git status` then read as if
+          # the PR's files were on disk. A path the PR deleted is not in the
+          # index; its base copy shows as untracked.
+          git diff --name-only --no-renames --ignore-submodules=none -z --diff-filter=d "$BASE_SHA" HEAD -- "${paths[@]}" \
+            | git update-index -z --skip-worktree --stdin
+          # Tells the review step to say so in its prompt.
+          : > "${RUNNER_TEMP:?RUNNER_TEMP is not set}/codex-base-project-config"
           count=$(git diff --name-only --no-renames --ignore-submodules=none "$BASE_SHA" HEAD -- "${paths[@]}" | wc -l | tr -d ' ')
           echo "Codex's project config is the base commit's: ${count} path(s) in the working tree put back as the base has them."
 
@@ -328,6 +340,16 @@ jobs:
           nothing to report.
 
           Be brief. Do not perform general bug-hunting; the first pass already did."
+
+          # When the step "Review with the base branch's Codex project
+          # config" put base copies of Codex's project files on disk, say so:
+          # git shows the PR's versions of those files, but reading one from
+          # disk gives the base's. Other PRs get the prompt above unchanged.
+          if [ -e "${RUNNER_TEMP:-}/codex-base-project-config" ]; then
+            PROMPT="${PROMPT}
+
+          This PR changes Codex project files (AGENTS.md, AGENTS.override.md, .codex/, .agents/ or plugin manifests). Their copies on disk are the base branch's, so this review runs with the base's Codex project config. git diff and git show still give the PR's versions: read the PR's copy of such a file with git show HEAD:<path>, not from disk."
+          fi
 
           # --dangerously-bypass-approvals-and-sandbox: skip Codex's internal
           # bubblewrap (Linux) / Seatbelt (macOS) sandbox. Required in CI:
