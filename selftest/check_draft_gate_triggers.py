@@ -39,7 +39,8 @@ Usage:
 Exits 0 when clean, 1 when any violation is found (annotated for GitHub Actions), and 1
 when <workflows-dir> is missing, not a directory, a symlink, or reached through one (a
 symlinked .github, say): there is always a real one where lint.yml runs this, so anything
-else fails closed.
+else fails closed. Pass a relative path, as lint.yml does, or a resolved one: an absolute
+path through a symlinked directory (macOS's /tmp or /var, say) is rejected too.
 """
 
 from __future__ import annotations
@@ -165,7 +166,7 @@ def check_dir(workflows_dir: Path, reusables: frozenset[str]) -> list[str]:
 
 
 def first_symlink(path: Path) -> Path | None:
-    """The first component of `path`, as given, that is a symlink, or None.
+    """The shortest prefix of `path`, as given, that is a symlink, or None.
 
     Only the components the caller named are checked, so a relative path is not
     judged by where the working directory itself sits.

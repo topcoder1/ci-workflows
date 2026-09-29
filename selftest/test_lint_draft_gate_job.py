@@ -55,6 +55,8 @@ jobs:
 """
 OK_LINE = "OK: every draft-gated workflow listens for `ready_for_review`\n"
 VIOLATION_LINE = "::error file=.github/workflows/pr-review.yml::pr-review.yml: "
+# The harness never inherits a token from the machine running the tests.
+TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 
 
 def evaluate(expression, context):
@@ -88,7 +90,9 @@ def replay_checkout(workspace, step):
     shutil.copy(CHECKER, target / "selftest" / CHECKER.name)
 
 
-def run_job(workspace, tmp_path, repository="acme/app", served=None, text=None):
+def run_job(
+    workspace, tmp_path, repository="acme/app", served=None, text=None, fail=False
+):
     """Run the job's steps in order in `workspace`; return the last run step's
     result and the argument lists the stub gh was called with."""
     document = yaml.safe_load(text if text is not None else LINT.read_text())
@@ -99,10 +103,19 @@ def run_job(workspace, tmp_path, repository="acme/app", served=None, text=None):
     body = tmp_path / "gh-body"
     body.write_bytes(served if served is not None else CHECKER.read_bytes())
     # One argument per line, then an end marker, so each call's argv is exact.
+    # Like the real gh, the stub refuses to run without GH_TOKEN (exit 4), so the
+    # step must hand it the job token. With fail=True it answers the way the
+    # API does for a missing file: a JSON error body on stdout and exit 1.
+    failure = (
+        'echo \'{"message":"Not Found","status":"404"}\'; exit 1\n' if fail else ""
+    )
     stub.write_text(
         "#!/bin/sh\n"
+        '[ -n "$GH_TOKEN" ] || { echo "gh: set the GH_TOKEN environment variable" >&2; '
+        "exit 4; }\n"
         f'for argument; do printf \'%s\\n\' "$argument"; done >> "{calls}"\n'
         f"echo '--end-of-call--' >> \"{calls}\"\n"
+        f"{failure}"
         f'base64 < "{body}"\n'
     )
     stub.chmod(0o755)
@@ -121,7 +134,7 @@ def run_job(workspace, tmp_path, repository="acme/app", served=None, text=None):
         if step.get("name") == "Install PyYAML":
             continue  # pyyaml is already importable here
         environment = {
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if k not in TOKEN_VARIABLES},
             **{k: substitute(v, context) for k, v in (step.get("env") or {}).items()},
             "PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}",
             "RUNNER_TEMP": str(runner_temp),
@@ -236,6 +249,14 @@ def test_an_empty_fetch_fails_the_job(tmp_path):
     result, _ = run_job(workspace, tmp_path, served=b"")
     assert result.returncode == 1
     assert "fetched an empty draft-gate checker" in result.stdout
+
+
+def test_a_failing_fetch_fails_the_job(tmp_path):
+    workspace = workspace_with(tmp_path, {"pr-review.yml": CLEAN})
+    result, calls = run_job(workspace, tmp_path, fail=True)
+    assert result.returncode != 0
+    assert "OK:" not in result.stdout
+    assert len(calls) == 1
 
 
 def test_a_symlinked_github_directory_fails_the_job(tmp_path):
