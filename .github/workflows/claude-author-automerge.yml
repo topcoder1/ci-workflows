@@ -261,7 +261,7 @@ on:
         type: string
         default: "auto-merge-nonmain"
       codex_check_name:
-        description: "Status-check name for Codex Review. When set and this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Empty (the default since 2026-09-29) disables the bypass. It shipped as \"review / Codex Review\" but never fired on a private caller, whose job token could not read check runs; setting it turns the bypass on for real, so it is a policy decision, not a fix."
+        description: "Status-check name for Codex Review. When set and this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Empty (the default since 2026-09-29) disables the bypass. It shipped as \"review / Codex Review\" but never fired on a private caller, whose job token could not read check runs; setting it turns the bypass on wherever the job can read check runs, so it is a policy decision, not a fix."
         required: false
         type: string
         default: ""

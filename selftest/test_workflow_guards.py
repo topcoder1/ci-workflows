@@ -376,19 +376,22 @@ def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
         f"PRs too (both are '{sensitive_job}')"
     )
 
-    # And the standard lane's id must not be the one claude-author-automerge
-    # trusts by default. An empty default trusts no check at all
-    # (test_codex_trusted_bypass_is_off_by_default).
-    trusted = _codex_check_name_default()
-    if not trusted:
-        return
-    trusted_job = trusted.split(" / ")[0].strip()
-    assert standard_job != trusted_job, (
-        f"the risk:standard lane uses job id '{standard_job}', which is the "
-        f"bypass-trusted check name '{trusted_job} / Codex Review' — a "
-        "cost-gated SKIP would then read as a passed review and bypass the "
-        "risk-tier manual-merge gate"
-    )
+    # And the standard lane's id must not be one claude-author-automerge
+    # can be told to trust. The default is empty since 2026-09-29
+    # (test_codex_trusted_bypass_is_off_by_default), so check the name a
+    # caller opts in with, as documented, and the default if one is ever set
+    # again: an opt-in caller must not trust the standard lane's cost-skip.
+    trusted_names = {"review / Codex Review"}
+    if _codex_check_name_default():
+        trusted_names.add(_codex_check_name_default())
+    for trusted in sorted(trusted_names):
+        trusted_job = trusted.split(" / ")[0].strip()
+        assert standard_job != trusted_job, (
+            f"the risk:standard lane uses job id '{standard_job}', which is the "
+            f"bypass-trusted check name '{trusted_job} / Codex Review' — a "
+            "cost-gated SKIP would then read as a passed review and bypass the "
+            "risk-tier manual-merge gate"
+        )
 
 
 def test_safe_paths_never_automerges_customer_facing_legal():
