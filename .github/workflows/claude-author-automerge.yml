@@ -410,8 +410,9 @@ jobs:
       # policy-free, and then the global risk-tier regex below still
       # gates, which matches pre-classifier behavior (automerge-only
       # repos without pr-classify stay supported). No `checks: read` is
-      # needed for any of this (deliberate: e.g. the wxa-secrets caller
-      # omits it to keep the Codex bypass disabled).
+      # needed for any of this. (The wxa-secrets caller used to omit it to
+      # keep the Codex bypass off; since 2026-09-29 the bypass is opt-in via
+      # codex_check_name, so that reason is gone.)
       #
       # Deliberately NOT pinned: classify.mjs and its vendored dep bundle
       # (classifier-deps.mjs) are fetched from this repo's default branch —
@@ -1422,8 +1423,10 @@ jobs:
       # When the configured Codex status check is SUCCESS, treat the PR as
       # second-model-reviewed and bypass the risk-tier gate. The check name
       # is configurable so callers can wire whatever Codex caller they
-      # use (default "review / Codex Review", which matches the
-      # pr-codex-review.yml caller in this same repo).
+      # use. It is empty by default since 2026-09-29, which disables the
+      # bypass; a caller that wants it names its Codex check, e.g.
+      # "review / Codex Review" for the pr-codex-review.yml caller in this
+      # same repo.
       - name: Check Codex Review status (Option B)
         id: bypass_codex
         if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1' && steps.bypass_label.outputs.bypass != '1'

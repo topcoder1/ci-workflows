@@ -333,8 +333,9 @@ def test_standard_codex_lane_cannot_satisfy_the_automerge_bypass():
     """The risk:standard Codex lane must not publish the bypass-trusted check.
 
     claude-author-automerge.yml bypasses its risk-tier manual-merge gate when
-    the check named by `codex_check_name` (default "review / Codex Review")
-    concludes SUCCESS. That check name is "<job id> / Codex Review".
+    the check named by `codex_check_name` concludes SUCCESS (empty by default
+    since 2026-09-29; a caller that wants the bypass names e.g.
+    "review / Codex Review"). That check name is "<job id> / Codex Review".
 
     The bypass trusts a CONCLUSION, not a review: when codex-gate.mjs skips
     (small diff, or docs/tests-only), the review steps are skipped but the
