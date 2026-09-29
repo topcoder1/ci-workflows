@@ -167,7 +167,12 @@ jobs:
 
             Do NOT post inline comments. Do NOT do general bug-hunting. The
             first pass already did that — your value is the regression axes.
+          # The allowlist is read-only. It leaves out rg for the reason the
+          # verifier lane leaves out rg, sed and awk (see its allowlist
+          # comment): each can run another program, so allowing it by prefix
+          # allows more than reading. grep covers the searching. Pinned by
+          # selftest/test_review_lane_allowlists.py.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 25
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(git log:*)"
