@@ -226,6 +226,75 @@ jobs:
           printenv OPENAI_API_KEY | codex login --with-api-key
           codex login status
 
+      # Codex reads the change with its own git commands, and git leaves a
+      # submodule's pointer change out of them when the checkout's .gitmodules
+      # (the PR's) sets `submodule.<name>.ignore`. This step writes
+      # `ignore = none` for those names into .git/config; the rules are with
+      # the same script in claude-adversarial-review.yml. It is config, not
+      # environment, because Codex decides what environment its shell gets
+      # (shell_environment_policy): a `*KEY*` exclude, one config setting
+      # away, would drop GIT_CONFIG_KEY_<n> alone, and git then refuses every
+      # command. git reads .git/config whatever that policy passes. Pinned by
+      # selftest/test_review_lanes_submodule_ignore.py.
+      - name: Keep submodule changes visible to the model's git
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          tmp="${RUNNER_TEMP:?RUNNER_TEMP is not set}"
+          name_re='^[^[:cntrl:]]{1,255}$'
+          : > "$tmp/gitmodules-ignore-names"
+          # claude-code-action restores .gitmodules from the base branch as it
+          # stands when the action runs, which can be past BASE_SHA, so the
+          # branch's tip in this checkout is read too.
+          if ! git check-ref-format "refs/heads/${BASE_REF}" \
+            || ! tip=$(git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}"); then
+            echo "::error::the PR's base branch is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the base branch fetched (fetch-depth 0)."
+            exit 1
+          fi
+          for rev in "$BASE_SHA" "$HEAD_SHA" HEAD "$tip"; do
+            if ! git cat-file -e "${rev}^{commit}"; then
+              echo "::error::commit ${rev} is not in this checkout, so the submodule settings in its .gitmodules cannot be read. Failing closed: the lane needs the PR's base and head commits (fetch-depth 0)."
+              exit 1
+            fi
+            blob=$(git rev-parse --verify --quiet "${rev}:.gitmodules") || continue
+            if ! git config -z --blob "$blob" --name-only --list > "$tmp/gitmodules-keys"; then
+              echo "::error::git cannot parse the .gitmodules at ${rev}. Failing closed: an ignore setting in it could hide a submodule change from the model."
+              exit 1
+            fi
+            while IFS= read -r -d '' key; do
+              case $key in
+                submodule.*.ignore) ;;
+                *) continue ;;
+              esac
+              name=${key#submodule.}
+              name=${name%.ignore}
+              if ! [[ $name =~ $name_re ]]; then
+                echo "::error::the .gitmodules at ${rev} sets ignore for a submodule whose name is empty, longer than 255 bytes or holds a control character. Failing closed: git would hide that submodule's changes from the model, and this step passes no such name to git config."
+                exit 1
+              fi
+              printf '%s\n' "$name" >> "$tmp/gitmodules-ignore-names"
+            done < "$tmp/gitmodules-keys"
+          done
+          sort -u "$tmp/gitmodules-ignore-names" > "$tmp/gitmodules-ignore-names.sorted"
+          count=$(wc -l < "$tmp/gitmodules-ignore-names.sorted" | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "No .gitmodules sets ignore for a submodule; .git/config is left as it is."
+            exit 0
+          fi
+          if [ "$count" -gt 256 ]; then
+            echo "::error::${count} submodules have an ignore setting, more than this step's cap of 256. Failing closed."
+            exit 1
+          fi
+          while IFS= read -r name; do
+            git config --local "submodule.${name}.ignore" none
+            echo "submodule.${name}.ignore=none"
+          done < "$tmp/gitmodules-ignore-names.sorted"
+
       - name: Run Codex adversarial review
         if: steps.gate.outputs.should_run == 'true'
         id: review
