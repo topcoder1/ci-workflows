@@ -251,7 +251,10 @@ jobs:
           # literal path, never a pattern. Pinned by
           # selftest/test_verifier_changed_paths_renames.py.
           KEPT_LOSING=""
-          while IFS=$'\t' read -r path _; do
+          # Opened with exec: bash 3.2 skips a loop whose own redirection
+          # fails without failing the step, which would drop the note.
+          exec 3< "${VERIFIER_SCRATCH:?}/matches.txt"
+          while IFS=$'\t' read -r -u 3 path _; do
             if [[ ! "$path" =~ ^[A-Za-z0-9._/-]+$ ]]; then
               echo "Rejecting unsafe matched path: $(printf '%q' "$path")" >&2
               exit 1
@@ -261,7 +264,8 @@ jobs:
             if [[ -n "$deleted" && "$deleted" != "0" ]]; then
               KEPT_LOSING+="       ${path}"$'\n'
             fi
-          done < "${VERIFIER_SCRATCH:?}/matches.txt"
+          done
+          exec 3<&-
           DELIM="EOF_$(openssl rand -hex 16)"
           {
             echo "text<<${DELIM}"

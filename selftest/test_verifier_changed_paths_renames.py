@@ -56,6 +56,7 @@ passes --ignore-submodules=none.
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -754,4 +755,41 @@ def test_verifier_prompt_step_fails_before_writing_a_prompt(
         text=True,
     )
     assert result.returncode != 0, result.stdout
+    assert not output.exists()
+
+
+def test_verifier_prompt_step_fails_when_it_cannot_reread_the_matches(
+    kept_extraction, tmp_path
+):
+    # The step reads the matches whole for the prompt, then record by record
+    # for the note. A `cat` that removes the file after printing it leaves the
+    # second read nothing to open: the step must fail, not drop the note.
+    repo, event = kept_extraction
+    document, step = find_step("prompt")
+    (scratch(repo) / "matches.txt").write_text(f"{OLD}\t(matched: fixture)\n")
+    shim = tmp_path / "shim" / "cat"
+    shim.parent.mkdir()
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'{shutil.which("cat")} "$@" || exit\n'
+        'for f; do case $f in */matches.txt) rm -f "$f" ;; esac; done\n'
+    )
+    shim.chmod(0o755)
+    output = repo.parent / "github-output"
+    environment = {
+        **git_environment(),
+        **step_environment(document, step, event),
+        "VERIFIER_SCRATCH": str(scratch(repo)),
+        "GITHUB_OUTPUT": str(output),
+    }
+    environment["PATH"] = f"{shim.parent}{os.pathsep}{environment['PATH']}"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert "matches.txt" in result.stderr, result.stderr
     assert not output.exists()
