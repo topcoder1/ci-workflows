@@ -34,7 +34,12 @@
 #       stale run must not clear a newer run's valid label.
 #   4.  idempotent: decision label already present ⇒ read only, zero
 #       mutating calls (no delete/create/POST churn on every event).
-#   5.  risky with no bypass ⇒ `automerge:blocked-risk-tier`.
+#   5.  risky with no bypass, and the risk-tier revoke verified the arm
+#       off ⇒ `automerge:blocked-risk-tier`.
+#   5b. risky with no bypass but NO verified revoke (the revoke failed,
+#       or never ran) ⇒ no publish: the label must not announce a block
+#       that a surviving arm defeats — a failed disarm stays an unlabeled
+#       red run, as in the arm step.
 #   6.  risky but Codex-bypassed, quiet gate unset ⇒ no publish (the
 #       arm path owns the outcome; its absence means the run died
 #       mid-flight — not this step's story to tell).
@@ -491,7 +496,7 @@ expect_absent() {
 # 1. findings decision reconciles: stale risk-tier label out (URL-encoded),
 #    withheld-findings in, foreign labels untouched.
 # ---------------------------------------------------------------------------
-export ARMED="" ARM_STOOD_DOWN="" BLOCKED="" HOLD="" BASE_REFUSE="" RISKY="" BYPASS_LBL="" BYPASS_CDX="" QF_REASON="findings"
+export ARMED="" ARM_STOOD_DOWN="" BLOCKED="" HOLD="" BASE_REFUSE="" RISKY="" BYPASS_LBL="" BYPASS_CDX="" RISK_ARM_OFF="" QF_REASON="findings"
 export STUB_LABELS=$'risk:standard\nautomerge:blocked-risk-tier\nauto-merge-approved'
 export STUB_LABELS_FAIL=0 STUB_DELETE_FAIL=0 STUB_POST_FAIL=0 STUB_HEAD_FAIL=0 STUB_CREATE_FAIL=0
 run_case findings
@@ -553,13 +558,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. risky with no bypass ⇒ blocked-risk-tier.
+# 5. risky with no bypass, arm verified off ⇒ blocked-risk-tier.
 # ---------------------------------------------------------------------------
-export QF_REASON="" RISKY="1" BYPASS_LBL="0" BYPASS_CDX="0"
+export QF_REASON="" RISKY="1" BYPASS_LBL="0" BYPASS_CDX="0" RISK_ARM_OFF="1"
 export STUB_LABELS=""
 run_case risky
 expect "5: risky-no-bypass publishes automerge:blocked-risk-tier" \
   "labels[]=automerge:blocked-risk-tier" "$T/gh.log"
+
+# ---------------------------------------------------------------------------
+# 5b. risky with no bypass, arm NOT verified off ⇒ no publish.
+# ---------------------------------------------------------------------------
+export RISK_ARM_OFF=""
+run_case risky_unrevoked
+if [ ! -s "$T/gh.log" ]; then
+  echo "✓ 5b: risky-no-bypass without a verified risk-tier revoke publishes nothing (a failed disarm stays an unlabeled red run)"
+else
+  echo "✗ 5b: expected zero gh calls — the label would announce a block a surviving arm defeats; log:"; sed 's/^/    /' "$T/gh.log"; failed=1
+fi
+expect "5b: says so" "No arbiter decision to publish" "$T/out.log"
+export RISK_ARM_OFF="1"
 
 # ---------------------------------------------------------------------------
 # 6. risky but Codex-bypassed, quiet outputs empty ⇒ no publish.

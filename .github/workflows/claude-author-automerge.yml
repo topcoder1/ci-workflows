@@ -1498,6 +1498,97 @@ jobs:
             echo "bypass=0" >> "$GITHUB_OUTPUT"
           fi
 
+      # Revoke a STANDING arm on a risk-tier verdict that neither bypass
+      # released: the same condition as "Comment + skip when risky", which
+      # used to be the only step that ran here. GitHub keeps an auto-merge
+      # arm across later pushes by users with write access, so a PR armed on
+      # an earlier, clean revision (by the arm step below, or by
+      # safe-paths-automerge on a docs-only revision) kept that arm when a
+      # push added a risk-tier path such as src/auth/login.py, and merged it
+      # unreviewed once checks went green. The quiet gate and the arm step
+      # are skipped on this verdict and the error revoke fires only on a
+      # failed step, so the comment and automerge:blocked-risk-tier
+      # announced a block that nothing enforced. The classifier verdict has
+      # always had its revoke ("Revoke auto-merge if classifier blocked").
+      #
+      # Exact: only this workflow knows its own tier-2 bypasses, and each
+      # keeps the arm. The bypass label (Option A) skips the risk step, a
+      # SUCCESS from codex_check_name (Option B) releases the verdict, and
+      # risk_main_go: false drops main.go from the scan. A hold skips this
+      # step: a hold label has revoked above, and a timeline hold means the
+      # arm is already off. Option A is read from the event's label
+      # snapshot, and a re-run replays its original event: re-running a
+      # push from before a human applied the bypass label would revoke the
+      # arm that label's own run placed. So the live labels are re-read
+      # first, and a bypass label present now skips the revoke (only a
+      # positive read skips; an unreadable label set revokes anyway).
+      #
+      # github.token, like every revoke in this workflow: the manual-hold
+      # step's Signal 2 ignores only github-actions[bot] disables, so a
+      # disarm under the PAT would read as a HUMAN's hold and strand the PR
+      # after the risk clears or the bypass label lands.
+      #
+      # Ownership guard, the same as the error revoke's: skip only on a
+      # POSITIVE head-moved read (the newer head's own run owns the verdict).
+      # Positive means a real SHA. gh api prints an HTTP error's JSON body to
+      # stdout and exits 1, so a failed read is dropped, and anything that is
+      # not a SHA revokes anyway (fail toward safety).
+      #
+      # Only OFF counts: an arm still ON, or an arm state that cannot be
+      # read, fails the step, and the always() error revoke retries the
+      # disarm. The decision label (automerge:blocked-risk-tier) and the
+      # sticky comment publish only on `arm_off=1`, so a failed disarm stays
+      # an unlabeled red run, as in the arm step's disarm_then_exit. Pinned
+      # by selftest/test_automerge_standing_arm_revoke.py.
+      - name: Revoke auto-merge if risk-tier blocked
+        id: risk_revoke
+        if: |
+          steps.detect.outputs.claude_authored == '1' &&
+          steps.classifier_verdict.outputs.blocked != '1' &&
+          steps.hold.outputs.hold != '1' &&
+          steps.risk.outputs.risky == '1' &&
+          steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
+        run: |
+          set -euo pipefail
+          # Exact string equality, one label per line: a failed read is
+          # dropped, and neither a one-line JSON error body nor a partial name
+          # can equal the label. Not `grep -xF`, which splits its pattern on
+          # newlines: a bypass label input with a stray one (a YAML block
+          # scalar keeps its trailing newline) would add an empty pattern
+          # that matches an unlabeled PR's empty read and skip the revoke.
+          if [ -n "$BYPASS_LABEL" ]; then
+            live_labels=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels?per_page=100" \
+              --paginate --jq '.[].name' 2>/dev/null) || live_labels=""
+            while IFS= read -r live; do
+              if [ "$live" = "$BYPASS_LABEL" ]; then
+                echo "::notice::'$BYPASS_LABEL' is on the PR now but not in this event's label snapshot (a re-run of an older event?) — that label's own run owns the arm; skipping stale revoke."
+                exit 0
+              fi
+            done <<<"$live_labels"
+          fi
+          # The ownership check comes last, right before the disarm, so no
+          # read sits between it and the arm it protects.
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
+          if [[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns the risk-tier verdict; skipping stale revoke."
+            exit 0
+          fi
+          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null) || state="UNKNOWN"
+          echo "Auto-merge state after risk-tier revoke: $state"
+          if [ "$state" != "OFF" ]; then
+            echo "::error::auto-merge is '$state' after --disable-auto — the risk-tier block is not enforced; failing closed."
+            exit 1
+          fi
+          echo "arm_off=1" >> "$GITHUB_OUTPUT"
+
       # Quiet period + unaddressed-findings gate (wxa_vpn#1392). Runs ONLY
       # when every earlier gate has cleared — i.e. the PR would otherwise
       # arm right now — and holds the arm until the review conversation has
@@ -2274,13 +2365,18 @@ jobs:
             gh pr comment "$PR" --body-file /tmp/automerge-blocked.md
           fi
 
+      # Gated on a verified revoke, like the decision label: when the revoke
+      # stood down (a moved head, or a bypass label that landed after this
+      # event), refreshing "blocked … stays off" would announce a block over
+      # an arm that is correctly kept.
       - name: Comment + skip when risky
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
           steps.hold.outputs.hold != '1' &&
           steps.risk.outputs.risky == '1' &&
-          steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1'
+          steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1' &&
+          steps.risk_revoke.outputs.arm_off == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -2306,6 +2402,9 @@ jobs:
               echo "billing / production infra). Manual click-merge required: this caller"
               echo "configures no bypass (risk_bypass_label and codex_check_name are empty)."
             fi
+            echo ""
+            echo "Auto-merge stays off while this block stands: each run of this workflow"
+            echo "revokes any arm on this PR, including one a person enabled by hand."
             echo ""
             echo "Matched files:"
             echo '```'
@@ -2383,7 +2482,8 @@ jobs:
       #     label on the PR at all, and the operator contract below only
       #     holds if every abstention labels. A run with no positive
       #     terminal state of its own (arm stood down on a moved head, a
-      #     gate step errored) publishes NOTHING — the newer head's run or
+      #     gate step errored, a risk-tier revoke that could not verify the
+      #     arm off) publishes NOTHING — the newer head's run or
       #     the red job owns the story, and clearing here could race a
       #     valid newer decision. Two guards enforce ownership: the step
       #     skips on run cancellation (`!cancelled()` — a superseded run's
@@ -2419,6 +2519,7 @@ jobs:
           RISKY: ${{ steps.risk.outputs.risky }}
           BYPASS_LBL: ${{ steps.bypass_label.outputs.bypass }}
           BYPASS_CDX: ${{ steps.bypass_codex.outputs.bypass }}
+          RISK_ARM_OFF: ${{ steps.risk_revoke.outputs.arm_off }}
           QF_REASON: ${{ steps.quiet_findings.outputs.reason }}
         run: |
           set -euo pipefail
@@ -2452,7 +2553,16 @@ jobs:
           elif [ "${BODY_REFUSE:-}" = "1" ]; then
             decision="automerge:refused-body"
           elif [ "${RISKY:-}" = "1" ] && [ "${BYPASS_LBL:-}" != "1" ] && [ "${BYPASS_CDX:-}" != "1" ]; then
-            decision="automerge:blocked-risk-tier"
+            # Only once "Revoke auto-merge if risk-tier blocked" has verified
+            # the arm off: announcing the block while a standing arm survives
+            # is the defect that step closes. A failed disarm publishes
+            # nothing, an unlabeled red run as in the arm step. (A revoke that
+            # stood down on a moved head also meets the ownership probe below.)
+            if [ "${RISK_ARM_OFF:-}" = "1" ]; then
+              decision="automerge:blocked-risk-tier"
+            else
+              publish=0
+            fi
           elif [ "${QF_REASON:-}" = "findings" ]; then
             decision="automerge:withheld-findings"
           elif [ "${QF_REASON:-}" = "quiet-cap" ]; then
@@ -2562,13 +2672,20 @@ jobs:
       # blocked short-circuits). The job still ends red from the failed
       # gate step — this only guarantees the arm is gone.
       #
-      # A DISARM that itself failed counts too: `body_revoke` and the arm
-      # step's own pre-arm stand-downs (base or body) both try to remove an
-      # arm placed by an earlier run, and both verify with `gh pr view`. If
-      # that disarm or its verification errors, the gate step it belongs to
-      # still reads 'success', the job goes red — and GitHub keeps the stale
-      # auto-merge request, which merges as soon as checks pass. Listing
-      # their outcomes makes this step retry the disarm (codex round 4 P1).
+      # A DISARM that itself failed counts too: `body_revoke`, `risk_revoke`
+      # and the arm step's own pre-arm stand-downs (base or body) all try to
+      # remove an arm placed by an earlier run, and all verify with `gh pr
+      # view`. If that disarm or its verification errors, the gate step it
+      # belongs to still reads 'success', the job goes red — and GitHub
+      # keeps the stale auto-merge request, which merges as soon as checks
+      # pass. Listing their outcomes makes this step retry the disarm (codex
+      # round 4 P1).
+      #
+      # A failed Option B probe counts too. `bypass_codex` runs only on a
+      # risky verdict the bypass label did not release; when its check-runs
+      # read fails (gh copies a non-JSON 5xx body to stdout and jq cannot
+      # parse it), implicit success() skips `risk_revoke` after it. A check
+      # that could not be read released nothing, so the arm must still go.
       #
       # PREREQUISITE failures count too (codex round-5 P1): if checkout,
       # detect, or setup-node errors, the gate steps end 'skipped' — not
@@ -2590,6 +2707,8 @@ jobs:
            steps.base_gate.outcome == 'failure' ||
            steps.body_gate.outcome == 'failure' ||
            steps.body_revoke.outcome == 'failure' ||
+           steps.risk_revoke.outcome == 'failure' ||
+           steps.bypass_codex.outcome == 'failure' ||
            steps.arm.outcome == 'failure' ||
            steps.risk.outcome == 'failure' ||
            steps.quiet_findings.outcome == 'failure' ||
@@ -2609,9 +2728,11 @@ jobs:
           # run validly armed, disarming a clean PR with no event left to
           # re-arm it. Skip only on a POSITIVE head-moved read; if the
           # read itself fails, revoke anyway (fail toward safety — the
-          # rare stale disarm self-heals on the next event).
-          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
-          if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+          # rare stale disarm self-heals on the next event). A read counts
+          # only when it is a SHA: `gh api` prints an HTTP error's JSON body
+          # to stdout even with --jq (gh 2.89), which read as a moved head.
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
+          if [[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$now" != "$HEAD_SHA" ]; then
             echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns gating; skipping stale revoke."
             exit 0
           fi
