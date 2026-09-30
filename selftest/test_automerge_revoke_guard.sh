@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Behavioral test for the ownership guards in front of the auto-merge
 # revokes: a guard's read counts only when it is well formed, so an API
-# error can never pass for a moved head and skip the revoke.
+# error can never pass for a moved head (or base) and skip the revoke.
 #
-# Every revoke first re-reads the PR and stands down when the head has moved
-# since its event: a newer run owns that decision, and a stale disarm could
-# land after that run validly armed.
+# Every revoke first re-reads the PR and stands down when the head (for the
+# base-gate revoke, the base) has moved since its event: a newer run owns
+# that decision, and a stale disarm could land after that run validly armed.
 # The rule written beside each guard: stand down only on a POSITIVE read; if
 # the read itself fails, revoke anyway.
 #
@@ -28,6 +28,7 @@
 # read:
 #
 #   claude-author-automerge.yml
+#     base   "Revoke auto-merge on base-gate refusal"   (guards on the base)
 #     body   "Revoke auto-merge on body-gate refusal"   (guards on the head)
 #     error  "Revoke auto-merge if gates errored"       (guards on the head)
 #     arm    "Enable auto-merge", its arm-failure branch: a moved head stands
@@ -42,10 +43,10 @@
 #      a 403 rate limit, a 502) ⇒ disarms, and claims no move;
 #   2. the read fails with nothing on stdout, rc=1 ⇒ disarms (the shape the
 #      old guard already handled; a control);
-#   3. the read answers the event's own head ⇒ disarms, and the call right
-#      before the disarm is that read;
-#   4. the read answers a different, well-formed head ⇒ keeps the arm with a
-#      notice (the guard still stands down on a real move).
+#   3. the read answers the event's own head or base ⇒ disarms, and the call
+#      right before the disarm is that read;
+#   4. the read answers a different, well-formed head or base ⇒ keeps the arm
+#      with a notice (the guard still stands down on a real move).
 # The arm-failure branch:
 #   5. an error body ⇒ exit 1 and no "head moved" notice; the error revoke
 #      that the failure fires then removes the arm an earlier run placed,
@@ -93,11 +94,12 @@ step_header() { # workflow, step name → the step's lines from its name to `run
 # ---------------------------------------------------------------------------
 # 0. Extraction, and the wiring case 5 relies on.
 # ---------------------------------------------------------------------------
+extract_run "$CA" "Revoke auto-merge on base-gate refusal" > "$T/base.sh"
 extract_run "$CA" "Revoke auto-merge on body-gate refusal" > "$T/body.sh"
 extract_run "$CA" "Revoke auto-merge if gates errored" > "$T/error.sh"
 extract_run "$CA" "Enable auto-merge" > "$T/arm.sh"
 extract_run "$DB" "Revoke the arm if a non-bot commit is present" > "$T/dependabot.sh"
-for block in body error dependabot; do
+for block in base body error dependabot; do
   if ! grep -q -- '--disable-auto' "$T/$block.sh"; then
     echo "✗ could not extract the $block revoke (no --disable-auto in the extracted block)"
     exit 1
@@ -107,7 +109,7 @@ if ! grep -q 'gh pr merge --auto' "$T/arm.sh"; then
   echo "✗ could not extract the arm step (no arm command in the extracted block)"
   exit 1
 fi
-pass "extracted the three revokes and the arm step"
+pass "extracted the four revokes and the arm step"
 
 error_header=$(step_header "$CA" "Revoke auto-merge if gates errored")
 if grep -qF "steps.arm.outcome == 'failure'" <<< "$error_header"; then
@@ -311,6 +313,7 @@ revoke_cases() { # block, read kind (head|base), the notice a real move prints
     dump
   fi
 }
+revoke_cases base base "base changed"
 revoke_cases body head "head moved"
 revoke_cases error head "head moved"
 revoke_cases dependabot head "head moved"

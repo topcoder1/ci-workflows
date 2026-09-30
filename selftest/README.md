@@ -201,8 +201,10 @@ arbitrary helper scripts; that's a different kind of repo.
   still disarms, as do a stderr-only failure and an unchanged head; a
   well-formed different head keeps the arm; a failed arm with an unreadable
   head fails the step, which fires the gates-errored revoke; dependabot's
-  revoke re-reads the head right before its disarm. A negative control
-  plants the old read back and shows the error-body case catching it.
+  revoke re-reads the head right before its disarm. The base-gate revoke,
+  which stands down when the base changed, is held to the same cases. A
+  negative control plants the old read back and shows the error-body case
+  catching it.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
