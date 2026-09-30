@@ -247,6 +247,10 @@ url=""
 for a in "$@"; do case "$a" in repos/*) url="$a"; break ;; esac; done
 case "$url" in
   "repos/__REPO__/pulls/__PR__/files"*)
+    if [ -e "$d/move_head_on_listing" ]; then
+      # A push lands just as the first listing is served.
+      rm -f "$d/move_head_on_listing"; echo "__NEW_HEAD__" > "$d/head_sha"
+    fi
     out < "$d/files.json"; exit ;;
   "repos/__REPO__/pulls/__PR__")
     case "$filter" in
@@ -300,6 +304,7 @@ class PR:
     first_head_read_fails: bool = False  # classify's head read returns an HTTP error
     later_head_reads_fail: bool = False  # the revoke step's head reads do
     head_moves_on_disarm: bool = False  # NEW_HEAD lands, armed, during the revoke
+    head_moves_on_listing: bool = False  # NEW_HEAD lands at classify's first listing
     event_head_sha: object = None  # the run's payload head when it differs (a re-run)
     classify_mktemp_fails: bool = False  # an unanticipated error inside classify
 
@@ -362,6 +367,7 @@ class Stub:
             "later_head_reads_fail",
             "head_reads",
             "move_head_on_disarm",
+            "move_head_on_listing",
             "calls.log",
             "disable.log",
             "arm.log",
@@ -381,6 +387,8 @@ class Stub:
             (d / "later_head_reads_fail").touch()
         if pr.head_moves_on_disarm:
             (d / "move_head_on_disarm").touch()
+        if pr.head_moves_on_listing:
+            (d / "move_head_on_listing").touch()
         (d / "classify.mjs").write_text(
             pr.classify_mjs if pr.classify_mjs is not None else CLASSIFY_MJS.read_text()
         )
@@ -1011,6 +1019,22 @@ def test_a_stale_re_run_revokes_for_the_head_it_classified(tmp_path):
         f"a stale re-run skipped the revoke on the head it classified:\n{job}"
     )
     assert job.out("classify").get("classified_head") == "1" * 40, str(job)
+
+
+def test_a_push_during_classification_defers_to_the_newer_heads_run(tmp_path):
+    """classify reads the head BEFORE listing, so a push that lands during
+    the listing leaves the live head different from the classified one, and
+    the revoke defers to that push's own run instead of acting on a verdict
+    that may describe either head."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(["src/auth/login.py", "src/x.py"], armed=True, head_moves_on_listing=True),
+    )
+    assert job.out("classify").get("classified_head") == "a" * 40, str(job)
+    assert job.arm == "ON" and job.disables == 0, (
+        f"the revoke acted on a head pushed after classification began:\n{job}"
+    )
 
 
 def test_an_unknown_classified_head_never_defers_to_the_event_sha(tmp_path):
