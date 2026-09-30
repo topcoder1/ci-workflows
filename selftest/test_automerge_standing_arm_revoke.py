@@ -30,7 +30,10 @@ and on the bypass paths it only delays the arm.
 2. Only this workflow's own bypasses keep the arm, with no disarm attempted:
    the bypass label (Option A), a SUCCESS from the configured Codex check
    (Option B), and `risk_main_go: false` for a main.go change. Controls: a
-   failed or absent Codex check, and the default risk_main_go, revoke.
+   failed or absent Codex check, and the default risk_main_go, revoke. A
+   re-run of an event from before the bypass label landed replays that
+   event's label snapshot; the live label still keeps the arm, and an
+   unreadable live label set still revokes.
 3. The hold step: the disarm is recorded as github-actions[bot], which the
    manual-hold Signal 2 ignores, so when a human then applies the bypass label
    the PR re-arms instead of sitting on a phantom human hold. A hold label
@@ -50,8 +53,8 @@ and on the bypass paths it only delays the arm.
 6. Negative controls: each property above fails on a workflow mutated to break
    it: the step removed (the workflow before this fix), the Codex clause
    dropped, the PAT disarming, either guard trusting any answer, a
-   verification that only rejects ON, and the error revoke ignoring a failed
-   Option B probe.
+   verification that only rejects ON, the live bypass-label check disabled
+   or failing open, and the error revoke ignoring a failed Option B probe.
 """
 
 import copy
@@ -478,6 +481,8 @@ def api(args):
     if (method, route) == ("GET", PULL + "/files"):
         emit(state["files"], jq)
     if (method, route) == ("GET", ISSUE + "/labels"):
+        if step and step == state["knobs"].get("labels_fail_for"):
+            http_error(502, "Server Error")
         emit(labels(), jq)
     if (method, route) == ("POST", ISSUE + "/labels"):
         for item in fields:
@@ -558,12 +563,16 @@ class Revision:
     inputs: dict = field(default_factory=dict)  # the caller's input overrides
     check_runs: tuple = ()  # (name, conclusion) on the head commit
     event_head_sha: object = None  # the payload's head, when a newer push has landed
+    # The payload's labels when they differ from the PR's live ones: a re-run
+    # replays its original event, label snapshot included. None: the live set.
+    event_labels: object = None
     body: str = "Rotates the signing keys."
     bot_cannot_disarm: bool = False  # GitHub refuses github.token's --disable-auto
     disarm_fails_once: bool = False  # the first --disable-auto fails transiently
     pr_read_fails: bool = False  # GET pulls/7 answers HTTP 502, its body on stdout
     pr_view_fails: bool = False  # gh pr view exits 1 with an empty stdout
     checks_read_fails: bool = False  # the check-runs read answers an HTML 502
+    labels_fail_for: str = ""  # the step whose live-label reads answer HTTP 502
 
 
 class Stub:
@@ -650,10 +659,13 @@ class Stub:
             "pr_read_fails": rev.pr_read_fails,
             "pr_view_fails": rev.pr_view_fails,
             "checks_read_fails": rev.checks_read_fails,
+            "labels_fail_for": rev.labels_fail_for,
         }
         s["disarm_failures_left"] = 1 if rev.disarm_fails_once else 0
         s["calls"], s["disables"], s["arm_calls"] = [], [], 0
         self.write(s)
+        if rev.event_labels is not None:
+            return list(rev.event_labels)
         return list(s["labels"])
 
 
@@ -854,8 +866,9 @@ def test_a_push_adding_a_risk_tier_path_revokes_the_standing_arm(tmp_path):
     assert job.outcome("arm") == "skipped", str(job)
     assert job.outcome(ERROR_REVOKE) == "skipped", str(job)
     assert RISK_LABEL in job.labels, f"the decision label is missing:\n{job}"
-    assert any(RISK_MARKER in body for body in job.comments), (
-        f"the risk-tier comment is missing:\n{job}"
+    comment = next((b for b in job.comments if RISK_MARKER in b), "")
+    assert "Auto-merge stays off while this block stands" in comment, (
+        f"the risk-tier comment is missing, or does not say the block is enforced:\n{job}"
     )
 
 
@@ -882,6 +895,34 @@ def test_the_bypass_label_keeps_the_arm(tmp_path):
     assert job.outcome("risk") == "skipped", str(job)
     assert job.outcome(REVOKE) == "skipped", str(job)
     assert job.out("arm").get("armed") == "1", str(job)
+
+
+def test_a_re_run_of_an_older_event_keeps_the_bypass_labels_arm(tmp_path):
+    """A re-run replays its original event, label snapshot included, so a
+    re-run of the push from before a human applied the bypass label reads no
+    bypass. The label is on the PR now and its own run armed it: the revoke
+    leaves that arm alone and the run publishes no risk-tier label."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    run_job(stub, risky_push())
+    approved = run_job(stub, risky_push(action="labeled", labels=(BYPASS_LABEL,)))
+    assert approved.arm == "ON", str(approved)
+    rerun = run_job(stub, risky_push(event_labels=()))
+    assert rerun.out("bypass_label") == {"bypass": "0"}, str(rerun)
+    assert rerun.arm == "ON" and rerun.disables == 0, (
+        f"a re-run of an older event revoked the bypass label's arm:\n{rerun}"
+    )
+    assert rerun.outcome(REVOKE) == "success" and rerun.out(REVOKE) == {}, str(rerun)
+    assert RISK_LABEL not in rerun.labels, str(rerun)
+
+
+def test_an_unreadable_live_label_set_still_revokes(tmp_path):
+    """The live bypass-label read skips the revoke only on a positive answer:
+    an HTTP error (its JSON body on stdout) is not the label."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    job = run_job(stub, risky_push(labels_fail_for=REVOKE))
+    assert job.arm == "OFF" and job.disarmed_by == [(REVOKE, GITHUB_TOKEN)], (
+        f"an unreadable live label set skipped the revoke:\n{job}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1098,6 +1139,18 @@ def _scenario_relabel_after_revoke(tmp_path, steps):
     return run_job(stub, risky_push(action="labeled", labels=(BYPASS_LABEL,)), steps)
 
 
+def _scenario_stale_rerun_after_approval(tmp_path, steps):
+    stub = armed_by_a_clean_revision(tmp_path, steps)
+    run_job(stub, risky_push(), steps)
+    run_job(stub, risky_push(action="labeled", labels=(BYPASS_LABEL,)), steps)
+    return run_job(stub, risky_push(event_labels=()), steps)
+
+
+def _scenario_unreadable_live_labels(tmp_path, steps):
+    stub = armed_by_a_clean_revision(tmp_path, steps)
+    return run_job(stub, risky_push(labels_fail_for=REVOKE), steps)
+
+
 def _scenario_armed_risky(tmp_path, steps, **fault):
     return run_job(Stub(tmp_path), Revision(RISKY, armed=True, **fault), steps)
 
@@ -1148,6 +1201,23 @@ def _scenario_retry_through_unreadable_head(tmp_path, steps):
             _scenario_unreadable_arm_state,
             lambda job: job.outcome(REVOKE) == "success" and RISK_LABEL in job.labels,
             id="on-only-verification",
+        ),
+        pytest.param(
+            _edit(REVOKE, "run", 'if [ -n "$BYPASS_LABEL" ]; then', "if false; then"),
+            _scenario_stale_rerun_after_approval,
+            lambda job: job.disarmed_by == [(REVOKE, GITHUB_TOKEN)],
+            id="revoke-ignores-a-live-bypass-label",
+        ),
+        pytest.param(
+            _edit(
+                REVOKE,
+                "run",
+                '2>/dev/null) || live_labels=""',
+                "2>/dev/null) || exit 0",
+            ),
+            _scenario_unreadable_live_labels,
+            lambda job: job.arm == "ON" and job.disables == 0,
+            id="live-label-check-fails-open",
         ),
         pytest.param(
             _edit(ERROR_REVOKE, "if", "steps.bypass_codex.outcome == 'failure' ||", ""),

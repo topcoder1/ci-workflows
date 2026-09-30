@@ -1516,7 +1516,12 @@ jobs:
       # SUCCESS from codex_check_name (Option B) releases the verdict, and
       # risk_main_go: false drops main.go from the scan. A hold skips this
       # step: a hold label has revoked above, and a timeline hold means the
-      # arm is already off.
+      # arm is already off. Option A is read from the event's label
+      # snapshot, and a re-run replays its original event: re-running a
+      # push from before a human applied the bypass label would revoke the
+      # arm that label's own run placed. So the live labels are re-read
+      # first, and a bypass label present now skips the revoke (only a
+      # positive read skips; an unreadable label set revokes anyway).
       #
       # github.token, like every revoke in this workflow: the manual-hold
       # step's Signal 2 ignores only github-actions[bot] disables, so a
@@ -1548,6 +1553,7 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
         run: |
           set -euo pipefail
           sha_re='^[0-9a-f]{40}([0-9a-f]{24})?$'
@@ -1555,6 +1561,16 @@ jobs:
           if [[ "$now" =~ $sha_re ]] && [ "$now" != "$HEAD_SHA" ]; then
             echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns the risk-tier verdict; skipping stale revoke."
             exit 0
+          fi
+          # Exact-line match: a failed read is dropped, and a one-line JSON
+          # error body cannot equal a label name.
+          if [ -n "$BYPASS_LABEL" ]; then
+            live_labels=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels?per_page=100" \
+              --paginate --jq '.[].name' 2>/dev/null) || live_labels=""
+            if grep -qxF -- "$BYPASS_LABEL" <<<"$live_labels"; then
+              echo "::notice::'$BYPASS_LABEL' is on the PR now but not in this event's label snapshot (a re-run of an older event?) — that label's own run owns the arm; skipping stale revoke."
+              exit 0
+            fi
           fi
           gh pr merge --disable-auto "$PR_URL" 2>&1 || true
           state=$(gh pr view "$PR_URL" --json autoMergeRequest \
@@ -2374,6 +2390,9 @@ jobs:
               echo "billing / production infra). Manual click-merge required: this caller"
               echo "configures no bypass (risk_bypass_label and codex_check_name are empty)."
             fi
+            echo ""
+            echo "Auto-merge stays off while this block stands: each run of this workflow"
+            echo "revokes any arm on this PR, including one a person enabled by hand."
             echo ""
             echo "Matched files:"
             echo '```'
