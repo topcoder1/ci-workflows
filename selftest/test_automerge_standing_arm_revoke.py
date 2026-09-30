@@ -32,8 +32,9 @@ and on the bypass paths it only delays the arm.
    (Option B), and `risk_main_go: false` for a main.go change. Controls: a
    failed or absent Codex check, and the default risk_main_go, revoke. A
    re-run of an event from before the bypass label landed replays that
-   event's label snapshot; the live label still keeps the arm, and an
-   unreadable live label set still revokes.
+   event's label snapshot; the live label still keeps the arm (and the
+   comment is not refreshed over it), a near-match label releases nothing,
+   and an unreadable live label set still revokes.
 3. The hold step: the disarm is recorded as github-actions[bot], which the
    manual-hold Signal 2 ignores, so when a human then applies the bypass label
    the PR re-arms instead of sitting on a phantom human hold. A hold label
@@ -47,14 +48,18 @@ and on the bypass paths it only delays the arm.
    and the error revoke disarms instead: an unreadable check released
    nothing.
 5. Ownership: a real SHA that differs from the event's head leaves the verdict
-   to the newer head's run (no disarm, no label). An HTTP error body from the
-   head read, which gh api prints to stdout, is not a moved head: it skips
-   neither the revoke nor the error revoke's retry.
+   to the newer head's run (no disarm, no label, no comment), including a
+   push that lands while the live labels are read: the head check sits
+   immediately before the disarm. An HTTP error body from the head read,
+   which gh api prints to stdout, is not a moved head: it skips neither the
+   revoke nor the error revoke's retry.
 6. Negative controls: each property above fails on a workflow mutated to break
    it: the step removed (the workflow before this fix), the Codex clause
    dropped, the PAT disarming, either guard trusting any answer, a
-   verification that only rejects ON, the live bypass-label check disabled
-   or failing open, and the error revoke ignoring a failed Option B probe.
+   verification that only rejects ON, the live bypass-label check disabled,
+   failing open or matching by substring, the head check placed before the
+   label read, the comment posting without a verified revoke, and the error
+   revoke ignoring a failed Option B probe.
 """
 
 import copy
@@ -88,6 +93,7 @@ PR_NUMBER = 7
 PR_URL = f"https://github.com/{REPO}/pull/{PR_NUMBER}"
 GITHUB_TOKEN = "ghs_stub"  # github.token: acts as github-actions[bot]
 PAT = "pat_stub"  # secrets.automerge_pat: acts as its user, pat-user
+NEW_HEAD = "b" * 40  # a head pushed while a run is still deciding
 BYPASS_LABEL = INPUT_DEFAULTS["risk_bypass_label"]
 HOLD_LABEL = INPUT_DEFAULTS["hold_label"]
 CODEX_CHECK = "review / Codex Review"
@@ -95,6 +101,7 @@ RISK_LABEL = "automerge:blocked-risk-tier"
 RISK_MARKER = "<!-- claude-author-automerge:risk-tier -->"
 
 REVOKE = "risk_revoke"
+RISK_COMMENT = "Comment + skip when risky"
 HOLD_REVOKE = "Revoke auto-merge on hold label"
 ERROR_REVOKE = "Revoke auto-merge if gates errored"
 
@@ -483,6 +490,12 @@ def api(args):
     if (method, route) == ("GET", ISSUE + "/labels"):
         if step and step == state["knobs"].get("labels_fail_for"):
             http_error(502, "Server Error")
+        if step and step == state["knobs"].get("head_moves_on_labels_read"):
+            # A push lands while this read is served, and the newer head's
+            # run arms it (through the PAT) before this run resumes.
+            state["knobs"]["head_moves_on_labels_read"] = ""
+            state["head_sha"] = "__NEW_HEAD__"
+            state["arm"] = {"login": "pat-user", "is_bot": False}
         emit(labels(), jq)
     if (method, route) == ("POST", ISSUE + "/labels"):
         for item in fields:
@@ -573,6 +586,7 @@ class Revision:
     pr_view_fails: bool = False  # gh pr view exits 1 with an empty stdout
     checks_read_fails: bool = False  # the check-runs read answers an HTML 502
     labels_fail_for: str = ""  # the step whose live-label reads answer HTTP 502
+    head_moves_on_labels_read: str = ""  # the step whose label read sees a push land
 
 
 class Stub:
@@ -588,6 +602,7 @@ class Stub:
             .replace("__PR__", str(PR_NUMBER))
             .replace("__BOT__", GITHUB_TOKEN)
             .replace("__PAT__", PAT)
+            .replace("__NEW_HEAD__", NEW_HEAD)
         )
         gh.chmod(0o755)
         # The steps back off with sleep between retries; the stub never
@@ -660,6 +675,7 @@ class Stub:
             "pr_view_fails": rev.pr_view_fails,
             "checks_read_fails": rev.checks_read_fails,
             "labels_fail_for": rev.labels_fail_for,
+            "head_moves_on_labels_read": rev.head_moves_on_labels_read,
         }
         s["disarm_failures_left"] = 1 if rev.disarm_fails_once else 0
         s["calls"], s["disables"], s["arm_calls"] = [], [], 0
@@ -913,6 +929,21 @@ def test_a_re_run_of_an_older_event_keeps_the_bypass_labels_arm(tmp_path):
     )
     assert rerun.outcome(REVOKE) == "success" and rerun.out(REVOKE) == {}, str(rerun)
     assert RISK_LABEL not in rerun.labels, str(rerun)
+    assert rerun.outcome(RISK_COMMENT) == "skipped", (
+        f"the risk-tier comment was refreshed over an arm the revoke kept:\n{rerun}"
+    )
+
+
+def test_a_near_match_label_is_not_the_bypass_label(tmp_path):
+    """The live re-check matches the whole label name: a label that merely
+    contains the bypass label's name releases nothing."""
+    near = f"not-{BYPASS_LABEL}"
+    stub = armed_by_a_clean_revision(tmp_path)
+    job = run_job(stub, risky_push(labels=(near,)))
+    assert job.arm == "OFF" and job.disarmed_by == [(REVOKE, GITHUB_TOKEN)], (
+        f"the label {near!r} released the risk-tier verdict:\n{job}"
+    )
+    assert RISK_LABEL in job.labels, str(job)
 
 
 def test_an_unreadable_live_label_set_still_revokes(tmp_path):
@@ -1055,6 +1086,19 @@ def test_a_moved_head_leaves_the_revoke_to_the_newer_heads_run(tmp_path):
     )
     assert job.outcome(REVOKE) == "success" and job.out(REVOKE) == {}, str(job)
     assert RISK_LABEL not in job.labels, str(job)
+    assert job.outcome(RISK_COMMENT) == "skipped", str(job)
+
+
+def test_a_push_during_the_label_read_keeps_the_newer_heads_arm(tmp_path):
+    """The ownership check sits immediately before the disarm: a push that
+    lands (and is armed by its own run) while the live labels are read makes
+    the head a newer one, and this run must not disarm it."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    job = run_job(stub, risky_push(head_moves_on_labels_read=REVOKE))
+    assert job.arm == "ON" and job.disables == 0, (
+        f"a run for the older head disarmed the newer head's arm:\n{job}"
+    )
+    assert job.out(REVOKE) == {}, str(job)
 
 
 def test_an_error_body_from_the_head_read_does_not_skip_the_revoke(tmp_path):
@@ -1151,6 +1195,28 @@ def _scenario_unreadable_live_labels(tmp_path, steps):
     return run_job(stub, risky_push(labels_fail_for=REVOKE), steps)
 
 
+def _scenario_near_match_label(tmp_path, steps):
+    stub = armed_by_a_clean_revision(tmp_path, steps)
+    return run_job(stub, risky_push(labels=(f"not-{BYPASS_LABEL}",)), steps)
+
+
+def _scenario_push_during_label_read(tmp_path, steps):
+    stub = armed_by_a_clean_revision(tmp_path, steps)
+    return run_job(stub, risky_push(head_moves_on_labels_read=REVOKE), steps)
+
+
+def _guard_before_the_label_read(steps):
+    """The order before Codex round 6: the head guard, then the label read."""
+    step = next(s for s in steps if s.get("id") == REVOKE)
+    run = step["run"]
+    label = run.index("# Exact-line match")
+    guard = run.index("# The ownership check comes last")
+    disarm = run.index("gh pr merge --disable-auto")
+    assert label < guard < disarm, "mutant anchors out of order"
+    step["run"] = run[:label] + run[guard:disarm] + run[label:guard] + run[disarm:]
+    return steps
+
+
 def _scenario_armed_risky(tmp_path, steps, **fault):
     return run_job(Stub(tmp_path), Revision(RISKY, armed=True, **fault), steps)
 
@@ -1218,6 +1284,26 @@ def _scenario_retry_through_unreadable_head(tmp_path, steps):
             _scenario_unreadable_live_labels,
             lambda job: job.arm == "ON" and job.disables == 0,
             id="live-label-check-fails-open",
+        ),
+        pytest.param(
+            _edit(REVOKE, "run", "grep -qxF --", "grep -qF --"),
+            _scenario_near_match_label,
+            lambda job: job.arm == "ON" and job.disables == 0,
+            id="label-match-by-substring",
+        ),
+        pytest.param(
+            _guard_before_the_label_read,
+            _scenario_push_during_label_read,
+            lambda job: job.disarmed_by == [(REVOKE, GITHUB_TOKEN)],
+            id="head-guard-before-the-label-read",
+        ),
+        pytest.param(
+            _edit(
+                RISK_COMMENT, "if", " &&\nsteps.risk_revoke.outputs.arm_off == '1'", ""
+            ),
+            _scenario_stale_rerun_after_approval,
+            lambda job: job.outcome(RISK_COMMENT) == "success",
+            id="comment-without-a-verified-revoke",
         ),
         pytest.param(
             _edit(ERROR_REVOKE, "if", "steps.bypass_codex.outcome == 'failure' ||", ""),

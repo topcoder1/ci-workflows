@@ -1536,10 +1536,10 @@ jobs:
       #
       # Only OFF counts: an arm still ON, or an arm state that cannot be
       # read, fails the step, and the always() error revoke retries the
-      # disarm. The decision label publishes automerge:blocked-risk-tier only
-      # on `arm_off=1`, so a failed disarm stays an unlabeled red run, as in
-      # the arm step's disarm_then_exit. Pinned by
-      # selftest/test_automerge_standing_arm_revoke.py.
+      # disarm. The decision label (automerge:blocked-risk-tier) and the
+      # sticky comment publish only on `arm_off=1`, so a failed disarm stays
+      # an unlabeled red run, as in the arm step's disarm_then_exit. Pinned
+      # by selftest/test_automerge_standing_arm_revoke.py.
       - name: Revoke auto-merge if risk-tier blocked
         id: risk_revoke
         if: |
@@ -1556,12 +1556,6 @@ jobs:
           BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
         run: |
           set -euo pipefail
-          sha_re='^[0-9a-f]{40}([0-9a-f]{24})?$'
-          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
-          if [[ "$now" =~ $sha_re ]] && [ "$now" != "$HEAD_SHA" ]; then
-            echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns the risk-tier verdict; skipping stale revoke."
-            exit 0
-          fi
           # Exact-line match: a failed read is dropped, and a one-line JSON
           # error body cannot equal a label name.
           if [ -n "$BYPASS_LABEL" ]; then
@@ -1571,6 +1565,14 @@ jobs:
               echo "::notice::'$BYPASS_LABEL' is on the PR now but not in this event's label snapshot (a re-run of an older event?) — that label's own run owns the arm; skipping stale revoke."
               exit 0
             fi
+          fi
+          # The ownership check comes last, right before the disarm, so no
+          # read sits between it and the arm it protects.
+          sha_re='^[0-9a-f]{40}([0-9a-f]{24})?$'
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
+          if [[ "$now" =~ $sha_re ]] && [ "$now" != "$HEAD_SHA" ]; then
+            echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns the risk-tier verdict; skipping stale revoke."
+            exit 0
           fi
           gh pr merge --disable-auto "$PR_URL" 2>&1 || true
           state=$(gh pr view "$PR_URL" --json autoMergeRequest \
@@ -2358,13 +2360,18 @@ jobs:
             gh pr comment "$PR" --body-file /tmp/automerge-blocked.md
           fi
 
+      # Gated on a verified revoke, like the decision label: when the revoke
+      # stood down (a moved head, or a bypass label that landed after this
+      # event), refreshing "blocked … stays off" would announce a block over
+      # an arm that is correctly kept.
       - name: Comment + skip when risky
         if: |
           steps.detect.outputs.claude_authored == '1' &&
           steps.classifier_verdict.outputs.blocked != '1' &&
           steps.hold.outputs.hold != '1' &&
           steps.risk.outputs.risky == '1' &&
-          steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1'
+          steps.bypass_label.outputs.bypass != '1' && steps.bypass_codex.outputs.bypass != '1' &&
+          steps.risk_revoke.outputs.arm_off == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
