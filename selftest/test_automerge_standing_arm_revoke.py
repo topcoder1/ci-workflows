@@ -39,15 +39,19 @@ and on the bypass paths it only delays the arm.
 4. Fail closed: only OFF counts. An arm still ON after the disarm, or an arm
    state that cannot be read, fails the step, the always() error revoke
    retries the disarm, and the decision label is not published, so the
-   announcement never outruns the enforcement.
+   announcement never outruns the enforcement. A failed Option B probe (an
+   HTML 5xx body jq cannot parse) skips the step under implicit success(),
+   and the error revoke disarms instead: an unreadable check released
+   nothing.
 5. Ownership: a real SHA that differs from the event's head leaves the verdict
    to the newer head's run (no disarm, no label). An HTTP error body from the
-   head read, which gh api prints to stdout, is not a moved head and does not
-   skip the revoke.
+   head read, which gh api prints to stdout, is not a moved head: it skips
+   neither the revoke nor the error revoke's retry.
 6. Negative controls: each property above fails on a workflow mutated to break
    it: the step removed (the workflow before this fix), the Codex clause
-   dropped, the PAT disarming, the guard trusting any answer, and a
-   verification that only rejects ON.
+   dropped, the PAT disarming, either guard trusting any answer, a
+   verification that only rejects ON, and the error revoke ignoring a failed
+   Option B probe.
 """
 
 import copy
@@ -361,6 +365,14 @@ def http_error(status, message):
     fail("gh: %s (HTTP %d)" % (message, status))
 
 
+def html_error(status):
+    # A non-JSON error body, such as the HTML page GitHub's edge serves on
+    # some 5xx: gh 2.89's processResponse copies it to stdout as-is, then
+    # reports the status and exits 1.
+    print("<!DOCTYPE html><html><body>Unicorn! (%d)</body></html>" % status)
+    fail("gh: HTTP %d" % status)
+
+
 def record(event):
     state["clock"] += 1
     n = state["clock"]
@@ -396,6 +408,9 @@ def pr(args):
         state["disables"].append(call)
         if token == BOT and state["knobs"].get("bot_cannot_disarm"):
             fail("GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)")
+        if state["disarm_failures_left"] > 0:
+            state["disarm_failures_left"] -= 1
+            fail("GraphQL: Something went wrong while executing your query. (disablePullRequestAutoMerge)")
         if state["arm"] is None:
             fail("GraphQL: auto-merge is not enabled for this pull request (disablePullRequestAutoMerge)")
         state["arm"] = None
@@ -494,6 +509,8 @@ def api(args):
         http_error(404, "Not Found")
     parts = route.split("/")
     if method == "GET" and route.startswith(BASE + "/commits/") and len(parts) == 6:
+        if state["knobs"].get("checks_read_fails"):
+            html_error(502)
         runs = state["check_runs"] if parts[4] == state["head_sha"] else []
         if parts[5] == "check-runs":
             emit({"total_count": len(runs), "check_runs": runs}, jq)
@@ -543,8 +560,10 @@ class Revision:
     event_head_sha: object = None  # the payload's head, when a newer push has landed
     body: str = "Rotates the signing keys."
     bot_cannot_disarm: bool = False  # GitHub refuses github.token's --disable-auto
+    disarm_fails_once: bool = False  # the first --disable-auto fails transiently
     pr_read_fails: bool = False  # GET pulls/7 answers HTTP 502, its body on stdout
     pr_view_fails: bool = False  # gh pr view exits 1 with an empty stdout
+    checks_read_fails: bool = False  # the check-runs read answers an HTML 502
 
 
 class Stub:
@@ -582,6 +601,7 @@ class Stub:
                 "knobs": {},
                 "calls": [],
                 "disables": [],
+                "disarm_failures_left": 0,
                 "arm_calls": 0,
             }
         )
@@ -629,7 +649,9 @@ class Stub:
             "bot_cannot_disarm": rev.bot_cannot_disarm,
             "pr_read_fails": rev.pr_read_fails,
             "pr_view_fails": rev.pr_view_fails,
+            "checks_read_fails": rev.checks_read_fails,
         }
+        s["disarm_failures_left"] = 1 if rev.disarm_fails_once else 0
         s["calls"], s["disables"], s["arm_calls"] = [], [], 0
         self.write(s)
         return list(s["labels"])
@@ -963,6 +985,21 @@ def test_an_unverified_disarm_fails_closed(tmp_path, fault, state, arm):
     assert not job.comments, str(job)
 
 
+def test_a_failed_codex_probe_still_revokes(tmp_path):
+    """Option B's check-runs read can fail: gh copies a non-JSON 5xx body to
+    stdout, jq cannot parse it, and the step fails. Implicit success() then
+    skips the revoke, but a check that could not be read released nothing,
+    so the always() error revoke must disarm."""
+    inputs = {"codex_check_name": CODEX_CHECK}
+    stub = armed_by_a_clean_revision(tmp_path, **inputs)
+    job = run_job(stub, risky_push(inputs=inputs, checks_read_fails=True))
+    assert job.outcome("bypass_codex") == "failure", str(job)
+    assert job.outcome(REVOKE) == "skipped", str(job)
+    assert job.arm == "OFF", f"a failed Option B probe left the standing arm:\n{job}"
+    assert job.disarmed_by == [(ERROR_REVOKE, GITHUB_TOKEN)], str(job)
+    assert RISK_LABEL not in job.labels, str(job)
+
+
 # ---------------------------------------------------------------------------
 # 5. Ownership.
 # ---------------------------------------------------------------------------
@@ -988,18 +1025,51 @@ def test_an_error_body_from_the_head_read_does_not_skip_the_revoke(tmp_path):
     assert job.outcome(REVOKE) == "success", str(job)
 
 
+def test_the_error_revoke_retries_through_an_unreadable_head(tmp_path):
+    """The first disarm fails transiently, so the revoke fails and the error
+    revoke retries. Its head read hits an HTTP error whose JSON body gh prints
+    to stdout: that is not a moved head, and the retry must disarm."""
+    stub = Stub(tmp_path)
+    rev = Revision(RISKY, armed=True, pr_read_fails=True, disarm_fails_once=True)
+    job = run_job(stub, rev)
+    assert job.outcome(REVOKE) == "failure", str(job)
+    assert job.arm == "OFF", (
+        f"the error revoke read an API error as a moved head and kept the arm:\n{job}"
+    )
+    assert job.disarmed_by == [(ERROR_REVOKE, GITHUB_TOKEN)], str(job)
+    assert job.outcome(ERROR_REVOKE) == "success", str(job)
+
+
 # ---------------------------------------------------------------------------
 # 6. Negative controls: each mutant breaks the property its case pins, and
 #    the case's own observation sees it.
 # ---------------------------------------------------------------------------
-def _edit_revoke(field_name, old, new):
+def _edit(step_key, field_name, old, new):
+    """A mutant replacing text in one step's `if`, `run` or env GH_TOKEN."""
+
     def mutate(steps):
-        step = next(s for s in steps if s.get("id") == REVOKE)
-        container = step if field_name != "env" else step["env"]
-        key = field_name if field_name != "env" else "GH_TOKEN"
-        assert old in container[key], f"mutant anchor {old!r} is not in the step"
+        step = next(s for s in steps if step_key in (s.get("id"), s.get("name")))
+        container = step["env"] if field_name == "env" else step
+        key = "GH_TOKEN" if field_name == "env" else field_name
+        assert old in container[key], f"mutant anchor {old!r} is not in {step_key}"
         container[key] = container[key].replace(old, new)
         return steps
+
+    return mutate
+
+
+def _trusting_guard(step_key):
+    """The head guard both revokes had before: `|| echo ""` keeps an HTTP
+    error body, and any non-empty answer reads as a moved head."""
+
+    def mutate(steps):
+        steps = _edit(
+            step_key,
+            "run",
+            '--jq .head.sha 2>/dev/null) || now=""',
+            '--jq .head.sha 2>/dev/null || echo "")',
+        )(steps)
+        return _edit(step_key, "run", '[[ "$now" =~ $sha_re ]]', '[ -n "$now" ]')(steps)
 
     return mutate
 
@@ -1008,12 +1078,18 @@ def _scenario_risky_push(tmp_path, steps):
     return run_job(armed_by_a_clean_revision(tmp_path, steps), risky_push(), steps)
 
 
-def _scenario_codex_success(tmp_path, steps):
+def _scenario_codex(tmp_path, steps, **fault):
     inputs = {"codex_check_name": CODEX_CHECK}
     stub = armed_by_a_clean_revision(tmp_path, steps, **inputs)
-    return run_job(
-        stub, risky_push(inputs=inputs, check_runs=((CODEX_CHECK, "success"),)), steps
-    )
+    return run_job(stub, risky_push(inputs=inputs, **fault), steps)
+
+
+def _scenario_codex_success(tmp_path, steps):
+    return _scenario_codex(tmp_path, steps, check_runs=((CODEX_CHECK, "success"),))
+
+
+def _scenario_failed_codex_probe(tmp_path, steps):
+    return _scenario_codex(tmp_path, steps, checks_read_fails=True)
 
 
 def _scenario_relabel_after_revoke(tmp_path, steps):
@@ -1022,15 +1098,21 @@ def _scenario_relabel_after_revoke(tmp_path, steps):
     return run_job(stub, risky_push(action="labeled", labels=(BYPASS_LABEL,)), steps)
 
 
+def _scenario_armed_risky(tmp_path, steps, **fault):
+    return run_job(Stub(tmp_path), Revision(RISKY, armed=True, **fault), steps)
+
+
 def _scenario_head_read_error(tmp_path, steps):
-    return run_job(
-        Stub(tmp_path), Revision(RISKY, armed=True, pr_read_fails=True), steps
-    )
+    return _scenario_armed_risky(tmp_path, steps, pr_read_fails=True)
 
 
 def _scenario_unreadable_arm_state(tmp_path, steps):
-    return run_job(
-        Stub(tmp_path), Revision(RISKY, armed=True, pr_view_fails=True), steps
+    return _scenario_armed_risky(tmp_path, steps, pr_view_fails=True)
+
+
+def _scenario_retry_through_unreadable_head(tmp_path, steps):
+    return _scenario_armed_risky(
+        tmp_path, steps, pr_read_fails=True, disarm_fails_once=True
     )
 
 
@@ -1044,36 +1126,40 @@ def _scenario_unreadable_arm_state(tmp_path, steps):
             id="no-revoke-step",
         ),
         pytest.param(
-            _edit_revoke("if", "&& steps.bypass_codex.outputs.bypass != '1'", ""),
+            _edit(REVOKE, "if", "&& steps.bypass_codex.outputs.bypass != '1'", ""),
             _scenario_codex_success,
             lambda job: job.disarmed_by == [(REVOKE, GITHUB_TOKEN)],
             id="revoke-ignores-codex",
         ),
         pytest.param(
-            _edit_revoke("env", "github.token", "secrets.automerge_pat"),
+            _edit(REVOKE, "env", "github.token", "secrets.automerge_pat"),
             _scenario_relabel_after_revoke,
             lambda job: job.out("hold").get("hold") == "1" and job.arm == "OFF",
             id="revoke-as-the-pat",
         ),
         pytest.param(
-            lambda steps: _edit_revoke(
-                "run", '[[ "$now" =~ $sha_re ]]', '[ -n "$now" ]'
-            )(
-                _edit_revoke(
-                    "run",
-                    '--jq .head.sha 2>/dev/null) || now=""',
-                    '--jq .head.sha 2>/dev/null || echo "")',
-                )(steps)
-            ),
+            _trusting_guard(REVOKE),
             _scenario_head_read_error,
             lambda job: job.arm == "ON" and job.disables == 0,
             id="guard-trusts-any-answer",
         ),
         pytest.param(
-            _edit_revoke("run", '[ "$state" != "OFF" ]', '[ "$state" = "ON" ]'),
+            _edit(REVOKE, "run", '[ "$state" != "OFF" ]', '[ "$state" = "ON" ]'),
             _scenario_unreadable_arm_state,
             lambda job: job.outcome(REVOKE) == "success" and RISK_LABEL in job.labels,
             id="on-only-verification",
+        ),
+        pytest.param(
+            _edit(ERROR_REVOKE, "if", "steps.bypass_codex.outcome == 'failure' ||", ""),
+            _scenario_failed_codex_probe,
+            lambda job: job.arm == "ON" and job.disables == 0,
+            id="error-revoke-ignores-a-failed-codex-probe",
+        ),
+        pytest.param(
+            _trusting_guard(ERROR_REVOKE),
+            _scenario_retry_through_unreadable_head,
+            lambda job: job.arm == "ON" and job.disarmed_by == [],
+            id="error-revoke-guard-trusts-any-answer",
         ),
     ],
 )
