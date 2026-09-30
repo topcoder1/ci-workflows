@@ -55,13 +55,16 @@ fi
 # `.filename` (the changed-file listing) and one for `.previous_filename`
 # (rename sources, override-only). Discriminate on the --jq expression so
 # each returns its own fixture; a stub that returned the same list for both
-# would make the rename-bypass cases pass vacuously.
+# would make the rename-bypass cases pass vacuously. A deferring diff also
+# reads the arm state (`.auto_merge`, the STANDING-ARM CHECK), answered
+# "none" here: these cases pin the override, not a standing arm.
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
     *previous_filename*) cat "$FAKE_RENAMES"; exit 0 ;;
+    *auto_merge*)        echo "none"; exit 0 ;;
   esac
 done
 cat "$FAKE_FILES"
