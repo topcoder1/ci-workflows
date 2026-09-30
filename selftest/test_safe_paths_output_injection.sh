@@ -45,13 +45,18 @@ if grep -q '\${{' "$T/classify.sh"; then
 fi
 
 # Stub `gh`: the block makes two files-API calls — `.filename` (changed list)
-# and `.previous_filename` (rename sources). Discriminate on the --jq text.
+# and `.previous_filename` (rename sources) — plus, on a deferring diff, the
+# STANDING-ARM CHECK's arm-state read (`.auto_merge`). Discriminate on the
+# --jq text. The arm read answers "none": this test pins the unarmed defer
+# path; the armed path's handling of crafted names is pinned by
+# selftest/test_safe_paths_standing_arm_revoke.py.
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
     *previous_filename*) cat "$FAKE_RENAMES"; exit 0 ;;
+    *auto_merge*)        echo "none"; exit 0 ;;
   esac
 done
 cat "$FAKE_FILES"

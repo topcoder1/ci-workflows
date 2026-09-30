@@ -22,11 +22,11 @@
 #   3. docs/legal/** (tier 1) is NOT releasable by the label.
 #   4. The hold fires ONLY in the would-arm branch. A diff carrying a
 #      non-safe file gets a revoke-triggering reason only from the
-#      STANDING-ARM CHECK — a non-Dependabot PR, an event that can bring new
-#      content, an arm standing — and keeps reason empty otherwise: a wider
+#      STANDING-ARM CHECK — a non-Dependabot PR that is not Claude-authored,
+#      with an arm standing — and keeps reason empty otherwise: a wider
 #      reason would make the revoke step disarm a SIBLING workflow's
-#      legitimate arm (a dependabot bump of .github/workflows/** matches
-#      the risk patterns and is armed by dependabot-auto-merge.yml).
+#      legitimate arm (a Dependabot Dockerfile bump matches the risk
+#      patterns and is armed by dependabot-auto-merge.yml).
 #   5. Ordinary docs/tests still auto-merge (all_safe=1, reason empty) —
 #      the carve-out this workflow exists to provide must not regress.
 #   6. The tier-2 pattern list has not drifted from claude-author-
@@ -58,12 +58,13 @@ if ! grep -q 'risk_tier_overrides=' "$T/classify.sh"; then
   exit 1
 fi
 
-# Stub `gh`: the shipped block makes FOUR distinct calls — the changed-file
+# Stub `gh`: the shipped block makes FIVE distinct calls — the changed-file
 # listing (.filename), the rename sources (.previous_filename), the live
 # label read (.labels[].name) and, for the STANDING-ARM CHECK, the live
-# arm-state read (.auto_merge). Discriminate on the --jq expression so each
-# returns its own fixture; a stub returning one list for all of them would
-# make the bypass-label, rename and standing-arm cases pass vacuously.
+# arm-state read (.auto_merge) and the commit-message read (.commit.message).
+# Discriminate on the --jq expression so each returns its own fixture; a stub
+# returning one list for all of them would make the bypass-label, rename and
+# standing-arm cases pass vacuously.
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -71,6 +72,7 @@ for a in "$@"; do
   case "$a" in
     *previous_filename*) cat "$FAKE_RENAMES"; exit 0 ;;
     *labels*)            cat "$FAKE_LABELS";  exit 0 ;;
+    *commit.message*)    cat "$FAKE_COMMITS"; exit 0 ;;
     *auto_merge*)
       [ "$(cat "$FAKE_ARM")" = "unreadable" ] && { echo "gh: HTTP 502" >&2; exit 1; }
       cat "$FAKE_ARM"; exit 0 ;;
@@ -81,16 +83,18 @@ STUB
 chmod +x "$T/bin/gh"
 export PATH="$T/bin:$PATH"
 
-export GH_TOKEN=stub REPO=owner/repo PR=1 EXTRA_GLOBS="" BYPASS_LABEL="auto-merge-approved"
+export GH_TOKEN=stub REPO=owner/repo PR=1 EXTRA_GLOBS="" BYPASS_LABEL="auto-merge-approved" \
+  CLAUDE_OVERRIDE_LABEL="auto-merge"
 
 # Reset after every run_case so they never leak between cases. ARMED is what
-# the arm-state read answers (none | armed | unreadable); AUTHOR and ACTION
-# feed PR_AUTHOR and EVENT_ACTION.
+# the arm-state read answers (none | armed | unreadable); AUTHOR, BRANCH and
+# COMMITS feed PR_AUTHOR, PR_BRANCH and the commit-message read.
 RENAMED_FROM=""
 LABELS=""
 ARMED="none"
 AUTHOR="octo-human"
-ACTION="synchronize"
+BRANCH="feature/x"
+COMMITS="fix: a change"
 
 # run_case <name> <expected all_safe> <expected reason|none|-> <file>...
 #
@@ -112,12 +116,15 @@ run_case() {
   export FAKE_LABELS="$T/labels.txt"
   printf '%s' "$ARMED" > "$T/arm.txt"
   export FAKE_ARM="$T/arm.txt"
-  export PR_AUTHOR="$AUTHOR" EVENT_ACTION="$ACTION"
+  printf '%s\n' "$COMMITS" > "$T/commits.txt"
+  export FAKE_COMMITS="$T/commits.txt"
+  export PR_AUTHOR="$AUTHOR" PR_BRANCH="$BRANCH"
   RENAMED_FROM=""
   LABELS=""
   ARMED="none"
   AUTHOR="octo-human"
-  ACTION="synchronize"
+  BRANCH="feature/x"
+  COMMITS="fix: a change"
   : > "$T/gh_output"
   export GITHUB_OUTPUT="$T/gh_output"
 
@@ -269,10 +276,16 @@ AUTHOR="dependabot[bot]"; ARMED="armed"
 run_case "dependabot-workflow-bump-mixed-no-reason" 0 none ".github/workflows/ci.yml" "docs/changelog.md"
 run_case "unarmed-workflow-edit-no-reason" 0 none ".github/workflows/ci.yml"
 run_case "unarmed-auth-source-no-reason" 0 none "src/auth/login.ts"
-ARMED="armed"; ACTION="labeled"
-run_case "armed-auth-source-labeled-event-no-reason" 0 none "src/auth/login.ts"
 ARMED="armed"; LABELS="auto-merge-approved"
 run_case "armed-auth-source-bypass-releases" 0 none "src/auth/login.ts"
+# A Claude-authored PR's tier-2 verdict is claude-author-automerge's: only it
+# sees the arms it grants past tier 2. Each of its three signals counts.
+ARMED="armed"; BRANCH="claude/rotate-keys"
+run_case "armed-auth-source-claude-branch-no-reason" 0 none "src/auth/login.ts"
+ARMED="armed"; LABELS="auto-merge"
+run_case "armed-auth-source-override-label-no-reason" 0 none "src/auth/login.ts"
+ARMED="armed"; COMMITS="Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+run_case "armed-auth-source-claude-trailer-no-reason" 0 none "src/auth/login.ts"
 # The positive half: a human's PR with an arm standing from an earlier
 # revision. An unreadable arm state counts as one standing (fail closed).
 ARMED="armed"

@@ -578,11 +578,10 @@ def test_safe_paths_honors_risk_tier_and_scopes_the_hold():
     # sit AFTER the safe-glob verdict; the scan itself is a shared helper.
     # Emitting a verdict up beside the tier-1 override looks equivalent and
     # is not: it would emit a revoke-triggering reason on PRs this workflow
-    # never arms — a dependabot bump of .github/workflows/** matches the risk
-    # patterns — and the revoke step would disarm dependabot-auto-merge's
-    # legitimate arm. On a diff with a non-safe file the only tier-2 verdict
-    # is the STANDING-ARM CHECK's, after its Dependabot exclusion, its event
-    # gate and its live arm-state read, in that order.
+    # never arms — a Dependabot Dockerfile bump matches the risk patterns —
+    # and the revoke step would disarm dependabot-auto-merge's legitimate arm. On a diff with a non-safe file the only tier-2 verdict
+    # is the STANDING-ARM CHECK's, after its Dependabot exclusion, its live
+    # arm-state read and its Claude-authorship test, in that order.
     unsafe_branch = text.index('if [ -n "$unsafe_files" ]')
     hold = text.index("reason=risk-tier-hold")
     standing = text.index("reason=standing-arm-risk-tier")
@@ -592,12 +591,13 @@ def test_safe_paths_honors_risk_tier_and_scopes_the_hold():
         "safe-paths never arms"
     )
     dependabot = text.find('"${PR_AUTHOR:-}" = "dependabot[bot]"')
-    event_gate = text.find('case "${EVENT_ACTION:-}" in')
     arm_read = text.find("auto_merge == null")
-    assert unsafe_branch < dependabot < event_gate < arm_read < standing, (
+    claude = text.find("elif claude_authored; then")
+    assert unsafe_branch < dependabot < arm_read < claude < standing, (
         "the standing-arm verdict must follow the Dependabot exclusion, the "
-        "event gate and the arm-state read — without them it revokes "
-        "dependabot-auto-merge's arm, or an arm placed after the push"
+        "arm-state read and the Claude-authorship test — without them it "
+        "revokes dependabot-auto-merge's arm, or an arm claude-author-automerge "
+        "granted past tier 2"
     )
 
 
