@@ -62,6 +62,11 @@
 #    7b. PAT whose /user read fails 3× ⇒ refused, no arm.
 #    7c. the head moves before the bound arm ⇒ rejected, exit 0 + notice.
 #    7d. the arm fails on an unchanged head ⇒ exit 1.
+#    7e. the arm fails and the head read answers an HTTP error's JSON body
+#        on stdout, rc=1 (gh api does this even with --jq) ⇒ exit 1 with no
+#        "head moved" claim, and the ::error:: says the head could not be read.
+#    7f. the arm fails and the head read fails with nothing on stdout ⇒
+#        exit 1, and the ::error:: does not claim the head still matches.
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
@@ -81,6 +86,9 @@
 #    9d/10b. the arm-owner jq path misspelled (`.enabled_by.is_bot`) in
 #        each step ⇒ a bot's arm slips through; the stub runs the shipped
 #        filters, so the harness sees it (review pass 2).
+#    10c. safe-paths with the old post-failure head read planted back ⇒ an
+#        error body reads as a moved head and the failed arm exits 0 (case
+#        7e can fail).
 #
 # Structural pins (hardcoded, not derived from the files under test):
 #   * exactly ONE non-comment `gh pr merge --auto` per workflow, and both
@@ -247,6 +255,9 @@ fi
 #       STUB_DISARM_STUCK          — 1 ⇒ --disable-auto leaves the arm on
 #       STUB_ARM_FAIL              — 1 ⇒ `gh pr merge --auto` exits 1
 #       STUB_BASE / STUB_HEAD / STUB_HEAD_LATER — the live-state reads
+#       STUB_HEAD_LATER_FAIL       — later head reads exit 1: 404|403|502
+#                                    print gh's HTTP-error JSON body on
+#                                    STDOUT, stderr prints nothing there
 #       STUB_USER_TYPE             — GET /user's `type` (default User)
 #       STUB_USER_FAIL_TIMES       — first N /user reads exit 1 (a 403)
 #     `gh pr merge --auto` models GitHub: it sets the enabler only when the
@@ -292,8 +303,24 @@ if [ "$1" = "api" ]; then
     *"--jq .base.ref"*) printf '%s\n' "${STUB_BASE:-main}" ;;
     *"--jq .head.sha"*)
       # The first head read answers STUB_HEAD (default: the event's head);
-      # later reads answer STUB_HEAD_LATER when set (a push mid-run).
+      # later reads answer STUB_HEAD_LATER when set (a push mid-run), or
+      # fail as STUB_HEAD_LATER_FAIL says. gh's HTTP-error shape: the JSON
+      # body on STDOUT even with --jq, the message on stderr, rc=1
+      # (measured 2026-09-30 on gh 2.89.0).
       h=$(cat "$HEAD_READS" 2>/dev/null || echo 0); h=$((h + 1)); echo "$h" > "$HEAD_READS"
+      if [ "$h" -gt 1 ] && [ -n "${STUB_HEAD_LATER_FAIL:-}" ]; then
+        case "$STUB_HEAD_LATER_FAIL" in
+          404) echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/pulls/pulls#get-a-pull-request","status":"404"}'
+               echo "gh: Not Found (HTTP 404)" >&2 ;;
+          403) echo '{"message":"API rate limit exceeded for user ID 1234567.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api","status":"403"}'
+               echo "gh: API rate limit exceeded for user ID 1234567. (HTTP 403)" >&2 ;;
+          502) echo '{"message":"Server Error","status":"502"}'
+               echo "gh: Server Error (HTTP 502)" >&2 ;;
+          stderr) echo "error connecting to api.github.com" >&2 ;;
+          *) echo "STUB: unknown STUB_HEAD_LATER_FAIL '$STUB_HEAD_LATER_FAIL'" >&2; exit 99 ;;
+        esac
+        exit 1
+      fi
       if [ "$h" -gt 1 ] && [ -n "${STUB_HEAD_LATER:-}" ]; then printf '%s\n' "$STUB_HEAD_LATER"
       else printf '%s\n' "${STUB_HEAD:-$HEAD_SHA}"; fi ;;
     *"--jq .body"*) printf '%s\n' "" ;;
@@ -523,6 +550,32 @@ else
   fail "7d: an arm failure on an unchanged head must fail the step"; dump
 fi
 
+# 7e/7f: the head read after a failed arm FAILS. `gh api` prints an HTTP
+# error's JSON body to STDOUT even with --jq, and a capture that kept stdout
+# took that body for a moved head: the failed arm ended green behind a false
+# "head moved" notice instead of the ::error:: that asks for a look.
+for code in 404 403 502; do
+  export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL="$code"
+  run_step "$T/sp.sh" 1 "wxacoeur"
+  unset STUB_ARM_FAIL STUB_HEAD_LATER_FAIL
+  if has "$T/out.log" "rc=1" && ! has "$T/out.log" "head moved" \
+     && has "$T/out.log" "::error::enable auto-merge failed and the live head could not be read"; then
+    pass "7e: safe-paths, the arm fails and the head read answers an HTTP $code error body ⇒ exit 1, no 'head moved' claim"
+  else
+    fail "7e: safe-paths took an HTTP $code error body for a moved head — the failed arm ends green and its ::error:: is lost"; dump
+  fi
+done
+
+export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL=stderr
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARM_FAIL STUB_HEAD_LATER_FAIL
+if has "$T/out.log" "rc=1" && ! has "$T/out.log" "the head still matches" \
+   && has "$T/out.log" "::error::enable auto-merge failed and the live head could not be read"; then
+  pass "7f: safe-paths, the arm fails and the head read fails with nothing on stdout ⇒ exit 1, and the error says the head could not be read"
+else
+  fail "7f: a failed head read must fail the step without claiming the head still matches"; dump
+fi
+
 export STUB_USER_FAIL_TIMES=3
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_USER_FAIL_TIMES
@@ -660,6 +713,36 @@ typo_control() { # label, script, author
 }
 typo_control "9d" "$T/ca.sh" "topcoder1"
 typo_control "10b" "$T/sp.sh" "wxacoeur"
+
+# 10c: the old post-failure head read, planted back into safe-paths' arm
+# step. An error body must then read as a moved head and end the failed arm
+# green — case 7e sees exactly this regression. Both halves go back: either
+# one alone already fails closed.
+if python3 - "$T/sp.sh" "$T/sp_old_read.sh" <<'PY'; then
+import sys
+src = open(sys.argv[1]).read()
+for new, old in [
+    ('2>/dev/null) || now=""', '2>/dev/null || echo "")'),
+    ('[[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]', '[ -n "$now" ]'),
+]:
+    if src.count(new) != 1:
+        sys.exit(f"cannot plant the old read: {new!r} appears {src.count(new)} times")
+    src = src.replace(new, old)
+open(sys.argv[2], "w").write(src)
+PY
+  for code in 404 403 502; do
+    export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL="$code"
+    run_step "$T/sp_old_read.sh" 1 "wxacoeur"
+    unset STUB_ARM_FAIL STUB_HEAD_LATER_FAIL
+    if has "$T/out.log" "rc=0" && has "$T/out.log" "head moved ($HEAD → {\"message\""; then
+      pass "10c: negative control — with the old read, an HTTP $code error body reads as a moved head (case 7e can fail)"
+    else
+      fail "10c: negative control — the planted old read did not stand down on an HTTP $code body; case 7e proves nothing"; dump
+    fi
+  done
+else
+  fail "10c: negative control — the arm step no longer carries the SHA-checked head read to plant the old one over"
+fi
 
 # ---------------------------------------------------------------------------
 if [ "$failed" -ne 0 ]; then
