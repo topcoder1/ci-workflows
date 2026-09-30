@@ -261,10 +261,10 @@ on:
         type: string
         default: "auto-merge-nonmain"
       codex_check_name:
-        description: "Status-check name for Codex Review. When this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Set empty to disable Codex-trusted bypass."
+        description: "Status-check name for Codex Review. When set and this check is SUCCESS on a Claude-authored PR, the risk-tier check is bypassed (Option B). Empty (the default since 2026-09-29) disables the bypass. It shipped as \"review / Codex Review\" but never fired on a private caller, whose job token could not read check runs; setting it turns the bypass on wherever the job can read check runs, so it is a policy decision, not a fix."
         required: false
         type: string
-        default: "review / Codex Review"
+        default: ""
       risk_main_go:
         description: "Treat ANY main.go change as risk-tier (manual merge). Default true. Set false in Go monorepos where most cmd/*/main.go are dev tools rather than the deployed service — the bare main.go pattern can't tell cmd/<service>/main.go from cmd/<tool>/main.go. When false, gate the real service entrypoint via the caller's .github/risk-paths.yml instead."
         required: false
@@ -314,13 +314,14 @@ jobs:
       # next Claude PR (caught on whois-api-llc/wxa-mcp-server#80, run
       # 25292746179, before broad rollout).
       #
-      # Callers that want Option B working should add `checks: read` to
-      # THEIR workflow-level permissions block. The Codex bypass step
-      # below already handles missing permission gracefully (returns
-      # bypass=0 with no crash via `gh api ... || echo '{}'` + jq `try`),
-      # so callers without `checks: read` simply never bypass via Codex —
-      # the label bypass (Option A) and the original "no risky paths"
-      # path still work.
+      # Option B also needs `codex_check_name` set: it is empty by default
+      # since 2026-09-29, which turns the bypass off. And this job-level
+      # block leaves `checks` at none whatever the caller grants, so on a
+      # private repo the Codex bypass step's check-runs read is refused and
+      # it returns bypass=0 with no crash (`gh api ... || echo '{}'` + jq
+      # `try`); a public repo's check runs are readable without the grant.
+      # The label bypass (Option A) and the original "no risky paths" path
+      # are unaffected.
     steps:
       - name: Checkout PR head
         id: checkout
@@ -410,8 +411,9 @@ jobs:
       # policy-free, and then the global risk-tier regex below still
       # gates, which matches pre-classifier behavior (automerge-only
       # repos without pr-classify stay supported). No `checks: read` is
-      # needed for any of this (deliberate: e.g. the wxa-secrets caller
-      # omits it to keep the Codex bypass disabled).
+      # needed for any of this. (The wxa-secrets caller used to omit it to
+      # keep the Codex bypass off; since 2026-09-29 the bypass is opt-in via
+      # codex_check_name, so that reason is gone.)
       #
       # Deliberately NOT pinned: classify.mjs and its vendored dep bundle
       # (classifier-deps.mjs) are fetched from this repo's default branch —
@@ -1422,8 +1424,10 @@ jobs:
       # When the configured Codex status check is SUCCESS, treat the PR as
       # second-model-reviewed and bypass the risk-tier gate. The check name
       # is configurable so callers can wire whatever Codex caller they
-      # use (default "review / Codex Review", which matches the
-      # pr-codex-review.yml caller in this same repo).
+      # use. It is empty by default since 2026-09-29, which disables the
+      # bypass; a caller that wants it names its Codex check, e.g.
+      # "review / Codex Review" for the pr-codex-review.yml caller in this
+      # same repo.
       - name: Check Codex Review status (Option B)
         id: bypass_codex
         if: steps.detect.outputs.claude_authored == '1' && steps.risk.outputs.risky == '1' && steps.bypass_label.outputs.bypass != '1'
@@ -2178,8 +2182,13 @@ jobs:
             echo ""
             echo "This Claude-authored PR modifies files matching the risk-tier patterns"
             echo "defined in the global CLAUDE.md policy (auth / secrets / migrations /"
-            echo "billing / production infra). Manual click-merge required, OR use one of"
-            echo "the bypass paths below."
+            if [ -n "$BYPASS_LABEL" ] || [ -n "$CODEX_CHECK" ]; then
+              echo "billing / production infra). Manual click-merge required, OR use one of"
+              echo "the bypass paths below."
+            else
+              echo "billing / production infra). Manual click-merge required: this caller"
+              echo "configures no bypass (risk_bypass_label and codex_check_name are empty)."
+            fi
             echo ""
             echo "Matched files:"
             echo '```'
@@ -2189,8 +2198,10 @@ jobs:
             printf '%s' "$MATCHED"
             echo '```'
             echo ""
-            echo "**Bypass options (no PR detail navigation needed):**"
-            echo ""
+            if [ -n "$BYPASS_LABEL" ] || [ -n "$CODEX_CHECK" ]; then
+              echo "**Bypass options (no PR detail navigation needed):**"
+              echo ""
+            fi
             if [ -n "$BYPASS_LABEL" ]; then
               echo "- Apply the \`$BYPASS_LABEL\` label to this PR. The workflow will re-run on"
               echo "  the label event and enable auto-merge. One click from the PR list page."
