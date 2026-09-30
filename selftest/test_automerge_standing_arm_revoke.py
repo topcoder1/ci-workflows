@@ -1168,7 +1168,12 @@ def _trusting_guard(step_key):
             '--jq .head.sha 2>/dev/null) || now=""',
             '--jq .head.sha 2>/dev/null || echo "")',
         )(steps)
-        return _edit(step_key, "run", '[[ "$now" =~ $sha_re ]]', '[ -n "$now" ]')(steps)
+        return _edit(
+            step_key,
+            "run",
+            '[[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]',
+            '[ -n "$now" ]',
+        )(steps)
 
     return mutate
 
