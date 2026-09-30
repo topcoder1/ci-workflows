@@ -67,6 +67,12 @@
 #        "head moved" claim, and the ::error:: says the head could not be read.
 #    7f. the arm fails and the head read fails with nothing on stdout ⇒
 #        exit 1, and the ::error:: does not claim the head still matches.
+#    7g. the head read exits 0 with a non-SHA answer ⇒ exit 1 (only a SHA
+#        counts as a moved head).
+#    7h. the head read exits 1 with a well-formed, different SHA on stdout
+#        ⇒ exit 1 (a failed read never counts as a move). Either half of
+#        the fix alone keeps 7e failing closed; 7g and 7h pin each half.
+#    7i. the head moved to a 64-hex (SHA-256) head ⇒ exit 0 with a notice.
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
@@ -257,7 +263,8 @@ fi
 #       STUB_BASE / STUB_HEAD / STUB_HEAD_LATER — the live-state reads
 #       STUB_HEAD_LATER_FAIL       — later head reads exit 1: 404|403|502
 #                                    print gh's HTTP-error JSON body on
-#                                    STDOUT, stderr prints nothing there
+#                                    STDOUT, stderr prints nothing there,
+#                                    sha prints a different, well-formed SHA
 #       STUB_USER_TYPE             — GET /user's `type` (default User)
 #       STUB_USER_FAIL_TIMES       — first N /user reads exit 1 (a 403)
 #     `gh pr merge --auto` models GitHub: it sets the enabler only when the
@@ -317,6 +324,7 @@ if [ "$1" = "api" ]; then
           502) echo '{"message":"Server Error","status":"502"}'
                echo "gh: Server Error (HTTP 502)" >&2 ;;
           stderr) echo "error connecting to api.github.com" >&2 ;;
+          sha) echo "0000000000000000000000000000000000000bad" ;;
           *) echo "STUB: unknown STUB_HEAD_LATER_FAIL '$STUB_HEAD_LATER_FAIL'" >&2; exit 99 ;;
         esac
         exit 1
@@ -553,8 +561,10 @@ fi
 # 7e/7f: the head read after a failed arm FAILS. `gh api` prints an HTTP
 # error's JSON body to STDOUT even with --jq, and a capture that kept stdout
 # took that body for a moved head: the failed arm ended green behind a false
-# "head moved" notice instead of the ::error:: that asks for a look.
-for code in 404 403 502; do
+# "head moved" notice instead of the ::error:: that asks for a look. 10c
+# walks the same list, so a code the stub does not know fails there.
+HTTP_ERROR_CODES="404 403 502"
+for code in $HTTP_ERROR_CODES; do
   export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL="$code"
   run_step "$T/sp.sh" 1 "wxacoeur"
   unset STUB_ARM_FAIL STUB_HEAD_LATER_FAIL
@@ -574,6 +584,43 @@ if has "$T/out.log" "rc=1" && ! has "$T/out.log" "the head still matches" \
   pass "7f: safe-paths, the arm fails and the head read fails with nothing on stdout ⇒ exit 1, and the error says the head could not be read"
 else
   fail "7f: a failed head read must fail the step without claiming the head still matches"; dump
+fi
+
+# 7g/7h: either half of the fix alone keeps 7e failing closed, so each half
+# gets a case only it passes. 7g: a read that SUCCEEDS with an answer that
+# is not a SHA is no moved head (the SHA check).
+export STUB_ARM_FAIL=1 STUB_HEAD_LATER='{"message":"x"}'
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARM_FAIL STUB_HEAD_LATER
+if has "$T/out.log" "rc=1" && ! has "$T/out.log" "head moved" \
+   && has "$T/out.log" "::error::enable auto-merge failed and the live head could not be read"; then
+  pass "7g: safe-paths, the head read exits 0 with a non-SHA answer ⇒ exit 1 (only a SHA counts as a moved head)"
+else
+  fail "7g: safe-paths took a non-SHA head answer for a moved head"; dump
+fi
+
+# 7h: a read that FAILS is no moved head, even with a well-formed SHA on
+# stdout (the reset).
+export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL=sha
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARM_FAIL STUB_HEAD_LATER_FAIL
+if has "$T/out.log" "rc=1" && ! has "$T/out.log" "head moved" \
+   && has "$T/out.log" "::error::enable auto-merge failed and the live head could not be read"; then
+  pass "7h: safe-paths, the head read exits 1 with a SHA on stdout ⇒ exit 1 (a failed read is never a move)"
+else
+  fail "7h: safe-paths took a failed head read for a moved head because its stdout held a SHA"; dump
+fi
+
+# 7i: a moved SHA-256 head (64 hex) stands down like a 40-hex one.
+HEAD256=$(printf 'c0ffee%058d' 2)
+export STUB_ARM_FAIL=1 STUB_HEAD_LATER="$HEAD256"
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_ARM_FAIL STUB_HEAD_LATER
+if has "$T/out.log" "rc=0" && has "$T/out.log" "head moved ($HEAD → $HEAD256)" \
+   && ! has "$T/out.log" "::error::"; then
+  pass "7i: safe-paths, the head moved to a SHA-256 head ⇒ exit 0 with the notice"
+else
+  fail "7i: a moved 64-hex (SHA-256) head must stand down like a 40-hex one"; dump
 fi
 
 export STUB_USER_FAIL_TIMES=3
@@ -730,7 +777,7 @@ for new, old in [
     src = src.replace(new, old)
 open(sys.argv[2], "w").write(src)
 PY
-  for code in 404 403 502; do
+  for code in $HTTP_ERROR_CODES; do
     export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL="$code"
     run_step "$T/sp_old_read.sh" 1 "wxacoeur"
     unset STUB_ARM_FAIL STUB_HEAD_LATER_FAIL
