@@ -535,7 +535,7 @@ def test_safe_paths_never_automerges_customer_facing_legal():
 
 
 def test_safe_paths_honors_risk_tier_and_scopes_the_hold():
-    """safe-paths must honor risk-tier paths, and only where it would arm.
+    """safe-paths must honor risk-tier paths, and only where it may act.
 
     2026-08-10, topcoder1/inbox_superpilot#215: claude-author-automerge
     posted "Auto-merge blocked — risk-tier paths touched. Manual click-merge
@@ -546,8 +546,9 @@ def test_safe_paths_honors_risk_tier_and_scopes_the_hold():
     decline was an abstention and the permissive gate won silently.
 
     Behavior is pinned by selftest/test_safe_paths_risk_tier_hold.sh,
-    including a drift guard against the sibling's pattern list. This asserts
-    the wiring that test cannot see.
+    including a drift guard against the sibling's pattern list, and by
+    selftest/test_safe_paths_standing_arm_revoke.py. This asserts the wiring
+    those tests cannot see.
     """
     text = (WORKFLOWS_DIR / "safe-paths-automerge.yml").read_text()
 
@@ -567,19 +568,36 @@ def test_safe_paths_honors_risk_tier_and_scopes_the_hold():
         "hold that ignored it would leave that escape hatch dead"
     )
 
-    # STRUCTURAL: the risk scan must sit AFTER the safe-glob verdict, in the
-    # branch where every changed file is safe and this workflow would arm.
-    # Hoisting it up beside the tier-1 override looks equivalent and is not:
-    # it would emit a revoke-triggering reason on PRs this workflow never
-    # arms — a dependabot bump of .github/workflows/** matches the risk
+    assert "steps.classify.outputs.reason == 'standing-arm-risk-tier'" in text, (
+        "the revoke must fire on standing-arm-risk-tier — an arm placed on a "
+        "docs/tests-only revision survives a push that adds an auth file plus "
+        "a src file otherwise (wxa_webcat#1716)"
+    )
+
+    # STRUCTURAL: tier 2's VERDICTS — the reasons the revoke step acts on —
+    # sit AFTER the safe-glob verdict; the scan itself is a shared helper.
+    # Emitting a verdict up beside the tier-1 override looks equivalent and
+    # is not: it would emit a revoke-triggering reason on PRs this workflow
+    # never arms — a dependabot bump of .github/workflows/** matches the risk
     # patterns — and the revoke step would disarm dependabot-auto-merge's
-    # legitimate arm.
+    # legitimate arm. On a diff with a non-safe file the only tier-2 verdict
+    # is the STANDING-ARM CHECK's, after its Dependabot exclusion, its event
+    # gate and its live arm-state read, in that order.
     unsafe_branch = text.index('if [ -n "$unsafe_files" ]')
-    risk_scan = text.index("risk_hits=$(")
-    assert risk_scan > unsafe_branch, (
-        "the risk-tier scan must run in the all-files-safe branch, after the "
-        "safe-glob check — running it earlier makes the revoke step disarm "
-        "sibling workflows on PRs safe-paths never arms"
+    hold = text.index("reason=risk-tier-hold")
+    standing = text.index("reason=standing-arm-risk-tier")
+    assert unsafe_branch < hold and unsafe_branch < standing, (
+        "tier-2 verdicts must be emitted after the safe-glob check — emitting "
+        "one earlier makes the revoke step disarm sibling workflows on PRs "
+        "safe-paths never arms"
+    )
+    dependabot = text.find('"${PR_AUTHOR:-}" = "dependabot[bot]"')
+    event_gate = text.find('case "${EVENT_ACTION:-}" in')
+    arm_read = text.find("auto_merge == null")
+    assert unsafe_branch < dependabot < event_gate < arm_read < standing, (
+        "the standing-arm verdict must follow the Dependabot exclusion, the "
+        "event gate and the arm-state read — without them it revokes "
+        "dependabot-auto-merge's arm, or an arm placed after the push"
     )
 
 

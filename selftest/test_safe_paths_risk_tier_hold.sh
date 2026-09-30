@@ -21,8 +21,10 @@
 #      escape hatch.
 #   3. docs/legal/** (tier 1) is NOT releasable by the label.
 #   4. The hold fires ONLY in the would-arm branch. A diff carrying a
-#      non-safe file must keep reason empty — emitting a revoke-triggering
-#      reason there would make the revoke step disarm a SIBLING workflow's
+#      non-safe file gets a revoke-triggering reason only from the
+#      STANDING-ARM CHECK — a non-Dependabot PR, an event that can bring new
+#      content, an arm standing — and keeps reason empty otherwise: a wider
+#      reason would make the revoke step disarm a SIBLING workflow's
 #      legitimate arm (a dependabot bump of .github/workflows/** matches
 #      the risk patterns and is armed by dependabot-auto-merge.yml).
 #   5. Ordinary docs/tests still auto-merge (all_safe=1, reason empty) —
@@ -56,11 +58,12 @@ if ! grep -q 'risk_tier_overrides=' "$T/classify.sh"; then
   exit 1
 fi
 
-# Stub `gh`: the shipped block makes THREE distinct calls — the changed-file
-# listing (.filename), the rename sources (.previous_filename), and the live
-# label read (.labels[].name). Discriminate on the --jq expression so each
-# returns its own fixture; a stub returning one list for all three would make
-# the bypass-label and rename cases pass vacuously.
+# Stub `gh`: the shipped block makes FOUR distinct calls — the changed-file
+# listing (.filename), the rename sources (.previous_filename), the live
+# label read (.labels[].name) and, for the STANDING-ARM CHECK, the live
+# arm-state read (.auto_merge). Discriminate on the --jq expression so each
+# returns its own fixture; a stub returning one list for all of them would
+# make the bypass-label, rename and standing-arm cases pass vacuously.
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -68,6 +71,9 @@ for a in "$@"; do
   case "$a" in
     *previous_filename*) cat "$FAKE_RENAMES"; exit 0 ;;
     *labels*)            cat "$FAKE_LABELS";  exit 0 ;;
+    *auto_merge*)
+      [ "$(cat "$FAKE_ARM")" = "unreadable" ] && { echo "gh: HTTP 502" >&2; exit 1; }
+      cat "$FAKE_ARM"; exit 0 ;;
   esac
 done
 cat "$FAKE_FILES"
@@ -77,9 +83,14 @@ export PATH="$T/bin:$PATH"
 
 export GH_TOKEN=stub REPO=owner/repo PR=1 EXTRA_GLOBS="" BYPASS_LABEL="auto-merge-approved"
 
-# Reset after every run_case so they never leak between cases.
+# Reset after every run_case so they never leak between cases. ARMED is what
+# the arm-state read answers (none | armed | unreadable); AUTHOR and ACTION
+# feed PR_AUTHOR and EVENT_ACTION.
 RENAMED_FROM=""
 LABELS=""
+ARMED="none"
+AUTHOR="octo-human"
+ACTION="synchronize"
 
 # run_case <name> <expected all_safe> <expected reason|none|-> <file>...
 #
@@ -99,8 +110,14 @@ run_case() {
   export FAKE_RENAMES="$T/renames.txt"
   printf '%s' "$LABELS" > "$T/labels.txt"
   export FAKE_LABELS="$T/labels.txt"
+  printf '%s' "$ARMED" > "$T/arm.txt"
+  export FAKE_ARM="$T/arm.txt"
+  export PR_AUTHOR="$AUTHOR" EVENT_ACTION="$ACTION"
   RENAMED_FROM=""
   LABELS=""
+  ARMED="none"
+  AUTHOR="octo-human"
+  ACTION="synchronize"
   : > "$T/gh_output"
   export GITHUB_OUTPUT="$T/gh_output"
 
@@ -241,11 +258,30 @@ LABELS="auto-merge-approved"
 run_case "legal-not-bypassable" 0 unsafe-override "docs/legal/acceptable-use-policy.md"
 
 # 4. The hold is scoped to the would-arm branch. These carry a non-safe file,
-#    so this workflow no-ops — reason MUST stay empty or the revoke step
-#    would disarm whatever sibling legitimately armed the PR.
-run_case "workflow-bump-no-reason" 0 none ".github/workflows/ci.yml"
-run_case "workflow-bump-mixed-no-reason" 0 none ".github/workflows/ci.yml" "docs/changelog.md"
-run_case "auth-source-no-reason" 0 none "src/auth/login.ts"
+#    so this workflow never arms them, and a revoke-triggering reason is
+#    earned only through the STANDING-ARM CHECK. Everywhere else reason MUST
+#    stay empty, or the revoke step would disarm whatever sibling
+#    legitimately armed the PR. End to end, with the revoke itself:
+#    selftest/test_safe_paths_standing_arm_revoke.py.
+AUTHOR="dependabot[bot]"; ARMED="armed"
+run_case "dependabot-workflow-bump-no-reason" 0 none ".github/workflows/ci.yml"
+AUTHOR="dependabot[bot]"; ARMED="armed"
+run_case "dependabot-workflow-bump-mixed-no-reason" 0 none ".github/workflows/ci.yml" "docs/changelog.md"
+run_case "unarmed-workflow-edit-no-reason" 0 none ".github/workflows/ci.yml"
+run_case "unarmed-auth-source-no-reason" 0 none "src/auth/login.ts"
+ARMED="armed"; ACTION="labeled"
+run_case "armed-auth-source-labeled-event-no-reason" 0 none "src/auth/login.ts"
+ARMED="armed"; LABELS="auto-merge-approved"
+run_case "armed-auth-source-bypass-releases" 0 none "src/auth/login.ts"
+# The positive half: a human's PR with an arm standing from an earlier
+# revision. An unreadable arm state counts as one standing (fail closed).
+ARMED="armed"
+run_case "armed-auth-source-standing-arm" 0 standing-arm-risk-tier "src/auth/login.ts"
+ARMED="armed"
+run_case "armed-workflow-edit-standing-arm" 0 standing-arm-risk-tier \
+  ".github/workflows/ci.yml" "docs/changelog.md"
+ARMED="unreadable"
+run_case "unreadable-arm-auth-source-standing-arm" 0 standing-arm-risk-tier "src/auth/login.ts"
 
 # 5. Regression guard: the carve-out still works.
 run_case "plain-docs" 1 none "docs/architecture.md"
