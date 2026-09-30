@@ -117,10 +117,15 @@ jobs:
   # assuming a standard PR cannot merge unreviewed.
   # GitHub's auto-merge waits only for REQUIRED status checks.
   # "review_standard / Codex Review" is not in any repo's required-checks
-  # ruleset and is not consulted by claude-author-automerge.yml, so a
-  # standard PR whose required checks go green first CAN merge before this
-  # lane finishes. Findings then land on an already-merged PR — useful as
-  # follow-up signal, but it does not prevent the #1270 class outright.
+  # ruleset. Since WS2 step 1 (2026-09-29) claude-author-automerge.yml's
+  # quiet gate waits for it before that workflow arms a PR
+  # (review_check_names matches " / Codex Review"), but only in callers
+  # whose token can read check runs (checks: read, or a public repo). A PR
+  # armed any other way (a human, safe-paths-automerge), or in a caller
+  # without that read, CAN still merge on its required checks before this
+  # lane finishes.
+  # Findings then land on an already-merged PR — useful as follow-up
+  # signal, but it does not prevent the #1270 class outright there.
   # (Codex review round 3 raised exactly this; recorded rather than
   # silently overclaimed.)
   #
