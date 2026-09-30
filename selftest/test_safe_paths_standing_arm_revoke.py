@@ -42,7 +42,9 @@ condition or an env mapping that drifts changes the verdict.
    workflow command.
 7. The revoke disarms as github-actions[bot], falling back to the PAT only when
    the bot cannot, so claude-author-automerge never reads it as a human's
-   hold.
+   hold. Its ownership guard takes only a real SHA for a moved head (gh api
+   prints an HTTP error's body to stdout), and re-checks before every disarm,
+   so a head pushed mid-revoke keeps the arm a sibling gave it.
 """
 
 import json
@@ -74,6 +76,7 @@ REPO = "acme/fixture"
 PR_NUMBER = 7
 GITHUB_TOKEN = "ghs_stub"  # github.token: acts as github-actions[bot]
 PAT = "pat_stub"  # secrets.automerge_pat: acts as the PAT's user
+NEW_HEAD = "b" * 40  # a head pushed while a revoke is still retrying
 
 # The wxa_webcat#1716 shape: docs/website/** is the caller's own `sensitive:`
 # entry, which neither fleet-wide tier knows about.
@@ -219,6 +222,11 @@ case "${1:-} ${2:-}" in
     case " $* " in
       *" --disable-auto "*)
         echo "${GH_TOKEN:-}" >> "$d/disable.log"
+        if [ -e "$d/move_head_on_disarm" ]; then
+          # A push lands mid-revoke and a sibling arms the new head.
+          rm -f "$d/move_head_on_disarm"
+          echo "__NEW_HEAD__" > "$d/head_sha"; echo ON > "$d/arm"
+        fi
         if [ -e "$d/bot_cannot_disarm" ] && [ "${GH_TOKEN:-}" = "__BOT_TOKEN__" ]; then
           echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1
         fi
@@ -241,6 +249,12 @@ case "$url" in
   "repos/__REPO__/pulls/__PR__")
     case "$filter" in
       *auto_merge*) [ -e "$d/arm_read_fails" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; } ;;
+      .head.sha)
+        # Real gh prints an HTTP error's JSON body to STDOUT, --jq or not
+        # (gh 2.89), and exits 1.
+        [ -e "$d/head_read_fails" ] && {
+          echo '{"message":"Server Error","status":"502"}'
+          echo "gh: Server Error (HTTP 502)" >&2; exit 1; } ;;
     esac
     jq -n --arg sha "$(cat "$d/head_sha")" --arg arm "$arm" --slurpfile labels "$d/labels.json" \
       '{head: {sha: $sha}, labels: $labels[0], auto_merge: (if $arm == "ON" then {enabled_by: {login: "pat-user", type: "User"}, merge_method: "squash"} else null end)}' | out
@@ -276,6 +290,8 @@ class PR:
     setup_node_fails: bool = False
     classify_mjs: object = None  # replacement classifier source
     bot_cannot_disarm: bool = False  # GITHUB_TOKEN's --disable-auto is refused
+    head_read_fails: bool = False  # the revoke's head reads return an HTTP error
+    head_moves_on_disarm: bool = False  # NEW_HEAD lands, armed, during the revoke
     classify_mktemp_fails: bool = False  # an unanticipated error inside classify
 
 
@@ -292,6 +308,7 @@ class Stub:
             .replace("__PR__", str(PR_NUMBER))
             .replace("__DEPS__", str(CLASSIFIER_DEPS))
             .replace("__BOT_TOKEN__", GITHUB_TOKEN)
+            .replace("__NEW_HEAD__", NEW_HEAD)
         )
         gh.chmod(0o755)
         # The steps back off with sleep between retries; the stub never
@@ -332,6 +349,8 @@ class Stub:
             "risk_500",
             "arm_read_fails",
             "bot_cannot_disarm",
+            "head_read_fails",
+            "move_head_on_disarm",
             "calls.log",
             "disable.log",
             "arm.log",
@@ -345,6 +364,10 @@ class Stub:
             (d / "arm_read_fails").touch()
         if pr.bot_cannot_disarm:
             (d / "bot_cannot_disarm").touch()
+        if pr.head_read_fails:
+            (d / "head_read_fails").touch()
+        if pr.head_moves_on_disarm:
+            (d / "move_head_on_disarm").touch()
         (d / "classify.mjs").write_text(
             pr.classify_mjs if pr.classify_mjs is not None else CLASSIFY_MJS.read_text()
         )
@@ -907,3 +930,37 @@ def test_the_revoke_falls_back_to_the_pat_when_the_bot_cannot_disarm(tmp_path):
     assert job.disarmed_by[-1] == PAT and set(job.disarmed_by[:-1]) == {GITHUB_TOKEN}, (
         f"expected bot attempts, then the PAT:\n{job}"
     )
+
+
+def test_an_error_body_from_the_head_read_does_not_skip_the_revoke(tmp_path):
+    """gh api prints an HTTP error's JSON body to stdout even with --jq (gh
+    2.89, measured), so the ownership guard must not take that body for a
+    moved head and exit without disarming."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(["src/auth/login.py", "src/x.py"], armed=True, head_read_fails=True),
+    )
+    assert job.arm == "OFF" and job.disables >= 1, (
+        f"an unreadable head read skipped the revoke:\n{job}"
+    )
+
+
+def test_the_revoke_stops_when_the_head_moves_mid_revoke(tmp_path):
+    """A push that lands while the revoke retries hands the decision to the new
+    head's own run: no later attempt, the PAT fallback included, may disarm the
+    arm a sibling placed on that head."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["src/auth/login.py", "src/x.py"],
+            armed=True,
+            bot_cannot_disarm=True,
+            head_moves_on_disarm=True,
+        ),
+    )
+    assert job.arm == "ON" and PAT not in job.disarmed_by, (
+        f"the revoke disarmed the newer head's arm:\n{job}"
+    )
+    assert job.outcome(REVOKE) == "success", str(job)

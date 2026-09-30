@@ -649,7 +649,11 @@ jobs:
 
           if [ "$rp_state" != "present" ]; then
             echo "hold=0" >> "$GITHUB_OUTPUT"
-            echo "No .github/risk-paths.yml on ${BASE_REF} or the default branch — no caller policy to honor; tiers 1 and 2 already passed."
+            if [ "${STANDING_ARM:-}" = "1" ]; then
+              echo "No .github/risk-paths.yml on ${BASE_REF} or the default branch — no caller policy to honor on this standing arm."
+            else
+              echo "No .github/risk-paths.yml on ${BASE_REF} or the default branch — no caller policy to honor; tiers 1 and 2 already passed."
+            fi
             exit 0
           fi
 
@@ -847,10 +851,21 @@ jobs:
           # owns the decision and an unconditional revoke here could land
           # after it validly armed a clean PR, with no event left to
           # re-arm. Skip only on a POSITIVE head-moved read; if the read
-          # itself fails, revoke anyway (fail toward safety).
-          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null || echo "")
-          if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
-            echo "::notice::head moved (${HEAD_SHA} → ${now}) — newer run owns gating; skipping stale revoke."
+          # itself fails, revoke anyway (fail toward safety). A read counts
+          # only when it is a SHA: `gh api` prints an HTTP error's JSON body
+          # to stdout even with --jq (gh 2.89), and taking that body for a
+          # moved head skipped the revoke. Checked again before every disarm
+          # attempt below, because a push can land while they retry.
+          head_moved() {
+            local now
+            now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
+            if [[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$now" != "$HEAD_SHA" ]; then
+              echo "::notice::head moved (${HEAD_SHA} → ${now}) — the newer head's own run owns gating; stopping this revoke."
+              return 0
+            fi
+            return 1
+          }
+          if head_moved; then
             exit 0
           fi
           state=$(gh pr view "$PR_URL" --json autoMergeRequest \
@@ -868,6 +883,9 @@ jobs:
           disarm() {
             local attempt
             for attempt in 1 2 3; do
+              if head_moved; then
+                exit 0
+              fi
               gh pr merge --disable-auto "$PR_URL" 2>&1 || true
               after=$(gh pr view "$PR_URL" --json autoMergeRequest \
                 --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
