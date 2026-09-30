@@ -44,9 +44,9 @@ condition or an env mapping that drifts changes the verdict.
    the bot cannot, so claude-author-automerge never reads it as a human's
    hold. Its ownership guard takes only a real SHA for a moved head (gh api
    prints an HTTP error's body to stdout), binds to the head classify read
-   before listing (a stale re-run acts on the live head it classified), and
-   re-checks before every disarm, so a head pushed mid-revoke keeps the arm a
-   sibling gave it.
+   before listing (a stale re-run acts on the live head it classified; an
+   unknown head never defers to the event's SHA), and re-checks before every
+   disarm, so a head pushed mid-revoke keeps the arm a sibling gave it.
 """
 
 import json
@@ -253,10 +253,15 @@ case "$url" in
       *auto_merge*) [ -e "$d/arm_read_fails" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; } ;;
       .head.sha)
         # Real gh prints an HTTP error's JSON body to STDOUT, --jq or not
-        # (gh 2.89), and exits 1.
-        [ -e "$d/head_read_fails" ] && {
+        # (gh 2.89), and exits 1. The first read is classify's; every later
+        # one is the revoke step's.
+        n=$(( $(cat "$d/head_reads" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$d/head_reads"
+        if { [ "$n" -eq 1 ] && [ -e "$d/first_head_read_fails" ]; } ||
+           { [ "$n" -gt 1 ] && [ -e "$d/later_head_reads_fail" ]; }; then
           echo '{"message":"Server Error","status":"502"}'
-          echo "gh: Server Error (HTTP 502)" >&2; exit 1; } ;;
+          echo "gh: Server Error (HTTP 502)" >&2; exit 1
+        fi ;;
     esac
     jq -n --arg sha "$(cat "$d/head_sha")" --arg arm "$arm" --slurpfile labels "$d/labels.json" \
       '{head: {sha: $sha}, labels: $labels[0], auto_merge: (if $arm == "ON" then {enabled_by: {login: "pat-user", type: "User"}, merge_method: "squash"} else null end)}' | out
@@ -292,7 +297,8 @@ class PR:
     setup_node_fails: bool = False
     classify_mjs: object = None  # replacement classifier source
     bot_cannot_disarm: bool = False  # GITHUB_TOKEN's --disable-auto is refused
-    head_read_fails: bool = False  # the revoke's head reads return an HTTP error
+    first_head_read_fails: bool = False  # classify's head read returns an HTTP error
+    later_head_reads_fail: bool = False  # the revoke step's head reads do
     head_moves_on_disarm: bool = False  # NEW_HEAD lands, armed, during the revoke
     event_head_sha: object = None  # the run's payload head when it differs (a re-run)
     classify_mktemp_fails: bool = False  # an unanticipated error inside classify
@@ -352,7 +358,9 @@ class Stub:
             "risk_500",
             "arm_read_fails",
             "bot_cannot_disarm",
-            "head_read_fails",
+            "first_head_read_fails",
+            "later_head_reads_fail",
+            "head_reads",
             "move_head_on_disarm",
             "calls.log",
             "disable.log",
@@ -367,8 +375,10 @@ class Stub:
             (d / "arm_read_fails").touch()
         if pr.bot_cannot_disarm:
             (d / "bot_cannot_disarm").touch()
-        if pr.head_read_fails:
-            (d / "head_read_fails").touch()
+        if pr.first_head_read_fails:
+            (d / "first_head_read_fails").touch()
+        if pr.later_head_reads_fail:
+            (d / "later_head_reads_fail").touch()
         if pr.head_moves_on_disarm:
             (d / "move_head_on_disarm").touch()
         (d / "classify.mjs").write_text(
@@ -948,12 +958,14 @@ def test_the_revoke_falls_back_to_the_pat_when_the_bot_cannot_disarm(tmp_path):
 def test_an_error_body_from_the_head_read_does_not_skip_the_revoke(tmp_path):
     """gh api prints an HTTP error's JSON body to stdout even with --jq (gh
     2.89, measured), so the ownership guard must not take that body for a
-    moved head and exit without disarming."""
+    moved head and exit without disarming. classify's read succeeds here, so
+    the guard has a head to compare the body with."""
     stub = Stub(tmp_path)
     job = run_job(
         stub,
-        PR(["src/auth/login.py", "src/x.py"], armed=True, head_read_fails=True),
+        PR(["src/auth/login.py", "src/x.py"], armed=True, later_head_reads_fail=True),
     )
+    assert job.out("classify").get("classified_head") == "a" * 40, str(job)
     assert job.arm == "OFF" and job.disables >= 1, (
         f"an unreadable head read skipped the revoke:\n{job}"
     )
@@ -999,3 +1011,24 @@ def test_a_stale_re_run_revokes_for_the_head_it_classified(tmp_path):
         f"a stale re-run skipped the revoke on the head it classified:\n{job}"
     )
     assert job.out("classify").get("classified_head") == "1" * 40, str(job)
+
+
+def test_an_unknown_classified_head_never_defers_to_the_event_sha(tmp_path):
+    """The same stale re-run with only classify's head read failing: the
+    event's old SHA is no evidence of a later push, so the revoke must not
+    read the recovered live head as "moved" and skip."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["src/auth/login.py", "src/x.py"],
+            head_sha="1" * 40,
+            event_head_sha="0" * 40,
+            armed=True,
+            first_head_read_fails=True,
+        ),
+    )
+    assert "classified_head" not in job.out("classify"), str(job)
+    assert job.arm == "OFF" and job.disables >= 1, (
+        f"an unknown classified head deferred to the event's stale SHA:\n{job}"
+    )

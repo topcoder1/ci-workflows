@@ -109,8 +109,9 @@ jobs:
           # about the current head and it is the only run left to act on it.
           # If the head is unchanged at revoke time, every listing in between
           # saw that head. Written only when it is a SHA (gh api prints an HTTP
-          # error's body to stdout), so an unreadable head leaves the revoke
-          # step on the event's SHA.
+          # error's body to stdout). An unreadable head leaves the revoke with
+          # nothing to defer to, so it revokes: the event's SHA is no evidence
+          # of a later push when a stale re-run is the run in hand.
           classified_head=$(gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha 2>/dev/null) || classified_head=""
           if [[ "$classified_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
             echo "classified_head=$classified_head" >> "$GITHUB_OUTPUT"
@@ -853,8 +854,10 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           # The head the classify step read before listing — what the verdict
-          # is about. The event's SHA only when that read failed.
-          BOUND_HEAD: ${{ steps.classify.outputs.classified_head || github.event.pull_request.head.sha }}
+          # is about. Empty when that read failed, and then nothing counts as
+          # a move (never the event's SHA: a stale re-run's payload SHA would
+          # make the recovered live head look moved).
+          BOUND_HEAD: ${{ steps.classify.outputs.classified_head }}
           # 'gate-error' is the third case: the error path below runs with
           # neither step having emitted a reason, and "unknown" in the log
           # would read as a bug rather than the specific condition it is.
@@ -873,6 +876,7 @@ jobs:
           # disarm attempt below, because a push can land while they retry.
           head_moved() {
             local now
+            [ -n "${BOUND_HEAD:-}" ] || return 1
             now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
             if [[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$now" != "$BOUND_HEAD" ]; then
               echo "::notice::head moved (${BOUND_HEAD} → ${now}) — the newer head's own run owns gating; stopping this revoke."
