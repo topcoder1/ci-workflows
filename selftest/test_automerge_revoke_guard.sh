@@ -331,7 +331,7 @@ fi
 # The failure above fires the error revoke on the same PR (pinned in 0.),
 # with the API still failing; the arm an earlier run placed must come off.
 KEEP_STATE=1 run_block "$T/error.sh" "errbody:404"
-if disarmed && arm_is OFF && has "rc=0"; then
+if disarmed && arm_is OFF && has "rc=0" && served "head errbody:404"; then
   pass "5: the error revoke that failure fires removes the standing arm"
 else
   fail "5: after a failed arm with an unreadable head, the standing arm survived"

@@ -216,6 +216,9 @@ fi
 extract_run "$MERGE_WF" "Revoke the arm if a non-bot commit is present" "$T/revoke.sh" || true
 
 if [ -s "$T/revoke.sh" ]; then
+  # A real SHA shape: the ownership guard counts a head read only when it is
+  # a SHA, so a placeholder like EVENTSHA would take its unreadable branch.
+  EVENT_SHA=$(printf 'e0e0%036d' 1)
   revoke_case() {
     local label="$1" comment_fail="$2" merge_fail="$3"
     echo "· scenario revoke/$label"
@@ -223,7 +226,7 @@ if [ -s "$T/revoke.sh" ]; then
     rc=0
     (
       PATH="$T/bin:$PATH" \
-      GH_LOG="$T/ghlog" GH_ARMED=true GH_HEAD=EVENTSHA HEAD_SHA=EVENTSHA \
+      GH_LOG="$T/ghlog" GH_ARMED=true GH_HEAD="$EVENT_SHA" HEAD_SHA="$EVENT_SHA" \
       GH_COMMENT_FAIL="$comment_fail" GH_MERGE_FAIL="$merge_fail" \
       GH_TOKEN=stub PR=422 ACTOR='dependabot[bot]' NON_BOT=1 \
       REPO='whois-api-llc/wxa-graph' \
