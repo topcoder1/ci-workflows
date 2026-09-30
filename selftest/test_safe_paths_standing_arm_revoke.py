@@ -43,8 +43,10 @@ condition or an env mapping that drifts changes the verdict.
 7. The revoke disarms as github-actions[bot], falling back to the PAT only when
    the bot cannot, so claude-author-automerge never reads it as a human's
    hold. Its ownership guard takes only a real SHA for a moved head (gh api
-   prints an HTTP error's body to stdout), and re-checks before every disarm,
-   so a head pushed mid-revoke keeps the arm a sibling gave it.
+   prints an HTTP error's body to stdout), binds to the head classify read
+   before listing (a stale re-run acts on the live head it classified), and
+   re-checks before every disarm, so a head pushed mid-revoke keeps the arm a
+   sibling gave it.
 """
 
 import json
@@ -292,6 +294,7 @@ class PR:
     bot_cannot_disarm: bool = False  # GITHUB_TOKEN's --disable-auto is refused
     head_read_fails: bool = False  # the revoke's head reads return an HTTP error
     head_moves_on_disarm: bool = False  # NEW_HEAD lands, armed, during the revoke
+    event_head_sha: object = None  # the run's payload head when it differs (a re-run)
     classify_mktemp_fails: bool = False  # an unanticipated error inside classify
 
 
@@ -393,7 +396,7 @@ def context(pr, steps):
                     "draft": False,
                     "html_url": f"https://github.com/{REPO}/pull/{PR_NUMBER}",
                     "user": {"login": pr.author},
-                    "head": {"sha": pr.head_sha, "ref": pr.branch},
+                    "head": {"sha": pr.event_head_sha or pr.head_sha, "ref": pr.branch},
                     "base": {"ref": "main"},
                 },
             },
@@ -419,6 +422,11 @@ class Job:
 
     def out(self, step_id):
         return self.steps.get(step_id, {}).get("outputs", {})
+
+    def verdict(self, step_id):
+        """A step's outputs minus classify's `classified_head`, the SHA it read
+        before listing: the verdict alone, which the cases compare exactly."""
+        return {k: v for k, v in self.out(step_id).items() if k != "classified_head"}
 
     def outcome(self, step_id):
         return self.steps.get(step_id, {}).get("outcome")
@@ -556,7 +564,7 @@ def test_a_push_adding_a_gated_path_and_src_revokes_the_docs_only_arm(
     assert job.outcome(REVOKE) == "success", (
         f"the revoke step did not finish clean:\n{job}"
     )
-    assert job.out(step_id) == verdict, f"unexpected {step_id} outputs:\n{job}"
+    assert job.verdict(step_id) == verdict, f"unexpected {step_id} outputs:\n{job}"
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +592,7 @@ def test_a_dependabot_bump_keeps_dependabot_auto_merges_arm(tmp_path, files, pol
     assert job.arm == "ON" and job.disables == 0, (
         f"dependabot-auto-merge's arm was revoked:\n{job}"
     )
-    assert job.out("classify") == {"all_safe": "0"}, (
+    assert job.verdict("classify") == {"all_safe": "0"}, (
         f"unexpected classify outputs:\n{job}"
     )
     assert job.reads("auto_merge") == 0 and job.reads("/contents/") == 0, (
@@ -610,7 +618,9 @@ def test_the_all_safe_path_still_arms_and_keeps_its_arm(tmp_path):
     assert fresh.arms == 1 and fresh.arm == "ON" and fresh.disables == 0, (
         f"a docs/tests-only PR was not armed:\n{fresh}"
     )
-    assert fresh.out("classify") == {"all_safe": "1", "renames_safe": "1"}, str(fresh)
+    assert fresh.verdict("classify") == {"all_safe": "1", "renames_safe": "1"}, str(
+        fresh
+    )
     assert fresh.out("classifier_hold") == {"hold": "0"}, str(fresh)
     assert fresh.reads("auto_merge") == 0, (
         f"the would-arm branch read the arm state:\n{fresh}"
@@ -651,7 +661,7 @@ def test_the_would_arm_branch_still_revokes_its_holds(
     assert job.arm == "OFF" and job.disables >= 1, (
         f"a docs-only hold kept a standing arm:\n{job}"
     )
-    assert job.out(step_id) == verdict, f"unexpected {step_id} outputs:\n{job}"
+    assert job.verdict(step_id) == verdict, f"unexpected {step_id} outputs:\n{job}"
 
 
 # ---------------------------------------------------------------------------
@@ -672,7 +682,9 @@ def test_a_standard_mixed_diff_keeps_a_siblings_arm(tmp_path):
     assert job.arm == "ON" and job.disables == 0, (
         f"a sibling's standard-class arm was revoked:\n{job}"
     )
-    assert job.out("classify") == {"all_safe": "0", "standing_arm_check": "1"}, str(job)
+    assert job.verdict("classify") == {"all_safe": "0", "standing_arm_check": "1"}, str(
+        job
+    )
     assert job.out("classifier_hold") == {"hold": "0"}, str(job)
 
 
@@ -685,9 +697,10 @@ def test_the_bypass_label_releases_the_tier_2_verdict_only(tmp_path):
     assert released.arm == "ON" and released.disables == 0, (
         f"the bypass label did not release the tier-2 verdict (claude-author's Option A):\n{released}"
     )
-    assert released.out("classify") == {"all_safe": "0", "standing_arm_check": "1"}, (
-        str(released)
-    )
+    assert released.verdict("classify") == {
+        "all_safe": "0",
+        "standing_arm_check": "1",
+    }, str(released)
 
     held = run_job(
         stub,
@@ -731,7 +744,7 @@ def test_an_unarmed_mixed_diff_costs_one_read_and_no_classifier_run(tmp_path):
         stub, PR(["docs/website/pricing.md", "src/x.py"], armed=False, policy=POLICY)
     )
     assert job.disables == 0 and job.arm == "OFF", str(job)
-    assert job.out("classify") == {"all_safe": "0"}, str(job)
+    assert job.verdict("classify") == {"all_safe": "0"}, str(job)
     assert job.reads("auto_merge") == 1, f"expected exactly one arm-state read:\n{job}"
     assert job.reads("/contents/") == 0, (
         f"the classifier ran with nothing to revoke:\n{job}"
@@ -890,7 +903,7 @@ def test_a_crafted_file_name_cannot_steer_the_new_branch(tmp_path):
     crafted = f"src/auth/x{bs}n::notice::injected{bs}nall_safe=1{bs}nEOF.py"
     stub = Stub(tmp_path)
     job = run_job(stub, PR([crafted, "src/x.py"], armed=True))
-    assert job.out("classify") == {
+    assert job.verdict("classify") == {
         "all_safe": "0",
         "standing_arm_check": "1",
         "reason": "standing-arm-risk-tier",
@@ -964,3 +977,25 @@ def test_the_revoke_stops_when_the_head_moves_mid_revoke(tmp_path):
         f"the revoke disarmed the newer head's arm:\n{job}"
     )
     assert job.outcome(REVOKE) == "success", str(job)
+
+
+def test_a_stale_re_run_revokes_for_the_head_it_classified(tmp_path):
+    """Re-running an older head's run cancels the current head's in-flight run
+    (per-PR concurrency, cancel-in-progress), so the re-run is the only run
+    left. It classifies the LIVE diff; binding its revoke to its payload's
+    old SHA made it read "head moved" and skip, leaving the arm on the gated
+    head."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["src/auth/login.py", "src/x.py"],
+            head_sha="1" * 40,  # the live head: the gated push
+            event_head_sha="0" * 40,  # the re-run's payload: the docs-only head
+            armed=True,
+        ),
+    )
+    assert job.arm == "OFF" and job.disables >= 1, (
+        f"a stale re-run skipped the revoke on the head it classified:\n{job}"
+    )
+    assert job.out("classify").get("classified_head") == "1" * 40, str(job)
