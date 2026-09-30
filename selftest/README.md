@@ -154,12 +154,15 @@ arbitrary helper scripts; that's a different kind of repo.
   Pins: no PAT or a non-user credential refuses (claude-author publishes
   `automerge:refused-no-pat`); a bot's existing arm is replaced and a user's
   is never touched; the enabler is read back after the arm; the slow probe
-  precedes every live-state read; the safe-paths arm is head-bound;
-  Dependabot's own PRs keep the old path by exact login match. Negative
-  controls neutralize each refusal and the bot-arm removal, and misspell the
-  enabler path (a typo that would be silent in production); structural pins
-  hold one arm call site per workflow and keep `automerge_pat`
-  `required: false`.
+  precedes every live-state read; the safe-paths arm is head-bound, and a
+  failed one stands down only when its head re-read is a different SHA (an
+  HTTP error's JSON body, which `gh api --jq` prints to stdout, or an empty
+  read fails the step); Dependabot's own PRs keep the old path by exact
+  login match. Negative controls neutralize each refusal and the bot-arm
+  removal, misspell the enabler path (a typo that would be silent in
+  production), and plant the old head re-read back (an error body then
+  reads as a moved head); structural pins hold one arm call site per
+  workflow and keep `automerge_pat` `required: false`.
 - `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
   without the PAT, since Dependabot deletes its own branch and refusing would
   stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
