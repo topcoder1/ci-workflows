@@ -189,6 +189,20 @@ arbitrary helper scripts; that's a different kind of repo.
   - an immediate merge, a failed read and an Actions merge each end in an
     explicit verdict, never silence;
   - the step never fails over this.
+- `test_automerge_revoke_guard.sh` — a revoke's ownership guard (stand down
+  when the head moved since the event) counts only a well-formed read, so
+  an API error can never pass for a move. `gh api … --jq` prints an HTTP
+  error's JSON body to STDOUT and exits 1 (measured 2026-09-30, gh 2.89.0);
+  the guards' `|| echo ""` kept that body, took it for a moved head, and
+  skipped the revoke, so the arm stayed standing. Runs claude-author's
+  body-gate and gates-errored revokes, its arm step's failure branch, and
+  dependabot's revoke-stale-arm against a stub that answers each read
+  through the step's own `--jq` filter. Pins: a 404, 403 or 502 error body
+  still disarms, as do a stderr-only failure and an unchanged head; a
+  well-formed different head keeps the arm; a failed arm with an unreadable
+  head fails the step, which fires the gates-errored revoke; dependabot's
+  revoke re-reads the head right before its disarm. A negative control
+  plants the old read back and shows the error-body case catching it.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

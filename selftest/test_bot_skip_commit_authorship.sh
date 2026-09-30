@@ -341,15 +341,19 @@ fi
 extract_run "$MERGE_WF" "Revoke the arm if a non-bot commit is present" "$T/revoke.sh" || true
 
 if [ -s "$T/revoke.sh" ]; then
+  # Real SHA shapes: the ownership guard counts a head read only when it
+  # is a SHA, so a placeholder like NEWERSHA would read as unreadable.
+  EVENT_SHA=$(printf 'e0e0%036d' 1)
+  NEWER_SHA=$(printf 'e0e0%036d' 2)
   revoke_case() {
     local label="$1" expect="$2" armed="${3:-true}" view_fail="${4:-0}" \
-      head="${5:-EVENTSHA}" head_fail="${6:-0}"
+      head="${5:-$EVENT_SHA}" head_fail="${6:-0}"
     : > "$T/ghlog"
     local rc=0
     (
       PATH="$T/bin:$PATH" \
       GH_LOG="$T/ghlog" GH_ARMED="$armed" GH_VIEW_FAIL="$view_fail" \
-      GH_HEAD="$head" GH_HEAD_FAIL="$head_fail" HEAD_SHA=EVENTSHA \
+      GH_HEAD="$head" GH_HEAD_FAIL="$head_fail" HEAD_SHA="$EVENT_SHA" \
       GH_TOKEN=stub PR=1064 ACTOR='dependabot[bot]' NON_BOT=1 \
       REPO='whois-api-llc/wxa-jake-ai' \
       bash "$T/revoke.sh"
@@ -374,16 +378,16 @@ if [ -s "$T/revoke.sh" ]; then
   revoke_case "auto-merge state unreadable" error true 1
   # Ownership: a dependabot rebase can restore a bot-only head and validly
   # re-arm. This older run must not disarm it — nothing would re-arm it.
-  revoke_case "head moved since this event" keep true 0 NEWERSHA
+  revoke_case "head moved since this event" keep true 0 "$NEWER_SHA"
   # ...but only on a POSITIVE head-moved read. An unreadable head fails
   # toward safety and still revokes.
-  revoke_case "head read failed"         revoke true 0 EVENTSHA 1
+  revoke_case "head read failed"         revoke true 0 "$EVENT_SHA" 1
 
   : > "$T/ghlog"
   (
     PATH="$T/bin:$PATH" \
-    GH_LOG="$T/ghlog" GH_ARMED=true GH_VIEW_FAIL=0 GH_HEAD=EVENTSHA \
-    GH_HEAD_FAIL=0 HEAD_SHA=EVENTSHA GH_TOKEN=stub PR=1064 \
+    GH_LOG="$T/ghlog" GH_ARMED=true GH_VIEW_FAIL=0 GH_HEAD="$EVENT_SHA" \
+    GH_HEAD_FAIL=0 HEAD_SHA="$EVENT_SHA" GH_TOKEN=stub PR=1064 \
     ACTOR='dependabot[bot]' NON_BOT=1 REPO='whois-api-llc/wxa-jake-ai' \
     bash "$T/revoke.sh"
   ) > /dev/null 2>&1 || true

@@ -36,6 +36,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_automerge_pat_attribution_gate.sh",
     "selftest/test_automerge_quiet_anchor.sh",
     "selftest/test_automerge_review_wait.sh",
+    "selftest/test_automerge_revoke_guard.sh",
     "selftest/test_automerge_risk_patterns.sh",
     "selftest/test_automerge_riskfile_gate.sh",
     "selftest/test_bot_skip_commit_authorship.sh",
