@@ -29,21 +29,20 @@ condition or an env mapping that drifts changes the verdict.
    PR, a docs-only re-push keeps its arm, and the would-arm branch's tier-2
    and tier-3 holds still revoke.
 4. No fight with a sibling's legitimate arm: a standard-class mixed diff keeps
-   its arm; on a Claude-authored PR (claude/* branch, override label or
-   Co-Authored-By trailer) the tier-2 verdict is left to claude-author, which
-   alone sees the arms it grants past tier 2, while tier 3 still revokes; the
-   bypass label releases tier 2 (claude-author's Option A) but not the caller's
-   policy; an unarmed PR costs one read and no classifier run.
-5. Fail closed, as tier 3 does: an unreadable arm state counts as armed and an
-   unreadable commit list as not Claude-authored; a labeled run still revokes
-   (it can cancel the push run); an unreadable risk-paths.yml, a classifier
-   error, a failed Setup Node, or a crash of the classify step once it has
-   seen an arm all revoke.
+   its arm; the bypass label releases tier 2 (claude-author's Option A) but
+   not the caller's policy; the tier-2 verdict matches claude-author's regex,
+   root .audit/ SQL exemption included; an unarmed PR costs one read and no
+   classifier run. A Claude-authored PR's docs-only arm is revoked on tier 2
+   too — claude-author's risk-tier branch only comments — and on tier 3.
+5. Fail closed, as tier 3 does: an unreadable arm state counts as armed; a
+   labeled run still revokes (it can cancel the push run); an unreadable
+   risk-paths.yml, a classifier error, a failed Setup Node, or a crash of the
+   classify step once it has seen an arm all revoke.
 6. A crafted file name on the new branch cannot add an output key or inject a
    workflow command.
 7. The revoke disarms as github-actions[bot], falling back to the PAT only when
    the bot cannot, so claude-author-automerge never reads it as a human's
-   hold; the Claude-authorship signals match claude-author's detect step.
+   hold.
 """
 
 import json
@@ -239,9 +238,6 @@ for a in "$@"; do case "$a" in repos/*) url="$a"; break ;; esac; done
 case "$url" in
   "repos/__REPO__/pulls/__PR__/files"*)
     out < "$d/files.json"; exit ;;
-  "repos/__REPO__/pulls/__PR__/commits"*)
-    [ -e "$d/commits_read_fails" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
-    out < "$d/commits.json"; exit ;;
   "repos/__REPO__/pulls/__PR__")
     case "$filter" in
       *auto_merge*) [ -e "$d/arm_read_fails" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; } ;;
@@ -280,8 +276,6 @@ class PR:
     setup_node_fails: bool = False
     classify_mjs: object = None  # replacement classifier source
     bot_cannot_disarm: bool = False  # GITHUB_TOKEN's --disable-auto is refused
-    commit_messages: tuple = ("docs: tweak the restore runbook",)
-    commits_read_fails: bool = False
     classify_mktemp_fails: bool = False  # an unanticipated error inside classify
 
 
@@ -338,7 +332,6 @@ class Stub:
             "risk_500",
             "arm_read_fails",
             "bot_cannot_disarm",
-            "commits_read_fails",
             "calls.log",
             "disable.log",
             "arm.log",
@@ -352,11 +345,6 @@ class Stub:
             (d / "arm_read_fails").touch()
         if pr.bot_cannot_disarm:
             (d / "bot_cannot_disarm").touch()
-        if pr.commits_read_fails:
-            (d / "commits_read_fails").touch()
-        (d / "commits.json").write_text(
-            json.dumps([{"commit": {"message": m}} for m in pr.commit_messages])
-        )
         (d / "classify.mjs").write_text(
             pr.classify_mjs if pr.classify_mjs is not None else CLASSIFY_MJS.read_text()
         )
@@ -741,37 +729,43 @@ def test_a_labeled_run_still_revokes(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "claude_signal",
-    [
-        pytest.param({"branch": "claude/rotate-keys"}, id="claude-branch"),
-        pytest.param({"labels": ("auto-merge",)}, id="override-label"),
-        pytest.param(
-            {
-                "commit_messages": (
-                    "fix(auth): rotate the session key\n\n"
-                    "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
-                )
-            },
-            id="trailer",
-        ),
-    ],
-)
-def test_tier_2_leaves_a_claude_authored_prs_arm_to_claude_author(
-    tmp_path, claude_signal
-):
-    """claude-author-automerge arms a Claude-authored PR past tier 2 with its
-    bypass label, a Codex-trusted check or risk_main_go: false, and only it can
-    see those, so a re-run or late run here must not revoke that arm."""
+def test_a_claude_authored_prs_docs_only_arm_is_revoked_on_tier_2(tmp_path):
+    """claude-author-automerge's risk-tier branch only comments, so on a
+    Claude-authored PR nothing else revokes the arm this workflow placed on
+    its docs-only revision. With the bypass label it stays: claude-author
+    arms that diff itself (Option A)."""
     stub = Stub(tmp_path)
+    first = run_job(
+        stub,
+        PR(
+            ["docs/runbooks/restore.md"], head_sha="1" * 40, branch="claude/rotate-keys"
+        ),
+    )
+    assert first.arm == "ON", str(first)
     job = run_job(
-        stub, PR(["src/auth/login.py", "src/x.py"], armed=True, **claude_signal)
+        stub,
+        PR(
+            ["src/auth/login.py", "src/x.py"],
+            head_sha="2" * 40,
+            branch="claude/rotate-keys",
+        ),
     )
-    assert job.arm == "ON" and job.disables == 0, (
-        f"the tier-2 verdict revoked a Claude-authored PR's arm:\n{job}"
+    assert job.arm == "OFF" and job.disarmed_by == [GITHUB_TOKEN], (
+        f"a Claude-authored PR kept its docs-only arm on a tier-2 push:\n{job}"
     )
-    assert job.out("classify") == {"all_safe": "0", "standing_arm_check": "1"}, str(job)
-    assert job.out("classifier_hold") == {"hold": "0"}, str(job)
+
+    # claude-author-automerge re-armed it under the bypass label.
+    labeled = run_job(
+        stub,
+        PR(
+            ["src/auth/login.py", "src/x.py"],
+            head_sha="3" * 40,
+            branch="claude/rotate-keys",
+            labels=(INPUT_DEFAULTS["risk_bypass_label"],),
+            armed=True,
+        ),
+    )
+    assert labeled.arm == "ON" and labeled.disables == 0, str(labeled)
 
 
 def test_tier_3_still_revokes_on_a_claude_authored_pr(tmp_path):
@@ -830,17 +824,6 @@ def test_a_tier_3_error_on_this_route_revokes(tmp_path, fault, reason):
     assert job.out("classifier_hold") == {"hold": "1", "reason": reason}, str(job)
     assert job.arm == "OFF" and job.disables >= 1, (
         f"a tier-3 error left the arm standing:\n{job}"
-    )
-
-
-def test_an_unreadable_commit_list_counts_as_not_claude_authored(tmp_path):
-    stub = Stub(tmp_path)
-    job = run_job(
-        stub,
-        PR(["src/auth/login.py", "src/x.py"], armed=True, commits_read_fails=True),
-    )
-    assert job.arm == "OFF" and job.disables >= 1, (
-        f"an unreadable commit list spared the arm:\n{job}"
     )
 
 
@@ -924,25 +907,3 @@ def test_the_revoke_falls_back_to_the_pat_when_the_bot_cannot_disarm(tmp_path):
     assert job.disarmed_by[-1] == PAT and set(job.disarmed_by[:-1]) == {GITHUB_TOKEN}, (
         f"expected bot attempts, then the PAT:\n{job}"
     )
-
-
-def test_the_claude_signals_match_claude_author_automerge():
-    """The tier-2 exclusion copies claude-author-automerge's `detect` step; the
-    override label is its input's default, which no caller overrides."""
-    sibling = yaml.safe_load(
-        (ROOT / ".github" / "workflows" / "claude-author-automerge.yml").read_text()
-    )
-    sibling_inputs = sibling.get("on", sibling.get(True))["workflow_call"]["inputs"]
-    classify = next(s for s in STEPS if s.get("id") == "classify")
-    assert (
-        classify["env"]["CLAUDE_OVERRIDE_LABEL"]
-        == (sibling_inputs["override_label"]["default"])
-    )
-    detect = next(
-        s for s in sibling["jobs"]["automerge"]["steps"] if s.get("id") == "detect"
-    )["run"]
-    for signal in ("claude/*)", "Co-Authored-By:", "OVERRIDE_LABEL"):
-        assert signal in detect, (
-            f"claude-author-automerge's detect step no longer uses {signal!r} — "
-            "update the Claude-authorship test in safe-paths-automerge.yml to match"
-        )

@@ -97,15 +97,9 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           EXTRA_GLOBS: ${{ inputs.extra_safe_globs }}
           BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
-          # The rest are for the STANDING-ARM CHECK. The author login is the
-          # one PR field no PR contents can set. PR_BRANCH and the override
-          # label are claude-author-automerge's Claude-authorship signals; the
-          # label is that workflow's `override_label` default, which no caller
-          # overrides (selftest/test_safe_paths_standing_arm_revoke.py pins the
-          # two together).
+          # For the STANDING-ARM CHECK. The author login is the one PR field
+          # no PR contents can set.
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
-          CLAUDE_OVERRIDE_LABEL: auto-merge
         run: |
           set -euo pipefail
           # Changed-file names via the paginated files API — `gh pr diff
@@ -332,9 +326,8 @@ jobs:
 
           # TIER 2's scan, shared by the would-arm branch and the
           # STANDING-ARM CHECK. Sets risk_hits (the matching files), annotated
-          # (each hit with the pattern it matched), pr_labels (read only when
-          # there is a hit) and risk_released (1 when the bypass label is
-          # applied).
+          # (each hit with the pattern it matched) and risk_released (1 when
+          # the bypass label is applied).
           #
           # Scans `renamed_from` too, so moving an auth spec OUT of auth/
           # (destination safe-by-glob, source risk-tier) still counts — same
@@ -354,7 +347,7 @@ jobs:
           # this workflow's stance everywhere else.
           bypass_label="${BYPASS_LABEL:-auto-merge-approved}"
           risk_tier_scan() {
-            local risk_pat_file candidates f p
+            local risk_pat_file candidates pr_labels f p
             risk_pat_file=$(mktemp)
             printf '%s\n' "$risk_tier_overrides" \
               | sed -e 's/^[[:space:]]*//' -e '/^$/d' > "$risk_pat_file"
@@ -363,7 +356,6 @@ jobs:
             rm -f "$risk_pat_file"
             risk_hits=""
             annotated=""
-            pr_labels=""
             risk_released=0
             # The attribution pass also applies the sibling's one exemption,
             # exactly as its risk step does: root .audit/ evidence SQL
@@ -390,29 +382,6 @@ jobs:
             fi
           }
 
-          # claude-author-automerge's own test for a Claude-authored PR (its
-          # `detect` step): a claude/* head branch, its override label, or a
-          # Co-Authored-By: Claude trailer on any commit. Call it after
-          # risk_tier_scan found a hit, which is when pr_labels is read. An
-          # unreadable commit list counts as NOT Claude-authored, so the
-          # tier-2 verdict still applies (fail closed). Here-strings, not
-          # `printf | grep -q`: under pipefail, grep quitting at the first
-          # match can SIGPIPE a printf still writing a long commit list, and
-          # the pipeline would then read "no trailer".
-          claude_authored() {
-            local messages
-            case "${PR_BRANCH:-}" in claude/*) return 0 ;; esac
-            if grep -Fxq "${CLAUDE_OVERRIDE_LABEL:-auto-merge}" <<< "$pr_labels"; then
-              return 0
-            fi
-            if ! messages=$(gh api "repos/${REPO}/pulls/${PR}/commits?per_page=100" \
-                --paginate --jq '.[].commit.message' 2>/dev/null); then
-              echo "::warning::could not list this PR's commits — treating it as not Claude-authored, so the tier-2 verdict applies (fail closed)."
-              return 1
-            fi
-            grep -qiE '^Co-Authored-By:[[:space:]]*Claude' <<< "$messages"
-          }
-
           if [ -n "$unsafe_files" ]; then
             echo "all_safe=0" >> "$GITHUB_OUTPUT"
             # The list of unsafe files is only ever logged, never read by a
@@ -437,9 +406,7 @@ jobs:
             # whois-api-llc/wxa_webcat's docs/website/, wxa_webcat#1716).
             # claude-author-automerge closes none of this for a human's PR —
             # its classifier revoke needs claude_authored == '1' — and not the
-            # tier-2 half for anyone: its risk-tier branch only comments. That
-            # half, on a Claude-authored PR, is its to close (see the scope
-            # below).
+            # tier-2 half for anyone: its risk-tier branch only comments.
             #
             # So both verdicts run here too, and a hit revokes, with this
             # scope:
@@ -454,13 +421,16 @@ jobs:
             #    read, and the classifier stays off the common path.
             #  - Tier 3's blocked/sensitive on every other PR: no sibling arms
             #    past it (claude-author-automerge refuses it with no bypass).
-            #  - Tier 2 on every other PR that is not Claude-authored. On a
-            #    Claude-authored PR claude-author-automerge owns tier 2, and
-            #    only it can see the arms it grants past it — the bypass
-            #    label, a Codex-trusted check, risk_main_go: false — which a
-            #    re-run or late run of this job would otherwise revoke on the
-            #    same head. Elsewhere no workflow arms past tier 2, and the
-            #    bypass label releases it here as in the would-arm branch.
+            #  - Tier 2 on every other PR, released by the bypass label as in
+            #    the would-arm branch (claude-author's Option A). Its other
+            #    arms past tier 2 — a Codex-trusted check, risk_main_go: false
+            #    — are granted per head once its quiet gate clears, so the arm
+            #    a run here finds at a push was granted for an earlier head,
+            #    and claude-author decides the new one after this run.
+            #    Residual: a manual re-run of this job, or a run delayed past
+            #    that quiet window, can revoke the new head's arm. The revoke
+            #    is github-actions[bot]'s (see the revoke step), so
+            #    claude-author re-arms at the PR's next event.
             #  - At every event, not just pushes: a run for any other event
             #    (a caller subscribed to `labeled`) cancels an in-flight push
             #    run through the concurrency group, and must not drop its
@@ -489,8 +459,6 @@ jobs:
             if [ -n "$risk_hits" ]; then
               if [ "$risk_released" = "1" ]; then
                 echo "::notice::Risk-tier paths present but '$bypass_label' is applied — tier 2 released; the caller's risk-paths.yml still applies."
-              elif claude_authored; then
-                echo "::notice::Risk-tier paths present on a Claude-authored PR — claude-author-automerge owns that verdict; the caller's risk-paths.yml still applies."
               else
                 echo "reason=standing-arm-risk-tier" >> "$GITHUB_OUTPUT"
                 echo "::warning::An auto-merge arm is standing and this diff touches risk-tier paths — revoking it. Apply '$bypass_label' to release."
@@ -504,9 +472,9 @@ jobs:
             # and is not: it would emit a revoke-triggering reason on PRs this
             # workflow never arms — a Dependabot Dockerfile bump matches the
             # risk patterns — and the revoke step would then disarm a SIBLING
-            # workflow's legitimate auto-merge. On a diff
-            # with a non-safe file, only the scoped STANDING-ARM CHECK above
-            # emits a tier-2 verdict.
+            # workflow's legitimate auto-merge. On a diff with a non-safe
+            # file, only the scoped STANDING-ARM CHECK above emits a tier-2
+            # verdict.
             risk_tier_scan
             if [ -n "$risk_hits" ]; then
               if [ "$risk_released" = "1" ]; then
@@ -809,9 +777,9 @@ jobs:
       # route, are the same verdicts on a diff with a non-safe file, where
       # the old arm used to survive because nothing here ran at all
       # (wxa_webcat#1716). The classify step's STANDING-ARM CHECK emits them
-      # only for a non-Dependabot PR with an arm standing, and tier 2 only
-      # off a Claude-authored PR — the scope that keeps them off every arm a
-      # sibling places legitimately.
+      # only for a non-Dependabot PR with an arm standing — the scope that
+      # keeps them off every arm a sibling places legitimately, bar the
+      # residual it names.
       #
       # The last clause is the ERROR path, and it needs `always()`: the
       # tier-3 step converts every failure mode it ANTICIPATES into hold=1,
@@ -860,7 +828,9 @@ jobs:
           # later clears every gate. GITHUB_TOKEN can disable an arm the PAT
           # user placed (whois-api-llc/wxa_webcat#1715, 2026-09-30). The PAT is
           # the fallback only, used when the arm is still on after the bot's
-          # attempts, so the step stays fail-closed.
+          # attempts, so the step stays fail-closed; a disarm that needed it is
+          # recorded as the PAT user, the old hold, and a Claude-authored PR
+          # then waits for a human to re-arm it.
           GH_TOKEN: ${{ github.token }}
           FALLBACK_TOKEN: ${{ secrets.automerge_pat }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -914,7 +884,7 @@ jobs:
             disarm "the automerge_pat user" || true
           fi
           if [ "$after" != "OFF" ]; then
-            echo "::error::could not VERIFY auto-merge is off (state=$after) after 3 attempts — a customer-facing legal change may merge unreviewed. Disable auto-merge on this PR by hand."
+            echo "::error::could not VERIFY auto-merge is off (state=$after) after every revoke attempt — a change this workflow must not auto-merge may merge unreviewed. Disable auto-merge on this PR by hand."
             exit 1
           fi
           echo "Auto-merge verified OFF."
