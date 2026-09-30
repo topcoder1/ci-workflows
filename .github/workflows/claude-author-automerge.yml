@@ -1556,15 +1556,21 @@ jobs:
           BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
         run: |
           set -euo pipefail
-          # Exact-line match: a failed read is dropped, and a one-line JSON
-          # error body cannot equal a label name.
+          # Exact string equality, one label per line: a failed read is
+          # dropped, and neither a one-line JSON error body nor a partial name
+          # can equal the label. Not `grep -xF`, which splits its pattern on
+          # newlines: a bypass label input with a stray one (a YAML block
+          # scalar keeps its trailing newline) would add an empty pattern
+          # that matches an unlabeled PR's empty read and skip the revoke.
           if [ -n "$BYPASS_LABEL" ]; then
             live_labels=$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR}/labels?per_page=100" \
               --paginate --jq '.[].name' 2>/dev/null) || live_labels=""
-            if grep -qxF -- "$BYPASS_LABEL" <<<"$live_labels"; then
-              echo "::notice::'$BYPASS_LABEL' is on the PR now but not in this event's label snapshot (a re-run of an older event?) — that label's own run owns the arm; skipping stale revoke."
-              exit 0
-            fi
+            while IFS= read -r live; do
+              if [ "$live" = "$BYPASS_LABEL" ]; then
+                echo "::notice::'$BYPASS_LABEL' is on the PR now but not in this event's label snapshot (a re-run of an older event?) — that label's own run owns the arm; skipping stale revoke."
+                exit 0
+              fi
+            done <<<"$live_labels"
           fi
           # The ownership check comes last, right before the disarm, so no
           # read sits between it and the arm it protects.

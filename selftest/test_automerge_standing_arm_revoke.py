@@ -34,7 +34,8 @@ and on the bypass paths it only delays the arm.
    re-run of an event from before the bypass label landed replays that
    event's label snapshot; the live label still keeps the arm (and the
    comment is not refreshed over it), a near-match label releases nothing,
-   and an unreadable live label set still revokes.
+   a bypass label input with a stray newline releases nothing, and an
+   unreadable live label set still revokes.
 3. The hold step: the disarm is recorded as github-actions[bot], which the
    manual-hold Signal 2 ignores, so when a human then applies the bypass label
    the PR re-arms instead of sitting on a phantom human hold. A hold label
@@ -57,9 +58,9 @@ and on the bypass paths it only delays the arm.
    it: the step removed (the workflow before this fix), the Codex clause
    dropped, the PAT disarming, either guard trusting any answer, a
    verification that only rejects ON, the live bypass-label check disabled,
-   failing open or matching by substring, the head check placed before the
-   label read, the comment posting without a verified revoke, and the error
-   revoke ignoring a failed Option B probe.
+   failing open, or matching by substring or by `grep -xF`, the head check
+   placed before the label read, the comment posting without a verified
+   revoke, and the error revoke ignoring a failed Option B probe.
 """
 
 import copy
@@ -956,6 +957,19 @@ def test_an_unreadable_live_label_set_still_revokes(tmp_path):
     )
 
 
+def test_a_bypass_label_input_with_a_stray_newline_still_revokes(tmp_path):
+    """A YAML block scalar (`risk_bypass_label: |`) keeps a trailing newline.
+    That name matches no label, so nothing may release the verdict; `grep -F`
+    would split it into two patterns, and the empty one matches the empty
+    read of an unlabeled PR."""
+    inputs = {"risk_bypass_label": BYPASS_LABEL + "\n"}
+    stub = armed_by_a_clean_revision(tmp_path, **inputs)
+    job = run_job(stub, risky_push(inputs=inputs))
+    assert job.arm == "OFF" and job.disarmed_by == [(REVOKE, GITHUB_TOKEN)], (
+        f"a bypass label input with a trailing newline skipped the revoke:\n{job}"
+    )
+
+
 @pytest.mark.parametrize(
     "conclusion, kept",
     [
@@ -1205,11 +1219,32 @@ def _scenario_push_during_label_read(tmp_path, steps):
     return run_job(stub, risky_push(head_moves_on_labels_read=REVOKE), steps)
 
 
+def _scenario_bypass_input_with_a_newline(tmp_path, steps):
+    inputs = {"risk_bypass_label": BYPASS_LABEL + "\n"}
+    stub = armed_by_a_clean_revision(tmp_path, steps, **inputs)
+    return run_job(stub, risky_push(inputs=inputs), steps)
+
+
+def _label_match_by_grep(steps):
+    """The `grep -qxF` match this replaced, which splits its pattern on
+    newlines."""
+    steps = _edit(
+        REVOKE,
+        "run",
+        "while IFS= read -r live; do",
+        'if grep -qxF -- "$BYPASS_LABEL" <<<"$live_labels"; then',
+    )(steps)
+    steps = _edit(
+        REVOKE, "run", 'if [ "$live" = "$BYPASS_LABEL" ]; then', "if true; then"
+    )(steps)
+    return _edit(REVOKE, "run", 'done <<<"$live_labels"', "fi")(steps)
+
+
 def _guard_before_the_label_read(steps):
     """The order before Codex round 6: the head guard, then the label read."""
     step = next(s for s in steps if s.get("id") == REVOKE)
     run = step["run"]
-    label = run.index("# Exact-line match")
+    label = run.index("# Exact string equality")
     guard = run.index("# The ownership check comes last")
     disarm = run.index("gh pr merge --disable-auto")
     assert label < guard < disarm, "mutant anchors out of order"
@@ -1286,10 +1321,21 @@ def _scenario_retry_through_unreadable_head(tmp_path, steps):
             id="live-label-check-fails-open",
         ),
         pytest.param(
-            _edit(REVOKE, "run", "grep -qxF --", "grep -qF --"),
+            _edit(
+                REVOKE,
+                "run",
+                'if [ "$live" = "$BYPASS_LABEL" ]; then',
+                'if [[ "$live" == *"$BYPASS_LABEL"* ]]; then',
+            ),
             _scenario_near_match_label,
             lambda job: job.arm == "ON" and job.disables == 0,
             id="label-match-by-substring",
+        ),
+        pytest.param(
+            _label_match_by_grep,
+            _scenario_bypass_input_with_a_newline,
+            lambda job: job.arm == "ON" and job.disables == 0,
+            id="label-match-by-grep-xF",
         ),
         pytest.param(
             _guard_before_the_label_read,
