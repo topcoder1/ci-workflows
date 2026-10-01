@@ -349,7 +349,7 @@ jobs:
         # this lane runs the version pinned above), and that CLI's handling of
         # project files has not been reviewed for them yet. The pin moved off
         # @v1 after v1.0.113/.114 broke the CLI install (ci-workflows#37).
-        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Use the verified pin; otherwise the action installs its own CLI version.
