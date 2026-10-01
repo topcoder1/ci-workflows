@@ -40,7 +40,12 @@ and on the bypass paths it only delays the arm.
    manual-hold Signal 2 ignores, so when a human then applies the bypass label
    the PR re-arms instead of sitting on a phantom human hold. A hold label
    still revokes through the hold step alone, and that run clears the
-   decision labels.
+   decision labels. The arm step's own disarms are recorded the same way: a
+   pre-arm stand-down (a retargeted base, or one it cannot read) and the
+   removal of a bot's arm each leave the PR's newest auto-merge event, and a
+   later clean push still re-arms. They try github-actions[bot] three times,
+   so a transient failure does not reach the PAT, which is the fallback
+   only, for a bot that cannot disarm.
 4. Fail closed: only OFF counts. An arm still ON after the disarm, or an arm
    state that cannot be read, fails the step, the always() error revoke
    retries the disarm, and the decision label is not published, so the
@@ -60,7 +65,9 @@ and on the bypass paths it only delays the arm.
    verification that only rejects ON, the live bypass-label check disabled,
    failing open, or matching by substring or by `grep -xF`, the head check
    placed before the label read, the comment posting without a verified
-   revoke, and the error revoke ignoring a failed Option B probe.
+   revoke, the error revoke ignoring a failed Option B probe, and the arm
+   step disarming under GH_TOKEN (the PAT), with a single bot attempt, or
+   with no PAT fallback.
 """
 
 import copy
@@ -102,6 +109,7 @@ RISK_LABEL = "automerge:blocked-risk-tier"
 RISK_MARKER = "<!-- claude-author-automerge:risk-tier -->"
 
 REVOKE = "risk_revoke"
+ARM = "arm"
 RISK_COMMENT = "Comment + skip when risky"
 HOLD_REVOKE = "Revoke auto-merge on hold label"
 ERROR_REVOKE = "Revoke auto-merge if gates errored"
@@ -472,13 +480,14 @@ def api(args):
             http_error(403, "Resource not accessible by integration")
         emit({"login": "pat-user", "type": "User"}, jq)
     if (method, route) == ("GET", PULL):
-        if state["knobs"].get("pr_read_fails"):
+        if state["knobs"].get("pr_read_fails") or (
+                step and step == state["knobs"].get("pr_read_fails_for")):
             http_error(502, "Server Error")
         arm = state["arm"]
         emit({
             "number": int("__PR__"),
             "head": {"sha": state["head_sha"]},
-            "base": {"ref": "main"},
+            "base": {"ref": state["base_ref"]},
             "body": state["body"],
             "labels": labels(),
             "auto_merge": None if arm is None else {
@@ -572,8 +581,13 @@ class Revision:
     branch: str = "claude/rotate-keys"
     action: str = "synchronize"
     labels: tuple = ()  # applied by a human before this event
-    # True: armed through the PAT earlier; False: unarmed; None: as left.
+    # True: armed through the PAT earlier; "bot": armed by github-actions[bot]
+    # earlier (a GITHUB_TOKEN arm from before the attribution gate); False:
+    # unarmed; None: as left.
     armed: object = None
+    # The base GET pulls/7 answers now; the event's payload keeps "main", so
+    # anything else is a retarget after the event fired.
+    live_base: str = "main"
     inputs: dict = field(default_factory=dict)  # the caller's input overrides
     check_runs: tuple = ()  # (name, conclusion) on the head commit
     event_head_sha: object = None  # the payload's head, when a newer push has landed
@@ -584,6 +598,7 @@ class Revision:
     bot_cannot_disarm: bool = False  # GitHub refuses github.token's --disable-auto
     disarm_fails_once: bool = False  # the first --disable-auto fails transiently
     pr_read_fails: bool = False  # GET pulls/7 answers HTTP 502, its body on stdout
+    pr_read_fails_for: str = ""  # the step whose GET pulls/7 reads answer HTTP 502
     pr_view_fails: bool = False  # gh pr view exits 1 with an empty stdout
     checks_read_fails: bool = False  # the check-runs read answers an HTML 502
     labels_fail_for: str = ""  # the step whose live-label reads answer HTTP 502
@@ -614,6 +629,7 @@ class Stub:
         self.write(
             {
                 "head_sha": "",
+                "base_ref": "main",
                 "body": "",
                 "files": [],
                 "labels": [],
@@ -642,20 +658,23 @@ class Stub:
         """Apply one revision; returns the labels its event payload carries."""
         s = self.read()
         s["head_sha"] = rev.head_sha
+        s["base_ref"] = rev.live_base
         s["body"] = rev.body
         s["files"] = [{"filename": f, "status": "modified"} for f in rev.files]
         for name in rev.labels:
             if name not in s["labels"]:
                 s["labels"].append(name)
         if rev.armed and s["arm"] is None:
-            # Armed on an earlier revision, through the caller's PAT.
-            s["arm"] = {"login": "pat-user", "is_bot": False}
+            # Armed on an earlier revision, through the caller's PAT, or by
+            # github-actions[bot].
+            login = "github-actions[bot]" if rev.armed == "bot" else "pat-user"
+            s["arm"] = {"login": login, "is_bot": rev.armed == "bot"}
             s["clock"] += 1
             s["timeline"].append(
                 {
                     "event": "auto_squash_enabled",
                     "created_at": _stamp(s["clock"]),
-                    "actor": {"login": "pat-user"},
+                    "actor": {"login": login},
                 }
             )
         elif rev.armed is False:
@@ -673,6 +692,7 @@ class Stub:
         s["knobs"] = {
             "bot_cannot_disarm": rev.bot_cannot_disarm,
             "pr_read_fails": rev.pr_read_fails,
+            "pr_read_fails_for": rev.pr_read_fails_for,
             "pr_view_fails": rev.pr_view_fails,
             "checks_read_fails": rev.checks_read_fails,
             "labels_fail_for": rev.labels_fail_for,
@@ -739,6 +759,11 @@ class Job:
         return [
             (c["step"], c["token"]) for c in self.state["disables"] if c["effective"]
         ]
+
+    @property
+    def disarm_attempts(self):
+        """(step, token) of every --disable-auto, whether or not it took."""
+        return [(c["step"], c["token"]) for c in self.state["disables"]]
 
     @property
     def disables(self):
@@ -1044,6 +1069,91 @@ def test_a_hold_label_revokes_through_the_hold_step_alone(tmp_path):
     )
 
 
+def retargeted_push(**kw):
+    """Revision 2 — clean, but the PR was retargeted after its event fired: the
+    arm step's live re-read sees `release`, not the `main` its gate read."""
+    return Revision(CLEAN, head_sha="2" * 40, live_base="release", **kw)
+
+
+def clean_push():
+    """Revision 3 — a later push, still clean, on the default branch."""
+    return Revision(CLEAN, head_sha="3" * 40)
+
+
+@pytest.mark.parametrize(
+    "fault, outcome, outputs",
+    [
+        pytest.param(
+            {"live_base": "release"},
+            "success",
+            {"stood_down": "base"},
+            id="base-changed",
+        ),
+        pytest.param({"pr_read_fails_for": ARM}, "failure", {}, id="base-unreadable"),
+    ],
+)
+def test_a_pre_arm_stand_down_does_not_read_as_a_human_hold(
+    tmp_path, fault, outcome, outputs
+):
+    """The arm step re-reads the base right before it arms. A retarget since
+    the gate read, or a base it cannot read, makes it disarm the arm an
+    earlier run placed and stand down. Nothing after that disarm records an
+    auto-merge event, so the next run's hold step reads it, and that step
+    takes a disable by anyone but github-actions[bot] for a human's durable
+    hold: a disarm under the PAT stranded a clean PR no human ever disabled."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    stood = run_job(stub, Revision(CLEAN, head_sha="2" * 40, **fault))
+    later = run_job(stub, clean_push())
+    assert later.out("hold") == {"hold": "0", "reason": ""} and later.arm == "ON", (
+        f"the arm step's disarm {stood.disarmed_by} read as a human's hold, and "
+        f"the clean PR was never re-armed:\n{later}"
+    )
+    assert later.arms == 1, str(later)
+    assert stood.disarmed_by == [(ARM, GITHUB_TOKEN)], str(stood)
+    assert stood.outcome(ARM) == outcome and stood.out(ARM) == outputs, str(stood)
+
+
+def test_removing_a_bots_arm_before_a_stand_down_does_not_read_as_a_human_hold(
+    tmp_path,
+):
+    """A bot's arm merges as the bot, so the arm step removes it before its
+    revalidation reads. When the step then stands down instead of arming as
+    the PAT user, that removal is the PR's newest auto-merge event."""
+    stub = Stub(tmp_path)
+    stood = run_job(stub, retargeted_push(armed="bot"))
+    later = run_job(stub, clean_push())
+    assert later.out("hold") == {"hold": "0", "reason": ""} and later.arm == "ON", (
+        f"the removal of the bot's arm {stood.disarmed_by} read as a human's "
+        f"hold, and the clean PR was never re-armed:\n{later}"
+    )
+    assert stood.disarmed_by == [(ARM, GITHUB_TOKEN)], str(stood)
+    assert stood.out(ARM) == {"stood_down": "base"}, str(stood)
+
+
+def test_the_arm_steps_disarm_falls_back_to_the_pat_when_the_bot_cannot(tmp_path):
+    """GITHUB_TOKEN can disable an arm the PAT user placed
+    (whois-api-llc/wxa_webcat#1715), so the PAT is the fallback only: tried
+    after the bot's attempts, and verified like them, so the disarm stays
+    fail-closed."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    stood = run_job(stub, retargeted_push(bot_cannot_disarm=True))
+    assert stood.arm == "OFF" and stood.out(ARM) == {"stood_down": "base"}, (
+        f"the arm survived a refused bot disarm:\n{stood}"
+    )
+    assert stood.disarm_attempts == [(ARM, GITHUB_TOKEN)] * 3 + [(ARM, PAT)], (
+        f"expected three attempts as github-actions[bot], then the PAT:\n{stood}"
+    )
+
+
+def test_a_transient_disarm_failure_retries_as_the_bot(tmp_path):
+    """One failed attempt is not a refusal: the bot retries before the PAT may
+    step in, so a 502 does not cost the PR a phantom human hold."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    stood = run_job(stub, retargeted_push(disarm_fails_once=True))
+    assert stood.disarm_attempts == [(ARM, GITHUB_TOKEN)] * 2, str(stood)
+    assert stood.disarmed_by == [(ARM, GITHUB_TOKEN)], str(stood)
+
+
 # ---------------------------------------------------------------------------
 # 4. Fail closed: only OFF counts.
 # ---------------------------------------------------------------------------
@@ -1275,6 +1385,34 @@ def _scenario_retry_through_unreadable_head(tmp_path, steps):
     )
 
 
+def _arm_disarms_under_gh_token(steps):
+    """The arm step before the bot-first disarm: every disarm ran under
+    GH_TOKEN, which is the PAT whenever the caller passes one."""
+    step = next(s for s in steps if s.get("id") == ARM)
+    assert step["env"]["BOT_TOKEN"] == "${{ github.token }}", "mutant anchor moved"
+    step["env"]["BOT_TOKEN"] = step["env"]["GH_TOKEN"]
+    return steps
+
+
+def _scenario_clean_push_after_a_stand_down(tmp_path, steps):
+    stub = armed_by_a_clean_revision(tmp_path, steps)
+    run_job(stub, retargeted_push(), steps)
+    return run_job(stub, clean_push(), steps)
+
+
+def _scenario_stand_down(tmp_path, steps, **fault):
+    stub = armed_by_a_clean_revision(tmp_path, steps)
+    return run_job(stub, retargeted_push(**fault), steps)
+
+
+def _scenario_stand_down_through_a_transient_failure(tmp_path, steps):
+    return _scenario_stand_down(tmp_path, steps, disarm_fails_once=True)
+
+
+def _scenario_stand_down_the_bot_cannot_disarm(tmp_path, steps):
+    return _scenario_stand_down(tmp_path, steps, bot_cannot_disarm=True)
+
+
 @pytest.mark.parametrize(
     "mutate, scenario, broken",
     [
@@ -1367,6 +1505,30 @@ def _scenario_retry_through_unreadable_head(tmp_path, steps):
             _scenario_retry_through_unreadable_head,
             lambda job: job.arm == "ON" and job.disarmed_by == [],
             id="error-revoke-guard-trusts-any-answer",
+        ),
+        pytest.param(
+            _arm_disarms_under_gh_token,
+            _scenario_clean_push_after_a_stand_down,
+            lambda job: job.out("hold").get("reason") == "timeline:human-disable-newest"
+            and job.arms == 0,
+            id="arm-disarms-as-the-pat",
+        ),
+        pytest.param(
+            _edit(
+                ARM,
+                "run",
+                'for _ in 1 2 3; do\n    GH_TOKEN="$1"',
+                'for _ in 1; do\n    GH_TOKEN="$1"',
+            ),
+            _scenario_stand_down_through_a_transient_failure,
+            lambda job: job.disarmed_by == [(ARM, PAT)],
+            id="arm-disarm-without-bot-retries",
+        ),
+        pytest.param(
+            _edit(ARM, "run", 'disarm_as "$GH_TOKEN"', "return 1"),
+            _scenario_stand_down_the_bot_cannot_disarm,
+            lambda job: job.arm == "ON",
+            id="arm-disarm-without-the-pat-fallback",
         ),
     ],
 )

@@ -165,8 +165,12 @@ arbitrary helper scripts; that's a different kind of repo.
   misspell the enabler path (a typo that would be silent in production),
   and plant back each old head read and each read's reset alone (an error
   body, or a failed read's SHA, then reads as a moved head); structural
-  pins hold one arm call site per workflow and keep `automerge_pat`
-  `required: false`.
+  pins hold one arm call site per workflow, keep `automerge_pat`
+  `required: false`, and keep `BOT_TOKEN` github.token in both arm steps.
+  Every disarm in an arm step (the bot-arm removal, claude-author's pre-arm
+  stand-downs) runs as github-actions[bot], the PAT only after three bot
+  attempts: claude-author's manual hold reads a disable by any other actor
+  as a human's durable hold.
 - `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
   without the PAT, since Dependabot deletes its own branch and refusing would
   stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm

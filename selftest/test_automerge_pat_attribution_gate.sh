@@ -92,9 +92,10 @@
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
-#    8b. user PAT + a BOT's arm ⇒ removed before the head read, then the
-#        bound arm as the user.
-#    8c. a bot's arm that will not come off ⇒ 3 disable attempts, exit 1.
+#    8b. user PAT + a BOT's arm ⇒ removed, as github-actions[bot], before
+#        the head read, then the bound arm as the user.
+#    8c. a bot's arm that will not come off ⇒ 3 disable attempts as
+#        github-actions[bot], then 3 as the PAT user, exit 1.
 #    8d. the first arm read fails and a bot's arm stays ⇒ the read-back
 #        after the arm catches it, removes it, exit 1 (review pass 2).
 #   negative controls (each proves a case above can fail)
@@ -126,7 +127,10 @@
 #     field PR contents cannot set) and USING_PAT from
 #     secrets.automerge_pat, in both arm steps;
 #   * GH_TOKEN keeps its `|| github.token` fallback: the Dependabot path
-#     and the pre-arm revalidation reads/disarms run without a PAT;
+#     and the pre-arm revalidation reads run without a PAT;
+#   * BOT_TOKEN is github.token in both arm steps: their disarms run as
+#     github-actions[bot] first, because claude-author's manual-hold step
+#     reads a disable by any other actor as a human's durable hold;
 #   * automerge_pat stays `required: false` in both: a required secret
 #     fails a misconfigured caller at STARTUP, which would also stop the
 #     hold-label and error revokes that protect already-armed PRs;
@@ -222,7 +226,12 @@ for wf in "$CA" "$SP"; do
   if grep -qF 'GH_TOKEN: ${{ secrets.automerge_pat || github.token }}' <<< "$hdr"; then
     pass "$wf: GH_TOKEN keeps the github.token fallback (Dependabot path, revalidation reads)"
   else
-    fail "$wf: GH_TOKEN lost its github.token fallback — the Dependabot path and the no-PAT revalidation disarms would run with no token"
+    fail "$wf: GH_TOKEN lost its github.token fallback — the Dependabot path and the no-PAT revalidation reads would run with no token"
+  fi
+  if grep -qF 'BOT_TOKEN: ${{ github.token }}' <<< "$hdr"; then
+    pass "$wf: BOT_TOKEN is github.token (the step's disarms run as github-actions[bot])"
+  else
+    fail "$wf: BOT_TOKEN is not github.token — the step's disarms would be recorded under another actor, which claude-author's hold step reads as a human's durable hold"
   fi
   req=$(awk '/^      automerge_pat:$/{f=1} f && /^        required:/{print $2; exit}' "$wf")
   if [ "$req" = "false" ]; then
@@ -300,7 +309,8 @@ fi
 #                                    gh's error line on stderr)
 #     `gh pr merge --auto` models GitHub: it sets the enabler only when the
 #     PR is not armed (USING_PAT=1 ⇒ the user, else the Actions bot) and
-#     KEEPS an existing enabler — measured 2026-09-18.
+#     KEEPS an existing enabler — measured 2026-09-18. Each --disable-auto
+#     logs the token it ran with to $DISARM_TOKENS.
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
@@ -311,7 +321,9 @@ jq_filter() { while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && { printf '%s' "$2"; re
 case "$1 $2" in
   "pr merge")
     case " $* " in
-      *" --disable-auto "*) [ "${STUB_DISARM_STUCK:-0}" = "1" ] || echo none > "$ARM_STATE" ;;
+      *" --disable-auto "*)
+        echo "${GH_TOKEN:-}" >> "$DISARM_TOKENS"
+        [ "${STUB_DISARM_STUCK:-0}" = "1" ] || echo none > "$ARM_STATE" ;;
       *" --auto "*)
         [ "${STUB_ARM_FAIL:-0}" = "1" ] && exit 1
         if [ "$(arm_state)" = "none" ]; then
@@ -379,13 +391,18 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 HEAD="c0ffee0000000000000000000000000000000001"
 
 run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T/summary
-  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls" "$T/head_reads" "$T/view_reads"
+  : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; : > "$T/disarm_tokens"
+  rm -f "$T/user_calls" "$T/head_reads" "$T/view_reads"
   echo "${STUB_ARMED_BY:-none}" > "$T/arm_state"
-  local rc=0
+  # The arm steps' env: GH_TOKEN is the PAT when it arrived, else
+  # github.token; BOT_TOKEN is always github.token.
+  local rc=0 gh_token=bot-stub
+  [ "$2" = "1" ] && gh_token=pat-stub
   ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" USER_CALLS="$T/user_calls" HEAD_READS="$T/head_reads" \
       ARM_STATE="$T/arm_state" VIEW_READS="$T/view_reads" STUB_ERRORS="$T/stub_errors" \
+      DISARM_TOKENS="$T/disarm_tokens" \
       GITHUB_OUTPUT="$T/ghout" GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
-      GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
+      GH_TOKEN="$gh_token" BOT_TOKEN=bot-stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
       HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY=0 \
       BYPASS_LABEL=0 BYPASS_CODEX=0 GATE_BASE_REF=main GATE_BODY_SHA="" \
       DEFAULT_BRANCH=main OPTIN_LABEL=auto-merge-nonmain \
@@ -403,6 +420,7 @@ no_sleep_before_arm() {
        END { exit !(done && ok) }' "$T/gh.log"
 }
 disarmed() { grep -q 'gh pr merge --disable-auto' "$T/gh.log"; }
+disarm_tokens() { tr '\n' ' ' < "$T/disarm_tokens" | sed 's/ $//'; } # space-separated, in order
 user_calls() { grep -c '^gh api user' "$T/gh.log" || true; }
 # Codex round 3: the /user probe's retries must never sit between a
 # live-state read and the arm, so its first call must PRECEDE the step's
@@ -488,8 +506,8 @@ export STUB_ARMED_BY="bot"
 run_step "$T/ca.sh" 1 "topcoder1"
 unset STUB_ARMED_BY
 if has "$T/ghout" "armed=1" && before_in_log "gh pr merge --disable-auto" "--jq .base.ref" \
-   && before_in_log "gh pr merge --disable-auto" "gh pr merge --auto"; then
-  pass "2f: user PAT + a BOT's arm ⇒ the bot's arm is removed before the live-state reads, then the PR is armed as the user"
+   && before_in_log "gh pr merge --disable-auto" "gh pr merge --auto" && [ "$(disarm_tokens)" = "bot-stub" ]; then
+  pass "2f: user PAT + a BOT's arm ⇒ the bot's arm is removed, as github-actions[bot], before the live-state reads, then the PR is armed as the user"
 else
   fail "2f: a bot's arm must be replaced, not re-armed over — GitHub keeps the original enabler (Codex round 5)"; dump
 fi
@@ -555,6 +573,15 @@ if disarmed && has "$T/ghout" "stood_down=base" && ! has "$T/ghout" "stood_down=
   pass "5: no PAT + moved base ⇒ the base revalidation still disarms first (stood_down=base)"
 else
   fail "5: the attribution gate pre-empted the base revalidation's disarm"; dump
+fi
+
+export STUB_BASE="feature/other"
+run_step "$T/ca.sh" 1 "topcoder1"
+unset STUB_BASE
+if [ "$(disarm_tokens)" = "bot-stub" ] && has "$T/ghout" "stood_down=base" && ! armed; then
+  pass "5b: user PAT + moved base ⇒ the stand-down disarms as github-actions[bot], not the PAT user"
+else
+  fail "5b: the stand-down disarmed as '$(disarm_tokens)' — claude-author's hold step reads a disable by any actor but github-actions[bot] as a human's durable hold, so the PR would never re-arm"; dump
 fi
 
 # ---------------------------------------------------------------------------
@@ -806,8 +833,9 @@ export STUB_ARMED_BY="bot"
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_ARMED_BY
 if armed && before_in_log "gh pr merge --disable-auto" "--jq .head.sha" \
-   && before_in_log "gh pr merge --disable-auto" "gh pr merge --auto" && has "$T/out.log" "rc=0"; then
-  pass "8b: safe-paths, user PAT + a BOT's arm ⇒ removed before the head read, then the bound arm as the user"
+   && before_in_log "gh pr merge --disable-auto" "gh pr merge --auto" && has "$T/out.log" "rc=0" \
+   && [ "$(disarm_tokens)" = "bot-stub" ]; then
+  pass "8b: safe-paths, user PAT + a BOT's arm ⇒ removed, as github-actions[bot], before the head read, then the bound arm as the user"
 else
   fail "8b: safe-paths must replace a bot's arm before arming as the user"; dump
 fi
@@ -816,8 +844,8 @@ export STUB_ARMED_BY="bot" STUB_DISARM_STUCK=1
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_ARMED_BY STUB_DISARM_STUCK
 if ! armed && has "$T/out.log" "rc=1" && has "$T/out.log" "::error::could not verify the bot's arm is off" \
-   && [ "$(grep -c 'gh pr merge --disable-auto' "$T/gh.log")" = "3" ]; then
-  pass "8c: safe-paths, a bot's arm that will not come off ⇒ 3 disable attempts, then exit 1 (fail closed), no arm"
+   && [ "$(disarm_tokens)" = "bot-stub bot-stub bot-stub pat-stub pat-stub pat-stub" ]; then
+  pass "8c: safe-paths, a bot's arm that will not come off ⇒ 3 disable attempts as github-actions[bot], then 3 as the PAT user, then exit 1 (fail closed), no arm"
 else
   fail "8c: an unverifiable bot-arm removal must fail the safe-paths step"; dump
 fi
@@ -865,9 +893,9 @@ else
   fail "9b: negative control mutation did not neutralize exactly the /user refusal"
 fi
 
-# 9c: neutralize only the bot-arm REMOVAL (the first --disable-auto after the
-# "a bot armed this PR" notice); case 2f must then see no disarm before the arm.
-awk '/a bot armed this PR/{seen=1} seen && !done && /gh pr merge --disable-auto/{sub(/gh pr merge --disable-auto "\$PR_URL" 2>&1 \|\| true/, ": removal-neutralized"); done=1} {print}' \
+# 9c: neutralize only the bot-arm REMOVAL (the first `if ! disarm; then` after
+# the "a bot armed this PR" notice); case 2f must then see no disarm before the arm.
+awk '/a bot armed this PR/{seen=1} seen && !done && /if ! disarm; then/{sub(/if ! disarm; then/, "if false; then # removal-neutralized"); done=1} {print}' \
   "$T/ca.sh" > "$T/ca_mut3.sh"
 if [ "$(grep -c 'removal-neutralized' "$T/ca_mut3.sh")" = "1" ]; then
   export STUB_ARMED_BY="bot"

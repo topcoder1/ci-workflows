@@ -47,6 +47,12 @@ condition or an env mapping that drifts changes the verdict.
    before listing (a stale re-run acts on the live head it classified; an
    unknown head never defers to the event's SHA), and re-checks before every
    disarm, so a head pushed mid-revoke keeps the arm a sibling gave it.
+8. The enable step's removal of a bot's arm disarms the same way: as
+   github-actions[bot], the PAT only after three refused attempts. When the
+   step then stands down (here a push landed after its event), that removal
+   is the PR's newest auto-merge event, and claude-author-automerge's own
+   manual-hold step, run against the same PR, must not read it as a human's
+   hold.
 """
 
 import json
@@ -201,8 +207,10 @@ def parse_outputs(text):
 # Every read runs the caller's own --jq filter over API-shaped JSON; the arm is
 # one piece of state seen through both the REST (`auto_merge`) and the GraphQL
 # (`autoMergeRequest`) shapes, and only `gh pr merge` changes it. Each disarm
-# is logged with the token that ran it: the identity a revoke is recorded
-# under decides whether claude-author-automerge will ever re-arm the PR.
+# is logged with the token that ran it, and each change of the arm lands on
+# the PR's timeline under the actor that token stands for: the identity a
+# disarm is recorded under decides whether claude-author-automerge will ever
+# re-arm the PR (see claude_author_hold below).
 # ---------------------------------------------------------------------------
 GH_STUB = r"""#!/usr/bin/env bash
 set -uo pipefail
@@ -216,11 +224,27 @@ for a in "$@"; do
 done
 out() { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }
 arm=$(cat "$d/arm")
+by=$(cat "$d/enabler")
+case "${GH_TOKEN:-}" in
+  "__BOT_TOKEN__") actor="github-actions[bot]" ;;
+  "__PAT__") actor="pat-user" ;;
+  *) actor="" ;;
+esac
+record() { # an auto-merge event on the PR's timeline, as this token's actor
+  local n
+  n=$(( $(cat "$d/clock") + 1 ))
+  echo "$n" > "$d/clock"
+  jq --arg event "$1" --arg login "$actor" \
+    --arg at "$(printf '2026-09-30T10:%02d:%02dZ' $((n / 60)) $((n % 60)))" \
+    '. + [{event: $event, created_at: $at, actor: {login: $login}}]' \
+    "$d/timeline.json" > "$d/timeline.next" && mv "$d/timeline.next" "$d/timeline.json"
+}
 case "${1:-} ${2:-}" in
   "pr view")
-    jq -n --arg arm "$arm" '{autoMergeRequest: (if $arm == "ON" then {enabledBy: {login: "pat-user", is_bot: false}} else null end)}' | out
+    jq -n --arg arm "$arm" --arg by "$by" '{autoMergeRequest: (if $arm == "ON" then {enabledBy: {login: $by, is_bot: ($by == "github-actions[bot]")}} else null end)}' | out
     exit ;;
   "pr merge")
+    [ -n "$actor" ] || { echo "gh-stub: GH_TOKEN is neither github.token nor the PAT: '${GH_TOKEN:-}'" >&2; exit 4; }
     case " $* " in
       *" --disable-auto "*)
         echo "${GH_TOKEN:-}" >> "$d/disable.log"
@@ -232,19 +256,25 @@ case "${1:-} ${2:-}" in
         if [ -e "$d/bot_cannot_disarm" ] && [ "${GH_TOKEN:-}" = "__BOT_TOKEN__" ]; then
           echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1
         fi
+        [ "$(cat "$d/arm")" = ON ] && record auto_merge_disabled
         echo OFF > "$d/arm"; exit 0 ;;
       *" --auto "*)
         want=""; prev=""
         for a in "$@"; do [ "$prev" = "--match-head-commit" ] && want="$a"; prev="$a"; done
         [ "$want" = "$(cat "$d/head_sha")" ] || { echo "gh: head moved" >&2; exit 1; }
-        echo arm >> "$d/arm.log"; echo ON > "$d/arm"; exit 0 ;;
+        echo arm >> "$d/arm.log"
+        # Enabling on an armed PR keeps the original enabler (measured).
+        if [ "$arm" != ON ]; then
+          echo "$actor" > "$d/enabler"; record auto_squash_enabled
+        fi
+        echo ON > "$d/arm"; exit 0 ;;
     esac ;;
   "api user")
     echo '{"login": "pat-user", "type": "User"}' | out
     exit ;;
 esac
 url=""
-for a in "$@"; do case "$a" in repos/*) url="$a"; break ;; esac; done
+for a in "$@"; do case "$a" in repos/* | /repos/*) url="${a#/}"; break ;; esac; done
 case "$url" in
   "repos/__REPO__/pulls/__PR__/files"*)
     if [ -e "$d/move_head_on_listing" ]; then
@@ -267,9 +297,13 @@ case "$url" in
           echo "gh: Server Error (HTTP 502)" >&2; exit 1
         fi ;;
     esac
-    jq -n --arg sha "$(cat "$d/head_sha")" --arg arm "$arm" --slurpfile labels "$d/labels.json" \
-      '{head: {sha: $sha}, labels: $labels[0], auto_merge: (if $arm == "ON" then {enabled_by: {login: "pat-user", type: "User"}, merge_method: "squash"} else null end)}' | out
+    jq -n --arg sha "$(cat "$d/head_sha")" --arg arm "$arm" --arg by "$by" --slurpfile labels "$d/labels.json" \
+      '{head: {sha: $sha}, labels: $labels[0], auto_merge: (if $arm == "ON" then {enabled_by: {login: $by, type: (if $by == "github-actions[bot]" then "Bot" else "User" end)}, merge_method: "squash"} else null end)}' | out
     exit ;;
+  "repos/__REPO__/issues/__PR__/labels"*)
+    out < "$d/labels.json"; exit ;;
+  "repos/__REPO__/issues/__PR__/timeline"*)
+    out < "$d/timeline.json"; exit ;;
   "repos/__REPO__/contents/.github/risk-paths.yml")
     [ -e "$d/risk_500" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
     [ -e "$d/risk.yml" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
@@ -295,6 +329,7 @@ class PR:
     action: str = "synchronize"
     labels: tuple = ()
     armed: object = None  # True/False sets the arm; None keeps the stub's state
+    armed_by_bot: bool = False  # that arm is github-actions[bot]'s, not the PAT user's
     policy: object = None  # risk-paths.yml text; None is a 404
     risk_500: bool = False
     arm_read_fails: bool = False
@@ -322,6 +357,7 @@ class Stub:
             .replace("__PR__", str(PR_NUMBER))
             .replace("__DEPS__", str(CLASSIFIER_DEPS))
             .replace("__BOT_TOKEN__", GITHUB_TOKEN)
+            .replace("__PAT__", PAT)
             .replace("__NEW_HEAD__", NEW_HEAD)
         )
         gh.chmod(0o755)
@@ -340,7 +376,24 @@ class Stub:
         )
         mktemp.chmod(0o755)
         (self.dir / "arm").write_text("OFF\n")
+        (self.dir / "enabler").write_text("pat-user\n")
+        (self.dir / "timeline.json").write_text("[]")
+        (self.dir / "clock").write_text("0\n")
         self.runs = 0
+
+    def record(self, event, login):
+        """An auto-merge event on the PR's timeline, the way the stub adds one."""
+        n = int((self.dir / "clock").read_text()) + 1
+        (self.dir / "clock").write_text(f"{n}\n")
+        timeline = json.loads((self.dir / "timeline.json").read_text())
+        timeline.append(
+            {
+                "event": event,
+                "created_at": f"2026-09-30T10:{n // 60:02d}:{n % 60:02d}Z",
+                "actor": {"login": login},
+            }
+        )
+        (self.dir / "timeline.json").write_text(json.dumps(timeline))
 
     def stage(self, pr):
         d = self.dir
@@ -357,7 +410,14 @@ class Stub:
         (d / "labels.json").write_text(json.dumps([{"name": n} for n in pr.labels]))
         (d / "head_sha").write_text(pr.head_sha + "\n")
         if pr.armed is not None:
+            was_armed = self.arm() == "ON"
             (d / "arm").write_text("ON\n" if pr.armed else "OFF\n")
+            if pr.armed and not was_armed:
+                # Armed on an earlier revision: through the PAT, or by
+                # github-actions[bot] (a GITHUB_TOKEN arm).
+                login = "github-actions[bot]" if pr.armed_by_bot else "pat-user"
+                (d / "enabler").write_text(login + "\n")
+                self.record("auto_squash_enabled", login)
         for name in (
             "risk.yml",
             "risk_500",
@@ -524,6 +584,61 @@ def run_job(stub, pr):
 
 
 REVOKE = next(s["name"] for s in STEPS if s["name"].startswith("Revoke auto-merge"))
+
+CA_DOC = yaml.safe_load(
+    (ROOT / ".github" / "workflows" / "claude-author-automerge.yml").read_text()
+)
+CA_INPUTS = {
+    name: spec.get("default", "")
+    for name, spec in CA_DOC.get("on", CA_DOC.get(True))["workflow_call"]["inputs"].items()
+}
+CA_HOLD = next(s for s in CA_DOC["jobs"]["automerge"]["steps"] if s.get("id") == "hold")
+
+
+def claude_author_hold(stub):
+    """claude-author-automerge's SHIPPED "Check manual hold" step, run against
+    this stub's PR the way that workflow's next run would. Its verdict decides
+    whether it ever arms a Claude-authored PR again: its enable step needs
+    hold != '1', and a disable by anyone but github-actions[bot] as the
+    newest auto-merge event reads as a human's durable hold."""
+    stub.runs += 1
+    step_dir = stub.tmp / f"run{stub.runs}-hold"
+    step_dir.mkdir()
+    script = step_dir / "run.sh"
+    script.write_text(CA_HOLD["run"])
+    output = step_dir / "github_output"
+    output.write_text("")
+    ctx = {
+        "github": {
+            "token": GITHUB_TOKEN,
+            "repository": REPO,
+            "event": {"pull_request": {"number": PR_NUMBER}},
+        },
+        "inputs": CA_INPUTS,
+        "steps": {},
+    }
+    env = {
+        "PATH": f"{stub.bin}{os.pathsep}{os.environ['PATH']}",
+        "HOME": os.environ.get("HOME", str(step_dir)),
+        "TMPDIR": str(step_dir),
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_REPOSITORY": REPO,
+        "STUB_DIR": str(stub.dir),
+        **step_env(CA_HOLD, ctx),
+    }
+    proc = subprocess.run(
+        ["bash", "-e", str(script)],
+        env=env,
+        cwd=step_dir,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"claude-author's hold step failed:\n{proc.stdout}{proc.stderr}"
+    )
+    return parse_outputs(output.read_text())
 
 
 def armed_by_a_docs_only_revision(tmp_path):
@@ -1056,3 +1171,68 @@ def test_an_unknown_classified_head_never_defers_to_the_event_sha(tmp_path):
     assert job.arm == "OFF" and job.disables >= 1, (
         f"an unknown classified head deferred to the event's stale SHA:\n{job}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. The enable step's own disarm is recorded as github-actions[bot] too.
+# ---------------------------------------------------------------------------
+def test_removing_a_bots_arm_before_a_stand_down_is_not_a_human_hold(tmp_path):
+    """A bot's arm (a GITHUB_TOKEN arm from before the attribution gate)
+    merges as the bot, so the enable step removes it before its head read.
+    When the step then stands down instead of arming as the PAT user, because
+    a push landed after this run's event, that removal is the PR's newest
+    auto-merge event. On a Claude-authored PR, claude-author-automerge's run
+    for the new head reads it with its manual-hold step, which takes a
+    disable by anyone but github-actions[bot] for a human's durable hold."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["docs/runbooks/restore.md"],
+            head_sha="2" * 40,  # the live head
+            event_head_sha="1" * 40,  # this run's event: the push before it
+            branch="claude/rotate-keys",
+            armed=True,
+            armed_by_bot=True,
+            policy=POLICY,
+        ),
+    )
+    hold = claude_author_hold(stub)
+    assert hold == {"hold": "0", "reason": ""}, (
+        f"the enable step's removal of the bot's arm {job.disarmed_by} read as "
+        f"a human's hold ({hold}), so claude-author-automerge never re-arms "
+        f"the PR:\n{job}"
+    )
+    assert job.arm == "OFF" and job.arms == 0, str(job)
+    assert job.disarmed_by == [GITHUB_TOKEN], str(job)
+
+    # Control: the same hold step does hold on a human's disable.
+    stub.record("auto_squash_enabled", "pat-user")
+    stub.record("auto_merge_disabled", "octo-human")
+    assert claude_author_hold(stub) == {
+        "hold": "1",
+        "reason": "timeline:human-disable-newest",
+    }
+
+
+def test_the_bot_arm_removal_falls_back_to_the_pat_when_the_bot_cannot(tmp_path):
+    """The revoke step's fallback: the PAT only after the bot's attempts, and
+    verified like them, so the removal stays fail-closed."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["docs/runbooks/restore.md"],
+            armed=True,
+            armed_by_bot=True,
+            bot_cannot_disarm=True,
+            policy=POLICY,
+        ),
+    )
+    assert job.disarmed_by == [GITHUB_TOKEN] * 3 + [PAT], (
+        f"expected three attempts as github-actions[bot], then the PAT:\n{job}"
+    )
+    assert job.arm == "ON" and job.arms == 1, (
+        f"the bot's arm was not replaced by the PAT user's:\n{job}"
+    )
+    assert (stub.dir / "enabler").read_text().strip() == "pat-user", str(job)
