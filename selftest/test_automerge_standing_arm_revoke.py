@@ -61,6 +61,10 @@ and on the bypass paths it only delays the arm.
    failing open, or matching by substring or by `grep -xF`, the head check
    placed before the label read, the comment posting without a verified
    revoke, and the error revoke ignoring a failed Option B probe.
+7. The arm binds to the head the risk-tier step LISTED: a head that went
+   A → B before that listing and back to A before the arm (where
+   --match-head-commit sees the event's head A again) is not armed on a
+   verdict about B's files.
 """
 
 import copy
@@ -468,11 +472,17 @@ def api(args):
         unexpected()
     route = urllib.parse.urlsplit(endpoint.lstrip("/")).path
     if (method, route) == ("GET", "user"):
+        if state["knobs"].get("head_on_arm"):
+            # The arm step's first call: a push puts the event's head back.
+            state["head_sha"] = state["knobs"]["head_on_arm"]
+            state["knobs"]["head_on_arm"] = ""
         if token != PAT:
             http_error(403, "Resource not accessible by integration")
         emit({"login": "pat-user", "type": "User"}, jq)
     if (method, route) == ("GET", PULL):
-        if state["knobs"].get("pr_read_fails"):
+        if state["knobs"].get("pr_read_fails") or (
+            step and step == state["knobs"].get("pr_read_fails_for")
+        ):
             http_error(502, "Server Error")
         arm = state["arm"]
         emit({
@@ -584,10 +594,12 @@ class Revision:
     bot_cannot_disarm: bool = False  # GitHub refuses github.token's --disable-auto
     disarm_fails_once: bool = False  # the first --disable-auto fails transiently
     pr_read_fails: bool = False  # GET pulls/7 answers HTTP 502, its body on stdout
+    pr_read_fails_for: str = ""  # the one step whose GET pulls/7 reads answer HTTP 502
     pr_view_fails: bool = False  # gh pr view exits 1 with an empty stdout
     checks_read_fails: bool = False  # the check-runs read answers an HTML 502
     labels_fail_for: str = ""  # the step whose live-label reads answer HTTP 502
     head_moves_on_labels_read: str = ""  # the step whose label read sees a push land
+    head_returns_on_arm: bool = False  # the event's head is back as the arm step starts
 
 
 class Stub:
@@ -673,10 +685,14 @@ class Stub:
         s["knobs"] = {
             "bot_cannot_disarm": rev.bot_cannot_disarm,
             "pr_read_fails": rev.pr_read_fails,
+            "pr_read_fails_for": rev.pr_read_fails_for,
             "pr_view_fails": rev.pr_view_fails,
             "checks_read_fails": rev.checks_read_fails,
             "labels_fail_for": rev.labels_fail_for,
             "head_moves_on_labels_read": rev.head_moves_on_labels_read,
+            "head_on_arm": (rev.event_head_sha or rev.head_sha)
+            if rev.head_returns_on_arm
+            else "",
         }
         s["disarm_failures_left"] = 1 if rev.disarm_fails_once else 0
         s["calls"], s["disables"], s["arm_calls"] = [], [], 0
@@ -1375,3 +1391,60 @@ def test_a_mutated_workflow_breaks_what_its_case_pins(
 ):
     job = scenario(tmp_path, mutate(copy.deepcopy(STEPS)))
     assert broken(job), f"the mutant went unnoticed by the case that pins it:\n{job}"
+
+
+# ---------------------------------------------------------------------------
+# 7. The arm binds to the head the risk-tier step listed.
+# ---------------------------------------------------------------------------
+def test_a_head_that_came_back_is_not_armed_on_the_risk_tier_verdict(tmp_path):
+    """A → B → A. The event's head A adds src/auth/login.py; B, a [skip ci]
+    revert of it that starts no run to cancel this one, is the head while
+    the risk-tier step lists, so that verdict is clean; A is pushed back
+    before the arm step. --match-head-commit then matches A, the event's
+    head, so binding only to that armed A on a verdict about B's files."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        Revision(
+            CLEAN,  # B's diff, which is what the risk-tier step lists
+            head_sha="2" * 40,  # B, the live head while the gates list
+            event_head_sha="1" * 40,  # A, the event's head
+            head_returns_on_arm=True,  # A is back as the arm step starts
+        ),
+    )
+    assert job.arms == 0 and job.arm == "OFF", (
+        f"the run armed its event's head on a verdict about another head's files:\n{job}"
+    )
+    assert job.out("risk").get("risky") == "0", str(job)
+    assert job.out("risk").get("classified_head") == "2" * 40, str(job)
+    assert job.outcome("arm") == "success" and "armed" not in job.out("arm"), str(job)
+
+
+def test_the_risk_tier_step_reads_its_head_before_it_lists(tmp_path):
+    """The recorded head binds the listing only if it is read first: read
+    after the listing, a head that moved during it would pass for the head
+    the listing saw."""
+    job = run_job(Stub(tmp_path), Revision(CLEAN))
+    calls = [" ".join(c["argv"]) for c in job.state["calls"] if c["step"] == "risk"]
+    head = next((i for i, c in enumerate(calls) if "--jq .head.sha" in c), None)
+    listing = next((i for i, c in enumerate(calls) if "/files" in c), None)
+    assert head is not None and listing is not None and head < listing, (
+        f"the risk-tier step did not read its head before listing:\n{job}"
+    )
+    assert job.out("risk").get("classified_head") == "a" * 40, str(job)
+
+
+def test_a_risk_tier_verdict_with_no_head_is_disarmed_as_github_actions(tmp_path):
+    """The risk-tier step keeps its verdict when it cannot read the head, and
+    the arm step then refuses to arm on it. The disarm must be the error
+    revoke's: github-actions[bot] behind its head guard. A disarm in the arm
+    step runs with the caller's PAT, which the hold step reads as a human's
+    durable hold, so one API blip would leave the PR unarmed for good."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    job = run_job(stub, Revision(CLEAN, head_sha="2" * 40, pr_read_fails_for="risk"))
+    assert job.out("risk").get("risky") == "0", str(job)
+    assert "classified_head" not in job.out("risk"), str(job)
+    assert job.outcome("arm") == "failure" and job.arms == 0, str(job)
+    assert job.arm == "OFF" and job.disarmed_by == [(ERROR_REVOKE, GITHUB_TOKEN)], (
+        f"the unbound verdict was not disarmed by the error revoke as github-actions[bot]:\n{job}"
+    )

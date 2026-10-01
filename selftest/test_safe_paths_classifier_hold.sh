@@ -40,6 +40,11 @@
 #   9. Structural: the enable step requires hold == '0' (positive evidence,
 #      not merely "not 1"), the revoke step fires on hold == '1', and the
 #      bypass label does NOT release a caller-policy verdict.
+#  10. THE LISTED HEAD: the head read just before the listing is recorded as
+#      classified_head, which the enable step requires to be the event's
+#      head; an unreadable head holds (head-unreadable) before any listing;
+#      with no policy nothing is listed, and on the standing-arm route
+#      nothing arms, so neither reads or records a head.
 #
 # The step's bash is EXTRACTED from the workflow YAML and executed against
 # the REAL classify.mjs, so this exercises the shipped gate rather than a
@@ -180,6 +185,10 @@ echo "✓ extracted classifier_hold step ($(wc -l < "$T/hold.sh" | tr -d ' ') li
 #     STUB_RENAMES           — newline-separated rename SOURCES
 #     STUB_RENAMES_RC        — nonzero: the rename listing fails
 #     STUB_CLASSIFY_FILE     — classifier served (default: the real one)
+#     STUB_HEAD              — the PR head the step reads before listing
+#     STUB_HEAD_RC           — nonzero: that read fails as gh does on an HTTP
+#                              error (the JSON body on STDOUT, rc=1)
+#     STUB_CALLS             — every call is appended here, in order
 #
 #   Any rules read whose ref is neither the base ref nor the default branch
 #   exits 64, so base-ref pinning is asserted on EVERY case, not just one.
@@ -188,7 +197,16 @@ mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 args="$*"
+[ -n "${STUB_CALLS:-}" ] && printf '%s\n' "$args" >> "$STUB_CALLS"
 case "$args" in
+  *"--jq .head.sha"*)
+    if [ "${STUB_HEAD_RC:-0}" != "0" ]; then
+      echo '{"message":"Server Error","status":"502"}'
+      echo "gh: Server Error (HTTP 502)" >&2
+      exit 1
+    fi
+    printf '%s\n' "$STUB_HEAD"
+    ;;
   *contents/.github/scripts/classify.mjs*)
     base64 < "${STUB_CLASSIFY_FILE:-$REAL_CLASSIFY}"
     ;;
@@ -250,16 +268,20 @@ REAL_DEPS="$PWD/$DEPS"
 # ---------------------------------------------------------------------------
 # Runner + assertions.
 # ---------------------------------------------------------------------------
+STUB_HEAD_DEFAULT="c0ffee0000000000000000000000000000000001"
 STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""; STUB_RISK_RC=0
 STUB_FILES="$T/files.txt"; STUB_FILES_RC=0
 STUB_RENAMES=""; STUB_RENAMES_RC=0; STUB_CLASSIFY_FILE=""
-CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
+CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"; CASE_STANDING_ARM=""
+STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0; STUB_CALLS="$T/calls.log"
 
 reset_case() {
   STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""; STUB_RISK_RC=0
   STUB_FILES_RC=0; STUB_RENAMES=""; STUB_RENAMES_RC=0; STUB_CLASSIFY_FILE=""
-  CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
+  CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"; CASE_STANDING_ARM=""
+  STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0
   : > "$STUB_FILES"
+  : > "$STUB_CALLS"
 }
 
 run_hold() {
@@ -269,13 +291,14 @@ run_hold() {
   HOLD_LOG=$(cd "$T" && \
     PATH="$T/bin:$PATH" \
     REPO="acme/fixture" PR=123 BASE_REF="$CASE_BASE_REF" \
-    DEFAULT_BRANCH="$CASE_DEFAULT_BRANCH" \
+    DEFAULT_BRANCH="$CASE_DEFAULT_BRANCH" STANDING_ARM="$CASE_STANDING_ARM" \
     GITHUB_OUTPUT="$OUT_FILE" GH_TOKEN=stub \
     STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_DEFAULT_FILE="$STUB_RISK_DEFAULT_FILE" \
     STUB_RISK_RC="$STUB_RISK_RC" STUB_FILES="$STUB_FILES" STUB_FILES_RC="$STUB_FILES_RC" \
     STUB_RENAMES="$STUB_RENAMES" STUB_RENAMES_RC="$STUB_RENAMES_RC" \
     STUB_CLASSIFY_FILE="$STUB_CLASSIFY_FILE" \
     REAL_CLASSIFY="$REAL_CLASSIFY" REAL_DEPS="$REAL_DEPS" \
+    STUB_HEAD="$STUB_HEAD" STUB_HEAD_RC="$STUB_HEAD_RC" STUB_CALLS="$STUB_CALLS" \
     bash hold.sh 2>&1)
   HOLD_RC=$?
   set -e
@@ -473,6 +496,76 @@ while [ "$i" -lt 2999 ]; do echo "docs/f$i.md"; i=$((i + 1)); done > "$STUB_FILE
 STUB_RENAMES=$(printf '%s\n%s' "docs/old-a.md" "docs/runbooks/prod-restore.md")
 run_hold
 expect "2999 files + rename sources: counted before the append, classified after" 1 classifier-hold
+
+# 10. THE LISTED HEAD. This step lists the PR's LIVE files, while the enable
+#     step binds --match-head-commit to the event's head; a head that went
+#     A → B before this listing and back to A before the arm would arm A on a
+#     verdict about B's files. So the step records the head it read just
+#     BEFORE listing, and the enable step requires it to be the event's head.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+run_hold
+expect "a listing records its head ⇒ armable" 0 -
+first_head=$(grep -n -m1 -F -- '--jq .head.sha' "$STUB_CALLS" | cut -d: -f1 || true)
+first_list=$(grep -n -m1 -F -- '/files' "$STUB_CALLS" | cut -d: -f1 || true)
+if [ "$(out_get classified_head)" = "$STUB_HEAD_DEFAULT" ] \
+   && [ -n "$first_head" ] && [ -n "$first_list" ] && [ "$first_head" -lt "$first_list" ]; then
+  echo "✓ the head read before the listing is recorded as classified_head"
+else
+  echo "✗ classified_head missing, wrong, or read after the listing — got '$(out_get classified_head)'. Calls:"
+  sed 's/^/    /' "$STUB_CALLS"
+  failed=1
+fi
+
+# An unreadable head holds before any listing — never a nonzero exit — in
+# both shapes: an HTTP error on every attempt (gh prints its JSON body to
+# STDOUT, rc=1) and a read that answers something other than a SHA.
+for shape in rc body; do
+  reset_case
+  STUB_RISK_FILE="$T/risk-fixture.yml"
+  case "$shape" in
+    rc) STUB_HEAD_RC=1 ;;
+    body) STUB_HEAD='{"message":"Server Error","status":"502"}' ;;
+  esac
+  printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+  run_hold
+  expect "unreadable head before the listing ($shape) ⇒ held" 1 head-unreadable
+  if grep -qF -- '/files' "$STUB_CALLS" || [ -n "$(out_get classified_head)" ]; then
+    echo "✗ an unreadable head ($shape) still listed the files or recorded a head"
+    failed=1
+  fi
+done
+
+# The standing-arm route arms nothing, so it reads no head: the head is only
+# for the enable step's binding, and a read failing there would only add a
+# revoke. The stub fails any head read, so a read here would hold.
+reset_case
+CASE_STANDING_ARM=1
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_HEAD_RC=1
+printf '%s\n' "src/x.py" "docs/notes.md" > "$STUB_FILES"
+run_hold
+expect "standing-arm route ⇒ no head read; the caller's verdict decides" 0 -
+if grep -qF -- '--jq .head.sha' "$STUB_CALLS" || [ -n "$(out_get classified_head)" ]; then
+  echo "✗ the standing-arm route read or recorded a head"
+  failed=1
+else
+  echo "✓ standing-arm route ⇒ no head read, no classified_head"
+fi
+
+# No caller policy ⇒ nothing listed, so no head is read or recorded (the
+# enable step reads an empty one as "tier 3 listed nothing").
+reset_case
+printf '%s\n' "docs/architecture.md" > "$STUB_FILES"
+run_hold
+expect "no policy ⇒ armable" 0 -
+if grep -qF -- '--jq .head.sha' "$STUB_CALLS" || [ -n "$(out_get classified_head)" ]; then
+  echo "✗ no policy, yet the step read or recorded a head"
+  failed=1
+else
+  echo "✓ no policy ⇒ no head read, no classified_head"
+fi
 
 echo ""
 if [ "$failed" -gt 0 ]; then

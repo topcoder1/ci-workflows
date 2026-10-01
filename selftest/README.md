@@ -161,12 +161,20 @@ arbitrary helper scripts; that's a different kind of repo.
   down only on a read that succeeds with a different SHA (an HTTP error's
   JSON body, which `gh api --jq` prints to stdout, or an empty read fails
   the step); Dependabot's own PRs keep the old path by exact login match.
+  Each arm also binds to the heads its gates LISTED: the listing steps
+  (safe-paths' classify step and tier 3, claude-author's classifier and
+  risk-tier steps) record the head they read just before listing, and the
+  arm stands down when one differs from the event's head, since a head
+  that went A → B before a listing and back to A passes
+  `--match-head-commit` A. It fails closed when a listing carries no head.
   Negative controls neutralize each refusal and the bot-arm removal,
   misspell the enabler path (a typo that would be silent in production),
-  and plant back each old head read and each read's reset alone (an error
-  body, or a failed read's SHA, then reads as a moved head); structural
-  pins hold one arm call site per workflow and keep `automerge_pat`
-  `required: false`.
+  plant back each old head read and each read's reset alone (an error
+  body, or a failed read's SHA, then reads as a moved head), and replace
+  one listed-head comparison per workflow with `false` (its
+  mismatched-head case then arms); structural pins hold one arm call site
+  per workflow, wire each listed head from its listing step's own output,
+  and keep `automerge_pat` `required: false`.
 - `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
   without the PAT, since Dependabot deletes its own branch and refusing would
   stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
