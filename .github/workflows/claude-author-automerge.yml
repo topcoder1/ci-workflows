@@ -522,6 +522,19 @@ jobs:
             fi
 
             if [ "$rp_state" = "present" ]; then
+              # The head the listings below describe, read just before them.
+              # The arm step arms only when it is the event's head (see that
+              # step). Only a SHA counts (gh api prints an HTTP error's JSON
+              # body to stdout), and an unreadable head fails closed like
+              # every other read here, so an empty classified_head always
+              # means this step listed nothing.
+              listed_head=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha) || listed_head=""
+              if ! [[ "$listed_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+                echo "::error::could not read the PR's head before listing its files — refusing to arm auto-merge (fail closed)."
+                exit 1
+              fi
+              echo "classified_head=$listed_head" >> "$GITHUB_OUTPUT"
+
               # Changed-file names via the paginated files API (same call
               # and same 3000-file fail-closed cap as pr-classify.yml).
               changed=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
@@ -1280,6 +1293,19 @@ jobs:
           BYPASS_LABEL: ${{ inputs.risk_bypass_label }}
         run: |
           set -euo pipefail
+          # The head the listings below describe, read just before them. The
+          # arm step arms only when it is the event's head (see that step).
+          # Recorded only when it is a SHA (gh api prints an HTTP error's JSON
+          # body to stdout). An unreadable head does not fail this step: the
+          # verdict below also drives the risk-tier revoke and comment, and
+          # the arm step refuses a verdict from this step that has no head.
+          listed_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha) || listed_head=""
+          if [[ "$listed_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "classified_head=$listed_head" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::could not read the PR's head before listing its files — this verdict can still revoke, but the arm step will not arm on it."
+          fi
+
           # Changed-file names via the paginated files API — `gh pr diff
           # --name-only` HTTP-406s on diffs >20k lines (dotclaude#121).
           # The listing endpoint caps at 3000 files; past that the scan
@@ -2014,6 +2040,11 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The heads the classifier and risk-tier steps read just before
+          # listing the PR's files: what their verdicts are about. Empty when
+          # that step listed nothing.
+          CLASSIFIER_HEAD: ${{ steps.classifier_verdict.outputs.classified_head }}
+          RISK_HEAD: ${{ steps.risk.outputs.classified_head }}
           METHOD: ${{ inputs.merge_method }}
           REASON: ${{ steps.detect.outputs.reason }}
           RISKY: ${{ steps.risk.outputs.risky }}
@@ -2249,6 +2280,40 @@ jobs:
               refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
             fi
             echo "Arming as $arm_as (user credential)."
+          fi
+          # Arm only a revision the gates LISTED. The classifier and risk-tier
+          # steps judge the PR's LIVE files, and each records the head it read
+          # just before listing them; --match-head-commit below binds
+          # HEAD_SHA, the event's head. A head that went A → B before a
+          # listing and back to A before the arm passes --match-head-commit A,
+          # so a run that bound only HEAD_SHA armed A on a verdict about B's
+          # files (a [skip ci] B starts no run to cancel this one). So each
+          # recorded head must be HEAD_SHA. A different one stands down
+          # WITHOUT a disarm, unlike every rejection above: this run's
+          # verdict is about another revision, so it owns nothing to revoke,
+          # and a disarm could land after that head's own run validly armed
+          # it — the head-moved rule below. An empty CLASSIFIER_HEAD means
+          # that step listed nothing (no risk-paths.yml): it fails on an
+          # unreadable head, and this step never runs after a failed one. The
+          # risk-tier step records a head only when it can read one, so once
+          # it ran (RISKY is set) a missing head is an unreadable input, which
+          # disarms and fails like the reads above. Decided after the
+          # refusals, with no network call before the arm. Residual: a head
+          # that leaves and comes back between a step's head read and its own
+          # listing is invisible to every read.
+          stand_down_unlisted() { # step, the head it listed
+            echo "::notice::the $1 step listed the files of '$2', not of this run's head '${HEAD_SHA}' — not arming; a verdict about one revision must not arm another."
+            exit 0
+          }
+          if [ -n "${RISKY:-}" ] && ! [[ "${RISK_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "::error::the risk-tier step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed)."
+            disarm_then_exit 1
+          fi
+          if [ -n "${CLASSIFIER_HEAD:-}" ] && [ "$CLASSIFIER_HEAD" != "$HEAD_SHA" ]; then
+            stand_down_unlisted classifier "$CLASSIFIER_HEAD"
+          fi
+          if [ -n "${RISK_HEAD:-}" ] && [ "$RISK_HEAD" != "$HEAD_SHA" ]; then
+            stand_down_unlisted risk-tier "$RISK_HEAD"
           fi
           if [ "$BYPASS_LABEL" = "1" ]; then
             echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via approval label"

@@ -55,6 +55,15 @@
 #        ⇒ refused — the exception is an exact login match.
 #    5.  no PAT AND the base moved ⇒ the base revalidation still runs first:
 #        disarm + stood_down=base, not no-pat.
+#    2h. the classifier or risk-tier step listed the files of a head other
+#        than the event's (CLASSIFIER_HEAD / RISK_HEAD) ⇒ no arm, no disarm,
+#        exit 0 with a notice. Both steps classify the PR's LIVE files while
+#        the arm binds the event's head: a head that went A → B before a
+#        listing and back to A before the arm passes --match-head-commit A.
+#    2i. the risk-tier step ran (RISKY set) but recorded no head ⇒ disarm
+#        and exit 1, like the unreadable reads before it.
+#    2j. no step listed anything (no policy, bypass label) ⇒ the bound arm.
+#    2k. no PAT with a mismatched head ⇒ the refusal still comes first.
 #   safe-paths-automerge.yml
 #    6.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, ::error:: + summary.
 #    7.  PAT that is a user ⇒ arms, bound with --match-head-commit.
@@ -89,6 +98,16 @@
 #    7n. the pre-arm read answers a different, well-formed head (40 or 64
 #        hex) ⇒ no arm, exit 0 with the notice (that head's own run owns
 #        the decision).
+#    7s. the classify step listed the files of a different head (40 or 64
+#        hex; CLASSIFIED_HEAD) ⇒ no arm, exit 0 with a notice, and no head
+#        read: the reported A → B → A, where the pre-arm read and
+#        --match-head-commit both see the event's head A again.
+#    7t. the classified head is empty (classify's read failed) or not a SHA
+#        ⇒ no arm, exit 1 with an ::error::.
+#    7u. no PAT with an empty classified head ⇒ the refusal still comes
+#        first (exit 0).
+#    7v. tier 3 listed a different head (TIER3_HEAD) ⇒ no arm, exit 0.
+#    7w. tier 3 listed nothing (no caller policy, empty TIER3_HEAD) ⇒ arms.
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
@@ -117,6 +136,8 @@
 #    10e. each read's reset alone planted back ⇒ a failed read's SHA on
 #        stdout reads as a moved head (cases 7h and 7m can fail, and the
 #        stub's `sha` shape really prints a SHA).
+#    9e/10f. each step's listed-head comparison replaced by `false` ⇒ the
+#        mismatched-head case arms (cases 2h and 7s can fail).
 #
 # Structural pins (hardcoded, not derived from the files under test):
 #   * exactly ONE non-comment `gh pr merge --auto` per workflow, and both
@@ -127,6 +148,9 @@
 #     secrets.automerge_pat, in both arm steps;
 #   * GH_TOKEN keeps its `|| github.token` fallback: the Dependabot path
 #     and the pre-arm revalidation reads/disarms run without a PAT;
+#   * each arm step reads the listed heads from the listing steps' own
+#     `classified_head` outputs — a mapping to the event's SHA would make
+#     every comparison vacuous;
 #   * automerge_pat stays `required: false` in both: a required secret
 #     fails a misconfigured caller at STARTUP, which would also stop the
 #     hold-label and error revokes that protect already-armed PRs;
@@ -234,6 +258,21 @@ for wf in "$CA" "$SP"; do
     fail "$wf: the automerge_pat docstring still offers a GitHub App token — GITHUB_TOKEN is one, and its merges keep the branch"
   else
     pass "$wf: docstring asks for a user PAT, not an App token"
+  fi
+done
+
+# The listed heads come from the listing steps' own outputs. Mapped to the
+# event's SHA instead, every comparison in the cases below would hold
+# trivially and the binding would be decorative.
+for pin in "$SP|CLASSIFIED_HEAD: \${{ steps.classify.outputs.classified_head }}" \
+           "$SP|TIER3_HEAD: \${{ steps.classifier_hold.outputs.classified_head }}" \
+           "$CA|CLASSIFIER_HEAD: \${{ steps.classifier_verdict.outputs.classified_head }}" \
+           "$CA|RISK_HEAD: \${{ steps.risk.outputs.classified_head }}"; do
+  wf=${pin%%|*}; line=${pin#*|}
+  if grep -qF -- "$line" <<< "$(step_header "$wf")"; then
+    pass "$wf: the arm step reads ${line%%:*} from the listing step's own output"
+  else
+    fail "$wf: the arm step lacks '$line' — its binding check would compare the wrong head"
   fi
 done
 
@@ -378,6 +417,13 @@ chmod +x "$T/bin/gh" "$T/bin/sleep"
 
 HEAD="c0ffee0000000000000000000000000000000001"
 
+# CASE_* knobs (env) override a step input for one case; unset, each takes
+# the common path's value. The listed heads default to the event's head:
+# every listing step listed it. An empty value is passed through as empty.
+#   CASE_CLASSIFIED_HEAD / CASE_TIER3_HEAD     — safe-paths' listed heads
+#   CASE_CLASSIFIER_HEAD / CASE_RISK_HEAD      — claude-author's listed heads
+#   CASE_RISKY / CASE_BYPASS_LABEL / CASE_BYPASS_CODEX — claude-author's
+#                                                verdicts (default 0, 0, 0)
 run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T/summary
   : > "$T/gh.log"; : > "$T/ghout"; : > "$T/summary"; rm -f "$T/user_calls" "$T/head_reads" "$T/view_reads"
   echo "${STUB_ARMED_BY:-none}" > "$T/arm_state"
@@ -386,9 +432,12 @@ run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T
       ARM_STATE="$T/arm_state" VIEW_READS="$T/view_reads" STUB_ERRORS="$T/stub_errors" \
       GITHUB_OUTPUT="$T/ghout" GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
       GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
-      HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY=0 \
-      BYPASS_LABEL=0 BYPASS_CODEX=0 GATE_BASE_REF=main GATE_BODY_SHA="" \
+      HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY="${CASE_RISKY-0}" \
+      BYPASS_LABEL="${CASE_BYPASS_LABEL-0}" BYPASS_CODEX="${CASE_BYPASS_CODEX-0}" \
+      GATE_BASE_REF=main GATE_BODY_SHA="" \
       DEFAULT_BRANCH=main OPTIN_LABEL=auto-merge-nonmain \
+      CLASSIFIED_HEAD="${CASE_CLASSIFIED_HEAD-$HEAD}" TIER3_HEAD="${CASE_TIER3_HEAD-$HEAD}" \
+      CLASSIFIER_HEAD="${CASE_CLASSIFIER_HEAD-$HEAD}" RISK_HEAD="${CASE_RISK_HEAD-$HEAD}" \
       USING_PAT="$2" PR_AUTHOR="$3"
     bash "$1" ) > "$T/out.log" 2>&1 || rc=$?
   echo "rc=$rc" >> "$T/out.log"
@@ -555,6 +604,69 @@ if disarmed && has "$T/ghout" "stood_down=base" && ! has "$T/ghout" "stood_down=
   pass "5: no PAT + moved base ⇒ the base revalidation still disarms first (stood_down=base)"
 else
   fail "5: the attribution gate pre-empted the base revalidation's disarm"; dump
+fi
+
+# 2h–2k: the arm binds to the heads the classifier and risk-tier steps
+# LISTED. Both classify the PR's LIVE files while --match-head-commit binds
+# the event's head, so a head that went A → B before a listing and back to A
+# before the arm would arm A on a verdict about B's files.
+OTHER="0000000000000000000000000000000000000bad"
+for which in classifier risk-tier; do
+  case "$which" in
+    classifier) export CASE_CLASSIFIER_HEAD="$OTHER" ;;
+    risk-tier) export CASE_RISK_HEAD="$OTHER" ;;
+  esac
+  run_step "$T/ca.sh" 1 "topcoder1"
+  unset CASE_CLASSIFIER_HEAD CASE_RISK_HEAD
+  if ! armed && ! disarmed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
+     && ! has "$T/ghout" "armed=1" && ! has "$T/ghout" "stood_down=" \
+     && has "$T/out.log" "the $which step listed the files of '$OTHER', not of this run's head '$HEAD'"; then
+    pass "2h: claude-author, the $which step listed a different head ⇒ no arm, no disarm, exit 0 with the notice"
+  else
+    fail "2h: claude-author armed its event's head on a $which verdict about another head's files"; dump
+  fi
+done
+
+# 2i: the risk-tier step ran (RISKY is set) but recorded no head — it keeps
+# going on an unreadable head so that its revoke still works — ⇒ an
+# unreadable input like the reads above it: disarm, exit 1, no arm and no
+# stood_down label. risky=1 reaches the arm only through a bypass (the Codex
+# one here).
+for risky in 0 1; do
+  export CASE_RISK_HEAD="" CASE_RISKY="$risky" CASE_BYPASS_CODEX="$risky"
+  run_step "$T/ca.sh" 1 "topcoder1"
+  unset CASE_RISK_HEAD CASE_RISKY CASE_BYPASS_CODEX
+  if ! armed && disarmed && has "$T/out.log" "rc=1" && ! has "$T/ghout" "armed=1" \
+     && ! has "$T/ghout" "stood_down=" \
+     && has "$T/out.log" "::error::the risk-tier step could not read the PR's head before listing its files"; then
+    pass "2i: claude-author, the risk-tier step ran (risky=$risky) without a head ⇒ disarms, no arm, exit 1"
+  else
+    fail "2i: claude-author armed on a risk-tier verdict that carries no head (risky=$risky)"; dump
+  fi
+done
+
+# 2j: nothing listed — no risk-paths.yml (no classifier head) and the bypass
+# label skipped the risk-tier step (RISKY empty) ⇒ the bound arm, as before.
+export CASE_CLASSIFIER_HEAD="" CASE_RISK_HEAD="" CASE_RISKY="" CASE_BYPASS_LABEL=1
+run_step "$T/ca.sh" 1 "topcoder1"
+unset CASE_CLASSIFIER_HEAD CASE_RISK_HEAD CASE_RISKY CASE_BYPASS_LABEL
+if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https://github.com/stub/repo/pull/42" \
+   && has "$T/ghout" "armed=1" && has "$T/out.log" "rc=0"; then
+  pass "2j: claude-author, no step listed (no policy, bypass label) ⇒ arms, head-bound"
+else
+  fail "2j: a run whose gates listed nothing must still arm"; dump
+fi
+
+# 2k: the refusals still come first: no PAT with a mismatched head ends on
+# stood_down=no-pat, which the reconciler labels, not on a silent stand-down.
+export CASE_RISK_HEAD="$OTHER"
+run_step "$T/ca.sh" 0 "topcoder1"
+unset CASE_RISK_HEAD
+if ! armed && has "$T/ghout" "stood_down=no-pat" && has "$T/out.log" "rc=0" \
+   && ! has "$T/out.log" "listed the files of"; then
+  pass "2k: claude-author, no PAT and a mismatched risk-tier head ⇒ the refusal (stood_down=no-pat)"
+else
+  fail "2k: a mismatched head pre-empted the no-PAT refusal"; dump
 fi
 
 # ---------------------------------------------------------------------------
@@ -776,6 +888,74 @@ for other in "0000000000000000000000000000000000000bad" "$(printf 'c0ffee%058d' 
     fail "7n: a positively read moved ${#other}-hex head must stand down with the notice, not fail"; dump
   fi
 done
+
+# 7s–7w: the arm binds to the heads the classify step and tier 3 LISTED, not
+# only to the event's head. Both list the PR's LIVE files; a head that went
+# A → B before a listing and back to A before the pre-arm read passes that
+# read and --match-head-commit A, so the run armed A on a verdict about B's
+# files. These checks come before the pre-arm read: no head is read.
+for other in "$OTHER" "$(printf 'c0ffee%058d' 4)"; do
+  export CASE_CLASSIFIED_HEAD="$other"
+  run_step "$T/sp.sh" 1 "wxacoeur"
+  unset CASE_CLASSIFIED_HEAD
+  if ! armed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
+     && has "$T/out.log" "the classify step listed the files of '$other', not of this run's head '$HEAD'" \
+     && [ "$(head_reads)" = "0" ]; then
+    pass "7s: safe-paths, the classify step listed a different ${#other}-hex head ⇒ no arm, exit 0 with the notice"
+  else
+    fail "7s: safe-paths armed its event's head on a verdict about another head's files (${#other}-hex)"; dump
+  fi
+done
+
+# 7t: an unknown classified head (classify's read failed, so it recorded
+# nothing; or anything that is not a SHA) fails the step: no newer run may be
+# coming, and nothing ties the verdict to the head the arm would bind.
+for value in "" '{"message":"Server Error","status":"502"}'; do
+  export CASE_CLASSIFIED_HEAD="$value"
+  run_step "$T/sp.sh" 1 "wxacoeur"
+  unset CASE_CLASSIFIED_HEAD
+  if ! armed && has "$T/out.log" "rc=1" && [ "$(head_reads)" = "0" ] \
+     && has "$T/out.log" "::error::the classify step could not read the PR's head before listing its files"; then
+    pass "7t: safe-paths, classified head '${value:-<empty>}' ⇒ no arm, exit 1 with the ::error::"
+  else
+    fail "7t: safe-paths armed, or stood down quietly, with classified head '${value:-<empty>}'"; dump
+  fi
+done
+
+# 7u: the refusals still come first: a no-PAT run with an unknown classified
+# head ends on its refusal (exit 0, naming the fix), not on the ::error::.
+export CASE_CLASSIFIED_HEAD=""
+run_step "$T/sp.sh" 0 "wxacoeur"
+unset CASE_CLASSIFIED_HEAD
+if ! armed && has "$T/out.log" "rc=0" && has "$T/out.log" "::error::No automerge_pat reached this workflow." \
+   && ! has "$T/out.log" "could not read the PR's head before listing"; then
+  pass "7u: safe-paths, no PAT and an unknown classified head ⇒ the refusal (exit 0), not the classified-head error"
+else
+  fail "7u: an unknown classified head pre-empted the no-PAT refusal"; dump
+fi
+
+# 7v: tier 3 listed a different head ⇒ the same stand-down.
+export CASE_TIER3_HEAD="$OTHER"
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset CASE_TIER3_HEAD
+if ! armed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
+   && has "$T/out.log" "tier 3 listed the files of '$OTHER', not of this run's head '$HEAD'"; then
+  pass "7v: safe-paths, tier 3 listed a different head ⇒ no arm, exit 0 with the notice"
+else
+  fail "7v: safe-paths armed its event's head on a tier-3 verdict about another head's files"; dump
+fi
+
+# 7w: no caller policy, so tier 3 listed nothing and recorded no head ⇒ the
+# bound arm, as before.
+export CASE_TIER3_HEAD=""
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset CASE_TIER3_HEAD
+if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https://github.com/stub/repo/pull/42" \
+   && has "$T/out.log" "rc=0"; then
+  pass "7w: safe-paths, tier 3 listed nothing (no caller policy) ⇒ arms, bound to the classified head"
+else
+  fail "7w: a policy-free run must still arm"; dump
+fi
 
 export STUB_USER_FAIL_TIMES=3
 run_step "$T/sp.sh" 1 "wxacoeur"
@@ -1026,6 +1206,44 @@ PY
   fi
 else
   fail "10e: negative control — a head read's reset is missing, so it cannot be planted back"
+fi
+
+# 9e / 10f: each step's listed-head comparison replaced by `false`. The
+# mismatched-head case must then arm: cases 2h and 7s see the binding, not
+# some other stand-down.
+unbind() { # script, out, the one comparison to replace
+  python3 - "$1" "$2" "$3" <<'PY'
+import sys
+src, out, needle = sys.argv[1:]
+text = open(src).read()
+if text.count(needle) != 1:
+    sys.exit(f"cannot unbind: {needle!r} appears {text.count(needle)} times")
+open(out, "w").write(text.replace(needle, "false"))
+PY
+}
+if unbind "$T/ca.sh" "$T/ca_unbound.sh" '[ "$RISK_HEAD" != "$HEAD_SHA" ]'; then
+  export CASE_RISK_HEAD="$OTHER"
+  run_step "$T/ca_unbound.sh" 1 "topcoder1"
+  unset CASE_RISK_HEAD
+  if armed; then
+    pass "9e: negative control — without the risk-tier head comparison, claude-author arms on another head's verdict (case 2h can fail)"
+  else
+    fail "9e: negative control — the unbound claude-author step did not arm; case 2h proves nothing"; dump
+  fi
+else
+  fail "9e: negative control — claude-author's arm step has no risk-tier head comparison to replace"
+fi
+if unbind "$T/sp.sh" "$T/sp_unbound.sh" '[ "$CLASSIFIED_HEAD" != "$HEAD_SHA" ]'; then
+  export CASE_CLASSIFIED_HEAD="$OTHER"
+  run_step "$T/sp_unbound.sh" 1 "wxacoeur"
+  unset CASE_CLASSIFIED_HEAD
+  if armed; then
+    pass "10f: negative control — without the classified-head comparison, safe-paths arms on another head's verdict (case 7s can fail)"
+  else
+    fail "10f: negative control — the unbound safe-paths step did not arm; case 7s proves nothing"; dump
+  fi
+else
+  fail "10f: negative control — safe-paths' arm step has no classified-head comparison to replace"
 fi
 
 # A failure shape the stub does not know is swallowed by the step under test

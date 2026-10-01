@@ -61,6 +61,10 @@ and on the bypass paths it only delays the arm.
    failing open, or matching by substring or by `grep -xF`, the head check
    placed before the label read, the comment posting without a verified
    revoke, and the error revoke ignoring a failed Option B probe.
+7. The arm binds to the head the risk-tier step LISTED: a head that went
+   A → B before that listing and back to A before the arm (where
+   --match-head-commit sees the event's head A again) is not armed on a
+   verdict about B's files.
 """
 
 import copy
@@ -468,6 +472,10 @@ def api(args):
         unexpected()
     route = urllib.parse.urlsplit(endpoint.lstrip("/")).path
     if (method, route) == ("GET", "user"):
+        if state["knobs"].get("head_on_arm"):
+            # The arm step's first call: a push puts the event's head back.
+            state["head_sha"] = state["knobs"]["head_on_arm"]
+            state["knobs"]["head_on_arm"] = ""
         if token != PAT:
             http_error(403, "Resource not accessible by integration")
         emit({"login": "pat-user", "type": "User"}, jq)
@@ -588,6 +596,7 @@ class Revision:
     checks_read_fails: bool = False  # the check-runs read answers an HTML 502
     labels_fail_for: str = ""  # the step whose live-label reads answer HTTP 502
     head_moves_on_labels_read: str = ""  # the step whose label read sees a push land
+    head_returns_on_arm: bool = False  # the event's head is back as the arm step starts
 
 
 class Stub:
@@ -677,6 +686,9 @@ class Stub:
             "checks_read_fails": rev.checks_read_fails,
             "labels_fail_for": rev.labels_fail_for,
             "head_moves_on_labels_read": rev.head_moves_on_labels_read,
+            "head_on_arm": (rev.event_head_sha or rev.head_sha)
+            if rev.head_returns_on_arm
+            else "",
         }
         s["disarm_failures_left"] = 1 if rev.disarm_fails_once else 0
         s["calls"], s["disables"], s["arm_calls"] = [], [], 0
@@ -1375,3 +1387,30 @@ def test_a_mutated_workflow_breaks_what_its_case_pins(
 ):
     job = scenario(tmp_path, mutate(copy.deepcopy(STEPS)))
     assert broken(job), f"the mutant went unnoticed by the case that pins it:\n{job}"
+
+
+# ---------------------------------------------------------------------------
+# 7. The arm binds to the head the risk-tier step listed.
+# ---------------------------------------------------------------------------
+def test_a_head_that_came_back_is_not_armed_on_the_risk_tier_verdict(tmp_path):
+    """A → B → A. The event's head A adds src/auth/login.py; B, a [skip ci]
+    revert of it that starts no run to cancel this one, is the head while
+    the risk-tier step lists, so that verdict is clean; A is pushed back
+    before the arm step. --match-head-commit then matches A, the event's
+    head, so binding only to that armed A on a verdict about B's files."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        Revision(
+            CLEAN,  # B's diff, which is what the risk-tier step lists
+            head_sha="2" * 40,  # B, the live head while the gates list
+            event_head_sha="1" * 40,  # A, the event's head
+            head_returns_on_arm=True,  # A is back as the arm step starts
+        ),
+    )
+    assert job.arms == 0 and job.arm == "OFF", (
+        f"the run armed its event's head on a verdict about another head's files:\n{job}"
+    )
+    assert job.out("risk").get("risky") == "0", str(job)
+    assert job.out("risk").get("classified_head") == "2" * 40, str(job)
+    assert job.outcome("arm") == "success" and "armed" not in job.out("arm"), str(job)

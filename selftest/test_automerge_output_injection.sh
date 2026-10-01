@@ -43,13 +43,15 @@ if grep -q '\${{' "$T/risk.sh"; then
   exit 1
 fi
 
-# Stub `gh`: the block makes two files-API calls — `.filename` (changed list)
-# and `.previous_filename` (rename sources). Discriminate on the --jq text.
+# Stub `gh`: the block reads the PR's head (`.head.sha`) and makes two
+# files-API calls — `.filename` (changed list) and `.previous_filename`
+# (rename sources). Discriminate on the --jq text.
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
+    .head.sha) echo "c0ffee0000000000000000000000000000000001"; exit 0 ;;
     *previous_filename*) cat "$FAKE_RENAMES"; exit 0 ;;
   esac
 done

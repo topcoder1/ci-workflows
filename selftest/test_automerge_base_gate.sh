@@ -134,14 +134,17 @@ fi
 # path, and passed vacuously (found 2026-09-18). The line-count floor and the
 # negative control below keep it honest.
 #
-# One named exception is stripped alongside disarm_then_exit:
-# refuse_unattributed_arm, the attribution gate, which deliberately does NOT
-# disarm (any arm already on the PR is user-attributed — see its comment in
-# the workflow). selftest/test_automerge_pat_attribution_gate.sh pins that it
-# never calls --disable-auto.
+# Two named exceptions are stripped alongside disarm_then_exit, both of which
+# deliberately do NOT disarm: refuse_unattributed_arm, the attribution gate
+# (any arm already on the PR is user-attributed — see its comment in the
+# workflow), and stand_down_unlisted, the listed-head stand-down (its run's
+# verdict is about another revision, so it owns nothing to revoke — the same
+# rule as the head-moved branch after the arm).
+# selftest/test_automerge_pat_attribution_gate.sh pins that the first never
+# calls --disable-auto and that the second disarms nothing (case 2h).
 prearm_of() {
   awk '!/^[[:space:]]*#/ && /gh pr merge --auto/{armed=1} !armed {print}' \
-    | awk '/(disarm_then_exit|refuse_unattributed_arm)\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf'
+    | awk '/(disarm_then_exit|refuse_unattributed_arm|stand_down_unlisted)\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf'
 }
 prearm=$(prearm_of <<< "$enable_block")
 prearm_lines=$(printf '%s\n' "$prearm" | wc -l | tr -d ' ')
