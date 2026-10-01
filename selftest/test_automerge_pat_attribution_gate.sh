@@ -516,8 +516,9 @@ export STUB_ARMED_BY="bot" STUB_ARMED_BY_FAIL_TIMES=1
 run_step "$T/ca.sh" 1 "topcoder1"
 unset STUB_ARMED_BY STUB_ARMED_BY_FAIL_TIMES
 if has "$T/out.log" "rc=1" && ! has "$T/ghout" "armed=1" \
-   && has "$T/out.log" "::error::after arming, auto-merge is enabled by 'bot'" && disarmed; then
-  pass "2g: the first arm read fails and a BOT's arm stays ⇒ the read-back after the arm catches it, removes it, exit 1"
+   && has "$T/out.log" "::error::after arming, auto-merge is enabled by 'bot'" && disarmed \
+   && [ "$(disarm_tokens)" = "bot-stub" ]; then
+  pass "2g: the first arm read fails and a BOT's arm stays ⇒ the read-back after the arm catches it, removes it as github-actions[bot], exit 1"
 else
   fail "2g: an arm left with a bot as enabler must not be reported as armed (review pass 2, #1)"; dump
 fi
@@ -853,8 +854,9 @@ fi
 export STUB_ARMED_BY="bot" STUB_ARMED_BY_FAIL_TIMES=1
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_ARMED_BY STUB_ARMED_BY_FAIL_TIMES
-if has "$T/out.log" "rc=1" && has "$T/out.log" "::error::after arming, auto-merge is enabled by 'bot'" && disarmed; then
-  pass "8d: safe-paths, the first arm read fails and a BOT's arm stays ⇒ caught after the arm, removed, exit 1"
+if has "$T/out.log" "rc=1" && has "$T/out.log" "::error::after arming, auto-merge is enabled by 'bot'" && disarmed \
+   && [ "$(disarm_tokens)" = "bot-stub" ]; then
+  pass "8d: safe-paths, the first arm read fails and a BOT's arm stays ⇒ caught after the arm, removed as github-actions[bot], exit 1"
 else
   fail "8d: safe-paths must not leave a bot's arm behind when the first read failed (review pass 2, #1)"; dump
 fi

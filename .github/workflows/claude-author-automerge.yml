@@ -2051,8 +2051,8 @@ jobs:
           # either when this step exits 0. Without the disarm, the change
           # would be detected and then ignored, the stale arm merging anyway.
           #
-          # Every disarm here runs as github-actions[bot], like every revoke
-          # in this workflow: the manual-hold step's Signal 2 reads an
+          # Every disarm here runs as github-actions[bot] first, like every
+          # revoke in this workflow: the manual-hold step's Signal 2 reads an
           # auto_merge_disabled by any other actor as a HUMAN's durable hold.
           # A stand-down arms nothing after its disarm, so that disarm is the
           # PR's newest auto-merge event, and under the PAT it held the PR on

@@ -250,7 +250,7 @@ run_block() {
   (
     export PATH="$T/bin:$PATH" STUB_DIR="$S" EVENT_HEAD EVENT_BASE=main \
       GITHUB_OUTPUT="$S/ghout" GITHUB_REPOSITORY="stub/repo" REPO="stub/repo" \
-      GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
+      GH_TOKEN=stub BOT_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
       HEAD_SHA="$EVENT_HEAD" GATE_BASE_REF=main GATE_BODY_SHA="" \
       ACTOR='dependabot[bot]' NON_BOT=1 METHOD=squash REASON="branch=claude/x" \
       RISKY=0 BYPASS_LABEL=0 BYPASS_CODEX=0 USING_PAT=1 PR_AUTHOR=topcoder1 \
