@@ -356,7 +356,7 @@ if [ "$1" = "api" ]; then
                echo "gh: Server Error (HTTP 502)" >&2 ;;
           stderr) echo "error connecting to api.github.com" >&2 ;;
           sha) echo "0000000000000000000000000000000000000bad" ;;
-          *) echo "STUB: unknown head-read failure '$fail'" >&2; exit 99 ;;
+          *) echo "STUB: unknown head-read failure '$fail'" >&2; echo "$fail" >> "$STUB_ERRORS"; exit 99 ;;
         esac
         exit 1
       fi
@@ -378,7 +378,7 @@ run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T
   echo "${STUB_ARMED_BY:-none}" > "$T/arm_state"
   local rc=0
   ( export PATH="$T/bin:$PATH" GH_LOG="$T/gh.log" USER_CALLS="$T/user_calls" HEAD_READS="$T/head_reads" \
-      ARM_STATE="$T/arm_state" VIEW_READS="$T/view_reads" \
+      ARM_STATE="$T/arm_state" VIEW_READS="$T/view_reads" STUB_ERRORS="$T/stub_errors" \
       GITHUB_OUTPUT="$T/ghout" GITHUB_STEP_SUMMARY="$T/summary" GITHUB_REPOSITORY="stub/repo" \
       GH_TOKEN=stub PR=42 PR_URL="https://github.com/stub/repo/pull/42" \
       HEAD_SHA="$HEAD" METHOD=squash REASON="branch=claude/x" RISKY=0 \
@@ -1012,6 +1012,16 @@ PY
   fi
 else
   fail "10e: negative control — a head read's reset is missing, so it cannot be planted back"
+fi
+
+# A failure shape the stub does not know is swallowed by the step under test
+# (the read just comes back empty), so a misspelled knob would quietly turn a
+# case into a different one. The stub records every unknown shape it was
+# handed, across all runs above.
+if [ -s "$T/stub_errors" ]; then
+  fail "the gh stub was handed unknown head-read failure shape(s): $(sort -u "$T/stub_errors" | tr '\n' ' ')— a misspelled knob turned a case into an empty read"
+else
+  pass "every head-read failure shape a case asked for is one the stub knows"
 fi
 
 # ---------------------------------------------------------------------------
