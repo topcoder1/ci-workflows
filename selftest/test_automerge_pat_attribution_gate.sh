@@ -290,9 +290,14 @@ fi
 #       STUB_HEAD_FIRST_FAIL       — the first STUB_HEAD_FIRST_FAIL_TIMES head
 #                                    reads (default 3: every attempt of
 #                                    safe-paths' pre-arm read) fail, in the
-#                                    same shapes
+#                                    same shapes. "Later" reads are every
+#                                    read after the first, so pre-arm
+#                                    retries past those failures take the
+#                                    STUB_HEAD_LATER(_FAIL) answers.
+#     `sleep` is a no-op that logs "sleep <s>" to the gh call log.
 #       STUB_USER_TYPE             — GET /user's `type` (default User)
-#       STUB_USER_FAIL_TIMES       — first N /user reads exit 1 (a 403)
+#       STUB_USER_FAIL_TIMES       — first N /user reads exit 1 (a 403, with
+#                                    gh's error line on stderr)
 #     `gh pr merge --auto` models GitHub: it sets the enabler only when the
 #     PR is not armed (USING_PAT=1 ⇒ the user, else the Actions bot) and
 #     KEEPS an existing enabler — measured 2026-09-18.
@@ -327,7 +332,7 @@ case "$1 $2" in
 esac
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then
   n=$(cat "$USER_CALLS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$USER_CALLS"
-  [ "$n" -le "${STUB_USER_FAIL_TIMES:-0}" ] && exit 1
+  if [ "$n" -le "${STUB_USER_FAIL_TIMES:-0}" ]; then echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; fi
   printf '{"login":"topcoder1","type":"%s"}\n' "${STUB_USER_TYPE:-User}" | jq -r "$(jq_filter "$@")"
   exit $?
 fi
@@ -368,7 +373,7 @@ if [ "$1" = "api" ]; then
 fi
 exit 0
 STUB
-printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/sleep"
+printf '#!/usr/bin/env bash\necho "sleep $*" >> "${GH_LOG:-/dev/null}"\nexit 0\n' > "$T/bin/sleep"
 chmod +x "$T/bin/gh" "$T/bin/sleep"
 
 HEAD="c0ffee0000000000000000000000000000000001"
@@ -390,6 +395,13 @@ run_step() { # script, using_pat, author → $T/out.log, $T/gh.log, $T/ghout, $T
 }
 has() { grep -qF -- "$2" "$1"; }
 armed() { grep -q 'gh pr merge --auto' "$T/gh.log"; }
+# No backoff sleep sits between the last head read before the arm and the
+# arm itself: the read-to-arm window stays as tight as one call.
+no_sleep_before_arm() {
+  awk '/--jq \.head\.sha/ { r = NR; s = 0 } /^sleep / { if (r) s = 1 }
+       /^gh pr merge --auto/ && !done { ok = (r && !s); done = 1 }
+       END { exit !(done && ok) }' "$T/gh.log"
+}
 disarmed() { grep -q 'gh pr merge --disable-auto' "$T/gh.log"; }
 user_calls() { grep -c '^gh api user' "$T/gh.log" || true; }
 # Codex round 3: the /user probe's retries must never sit between a
@@ -559,8 +571,8 @@ fi
 
 run_step "$T/sp.sh" 1 "wxacoeur"
 if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https://github.com/stub/repo/pull/42" \
-   && has "$T/out.log" "rc=0"; then
-  pass "7: safe-paths, user PAT ⇒ arms, bound to the classified head"
+   && has "$T/out.log" "rc=0" && no_sleep_before_arm; then
+  pass "7: safe-paths, user PAT ⇒ arms, bound to the classified head, no sleep between the head read and the arm"
 else
   fail "7: safe-paths with a user PAT should arm with --match-head-commit"; dump
 fi
@@ -710,8 +722,9 @@ export STUB_HEAD_FIRST_FAIL=502 STUB_HEAD_FIRST_FAIL_TIMES=2
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_HEAD_FIRST_FAIL STUB_HEAD_FIRST_FAIL_TIMES
 if has "$T/gh.log" "gh pr merge --auto --squash --match-head-commit $HEAD https://github.com/stub/repo/pull/42" \
-   && has "$T/out.log" "rc=0" && [ "$(head_reads)" = "3" ] && ! has "$T/out.log" "::error::"; then
-  pass "7o: safe-paths, the pre-arm head read fails twice then answers ⇒ arms, bound to the classified head"
+   && has "$T/out.log" "rc=0" && [ "$(head_reads)" = "3" ] && ! has "$T/out.log" "::error::" \
+   && no_sleep_before_arm; then
+  pass "7o: safe-paths, the pre-arm head read fails twice then answers ⇒ arms, bound to the classified head, no sleep after the good read"
 else
   fail "7o: a transient pre-arm read failure must be retried, not end the run"; dump
 fi
@@ -733,8 +746,9 @@ export STUB_HEAD_FIRST_FAIL=403 STUB_USER_FAIL_TIMES=3
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_HEAD_FIRST_FAIL STUB_USER_FAIL_TIMES
 if ! armed && has "$T/out.log" "rc=0" && has "$T/out.log" "::error::automerge_pat is not a user credential" \
-   && [ "$(head_reads)" = "0" ] && ! has "$T/out.log" "could not read the live head"; then
-  pass "7q: safe-paths, a rejected credential while the API fails ⇒ the refusal (exit 0), no head read"
+   && [ "$(head_reads)" = "0" ] && ! has "$T/out.log" "could not read the live head" \
+   && has "$T/out.log" "gh: Resource not accessible by integration (HTTP 403)"; then
+  pass "7q: safe-paths, a rejected credential while the API fails ⇒ the refusal (exit 0), no head read, gh's /user error in the log"
 else
   fail "7q: a failing head read must not pre-empt the rejected-credential refusal"; dump
 fi

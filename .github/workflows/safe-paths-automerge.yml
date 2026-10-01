@@ -995,11 +995,13 @@ jobs:
           # The GET /user probe runs FIRST, before the head read below (Codex
           # round 3): its retries and backoff take seconds, and that time must
           # not sit between the head read and the arm. Only the answer is
-          # recorded here; the decision comes after the bot-arm removal.
+          # recorded here; the decision comes after the bot-arm removal. gh's
+          # error line stays in the log: a 403 here is an App token's, or a
+          # rate limit's, and the refusal below cannot tell which.
           arm_as=""
           if [ "$PR_AUTHOR" != "dependabot[bot]" ] && [ "$USING_PAT" = "1" ]; then
             for _ in 1 2 3; do
-              if arm_as=$(gh api user --jq 'select(.type == "User") | .login' 2>/dev/null); then
+              if arm_as=$(gh api user --jq 'select(.type == "User") | .login'); then
                 break
               fi
               arm_as=""
@@ -1026,10 +1028,10 @@ jobs:
             fi
           fi
           # The attribution decision, from the answers recorded above (no
-          # network call). It comes before the head read, so a run that must
-          # refuse always ends on its refusal (exit 0, naming the fix): an API
-          # error at the head read would otherwise turn that deliberate
-          # abstention into a red run and hide the fix.
+          # network call). It comes before the head read, so an API error at
+          # that read cannot pre-empt a refusal: it would turn the deliberate
+          # abstention (exit 0, naming the fix) into a red run and hide the
+          # fix.
           if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
             if [ "$USING_PAT" != "1" ]; then
               refuse_unattributed_arm "No automerge_pat reached this workflow."
@@ -1047,11 +1049,11 @@ jobs:
           # moved head stands down: its own run arms it. An unreadable head
           # fails CLOSED and, after 3 attempts, fails the step: no newer run
           # may be coming, so a quiet stand-down would leave the PR unarmed
-          # with nothing to say why. A read counts
-          # only when it is a SHA: `gh api` prints an HTTP error's JSON body
-          # to stdout even with --jq (gh 2.89), and that body used to read as
-          # a moved head. gh's own error line stays in the log (no
-          # 2>/dev/null), so a lasting 404 or 403 can be told from a blip.
+          # with nothing to say why. A read counts only when it is a SHA:
+          # `gh api` prints an HTTP error's JSON body to stdout even with --jq
+          # (gh 2.89), and that body used to read as a moved head. gh's own
+          # error line stays in the log (no 2>/dev/null), so a lasting 404 or
+          # 403 can be told from a blip.
           now=""
           for _ in 1 2 3; do
             now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha) || now=""
@@ -1060,7 +1062,7 @@ jobs:
             sleep 2
           done
           if [ -z "$now" ]; then
-            echo "::error::could not read the live head before arming after 3 attempts (gh's error is in the log) — not arming (fail closed). Re-run this PR's newest safe-paths run (re-running an older one can cancel a newer head's run); if it fails the same way, the token cannot read this PR: check automerge_pat."
+            echo "::error::could not read the live head before arming after 3 attempts (gh's error, if it gave one, is in the log) — not arming (fail closed). Re-run this PR's newest safe-paths run (re-running an older one can cancel a newer head's run); if it fails the same way, the token cannot read this PR: check automerge_pat, or github.token on a Dependabot PR."
             exit 1
           fi
           if [ "$now" != "$HEAD_SHA" ]; then
