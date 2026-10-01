@@ -254,7 +254,8 @@ run_block() {
       HEAD_SHA="$EVENT_HEAD" GATE_BASE_REF=main GATE_BODY_SHA="" \
       ACTOR='dependabot[bot]' NON_BOT=1 METHOD=squash REASON="branch=claude/x" \
       RISKY=0 BYPASS_LABEL=0 BYPASS_CODEX=0 USING_PAT=1 PR_AUTHOR=topcoder1 \
-      DEFAULT_BRANCH=main OPTIN_LABEL=auto-merge-nonmain
+      DEFAULT_BRANCH=main OPTIN_LABEL=auto-merge-nonmain \
+      CLASSIFIER_HEAD="$EVENT_HEAD" RISK_HEAD="$EVENT_HEAD"
     bash "$1"
   ) > "$T/out" 2>&1 < /dev/null || rc=$?
   echo "rc=$rc" >> "$T/out"

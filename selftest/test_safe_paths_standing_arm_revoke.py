@@ -47,7 +47,11 @@ condition or an env mapping that drifts changes the verdict.
    before listing (a stale re-run acts on the live head it classified; an
    unknown head never defers to the event's SHA), and re-checks before every
    disarm, so a head pushed mid-revoke keeps the arm a sibling gave it.
-8. The enable step's removal of a bot's arm disarms the same way: as
+8. The enable step arms only a head that classify and tier 3 LISTED: a head
+   that went A → B before either listing and back to A before the arm (where
+   the pre-arm read and --match-head-commit see the event's head A again)
+   is not armed on a verdict about B's files.
+9. The enable step's removal of a bot's arm disarms the same way: as
    github-actions[bot], the PAT only after three refused attempts. When the
    step then stands down (here a push landed after its event), that removal
    is the PR's newest auto-merge event, and claude-author-automerge's own
@@ -270,6 +274,10 @@ case "${1:-} ${2:-}" in
         echo ON > "$d/arm"; exit 0 ;;
     esac ;;
   "api user")
+    if [ -e "$d/head_on_arm" ]; then
+      # The enable step's first call: a push puts the event's head back.
+      mv "$d/head_on_arm" "$d/head_sha"
+    fi
     echo '{"login": "pat-user", "type": "User"}' | out
     exit ;;
 esac
@@ -288,7 +296,7 @@ case "$url" in
       .head.sha)
         # Real gh prints an HTTP error's JSON body to STDOUT, --jq or not
         # (gh 2.89), and exits 1. The first read is classify's; every later
-        # one is the revoke step's.
+        # one is tier 3's, the revoke step's or the enable step's.
         n=$(( $(cat "$d/head_reads" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$d/head_reads"
         if { [ "$n" -eq 1 ] && [ -e "$d/first_head_read_fails" ]; } ||
@@ -305,6 +313,10 @@ case "$url" in
   "repos/__REPO__/issues/__PR__/timeline"*)
     out < "$d/timeline.json"; exit ;;
   "repos/__REPO__/contents/.github/risk-paths.yml")
+    if [ -e "$d/files_on_policy_read.json" ]; then
+      # A push lands as tier 3 reads the policy, before its own listing.
+      mv "$d/files_on_policy_read.json" "$d/files.json"; echo "__NEW_HEAD__" > "$d/head_sha"
+    fi
     [ -e "$d/risk_500" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
     [ -e "$d/risk.yml" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     base64 < "$d/risk.yml" | tr -d '\n'; echo; exit ;;
@@ -342,6 +354,8 @@ class PR:
     head_moves_on_listing: bool = False  # NEW_HEAD lands at classify's first listing
     event_head_sha: object = None  # the run's payload head when it differs (a re-run)
     classify_mktemp_fails: bool = False  # an unanticipated error inside classify
+    head_returns_on_arm: bool = False  # the event's head returns before the arm
+    files_on_policy_read: object = None  # NEW_HEAD lands with these files at tier 3
 
 
 class Stub:
@@ -428,6 +442,8 @@ class Stub:
             "head_reads",
             "move_head_on_disarm",
             "move_head_on_listing",
+            "head_on_arm",
+            "files_on_policy_read.json",
             "calls.log",
             "disable.log",
             "arm.log",
@@ -449,6 +465,12 @@ class Stub:
             (d / "move_head_on_disarm").touch()
         if pr.head_moves_on_listing:
             (d / "move_head_on_listing").touch()
+        if pr.head_returns_on_arm:
+            (d / "head_on_arm").write_text((pr.event_head_sha or pr.head_sha) + "\n")
+        if pr.files_on_policy_read is not None:
+            moved = pr.files_on_policy_read
+            rows = [{"filename": f, "status": "modified"} for f in moved]
+            (d / "files_on_policy_read.json").write_text(json.dumps(rows))
         (d / "classify.mjs").write_text(
             pr.classify_mjs if pr.classify_mjs is not None else CLASSIFY_MJS.read_text()
         )
@@ -502,8 +524,9 @@ class Job:
         return self.steps.get(step_id, {}).get("outputs", {})
 
     def verdict(self, step_id):
-        """A step's outputs minus classify's `classified_head`, the SHA it read
-        before listing: the verdict alone, which the cases compare exactly."""
+        """A step's outputs minus `classified_head`, the SHA a listing step
+        (classify, tier 3) read before listing: the verdict alone, which the
+        cases compare exactly."""
         return {k: v for k, v in self.out(step_id).items() if k != "classified_head"}
 
     def outcome(self, step_id):
@@ -754,7 +777,7 @@ def test_the_all_safe_path_still_arms_and_keeps_its_arm(tmp_path):
     assert fresh.verdict("classify") == {"all_safe": "1", "renames_safe": "1"}, str(
         fresh
     )
-    assert fresh.out("classifier_hold") == {"hold": "0"}, str(fresh)
+    assert fresh.verdict("classifier_hold") == {"hold": "0"}, str(fresh)
     assert fresh.reads("auto_merge") == 0, (
         f"the would-arm branch read the arm state:\n{fresh}"
     )
@@ -818,7 +841,7 @@ def test_a_standard_mixed_diff_keeps_a_siblings_arm(tmp_path):
     assert job.verdict("classify") == {"all_safe": "0", "standing_arm_check": "1"}, str(
         job
     )
-    assert job.out("classifier_hold") == {"hold": "0"}, str(job)
+    assert job.verdict("classifier_hold") == {"hold": "0"}, str(job)
 
 
 def test_the_bypass_label_releases_the_tier_2_verdict_only(tmp_path):
@@ -990,7 +1013,7 @@ def test_a_tier_3_error_on_this_route_revokes(tmp_path, fault, reason):
     job = run_job(
         stub, PR(["src/x.py", "docs/notes.md"], armed=True, policy=POLICY, **fault)
     )
-    assert job.out("classifier_hold") == {"hold": "1", "reason": reason}, str(job)
+    assert job.verdict("classifier_hold") == {"hold": "1", "reason": reason}, str(job)
     assert job.arm == "OFF" and job.disables >= 1, (
         f"a tier-3 error left the arm standing:\n{job}"
     )
@@ -1174,7 +1197,60 @@ def test_an_unknown_classified_head_never_defers_to_the_event_sha(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. The enable step's own disarm is recorded as github-actions[bot] too.
+# 8. The arm binds to the heads the gates listed, not only to the event's.
+# ---------------------------------------------------------------------------
+def test_a_head_that_came_back_is_not_armed_on_a_verdict_about_another(tmp_path):
+    """A → B → A. The event's head A carries a src change; B, a [skip ci]
+    revert of it that starts no run to cancel this one, is the head while
+    classify lists, so the verdict is all-safe; A is pushed back before the
+    enable step. Its pre-arm read and --match-head-commit both see A, the
+    event's head, so binding only to that armed a revision whose diff this
+    run never classified."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["docs/guide.md"],  # B's diff, which is what classify lists
+            head_sha="2" * 40,  # B, the live head while classify runs
+            event_head_sha="1" * 40,  # A, the event's head
+            head_returns_on_arm=True,  # A is back as the enable step starts
+        ),
+    )
+    assert job.arms == 0 and job.arm == "OFF", (
+        f"the run armed its event's head on a verdict about another head's files:\n{job}"
+    )
+    assert job.verdict("classify") == {"all_safe": "1", "renames_safe": "1"}, str(job)
+    assert job.out("classify").get("classified_head") == "2" * 40, str(job)
+    assert job.outcome("Enable auto-merge") == "success", str(job)
+
+
+def test_a_head_that_moved_during_tier_3_is_not_armed_on_its_verdict(tmp_path):
+    """The same shape around tier 3. classify lists A, the event's head, whose
+    one file is caller-sensitive docs (tiers 1 and 2 pass it); B, clean docs,
+    lands as tier 3 reads the policy, so tier 3 lists and clears B; A is back
+    before the enable step. Unbound, the run armed A, a revision the caller's
+    own risk-paths.yml gates."""
+    stub = Stub(tmp_path)
+    job = run_job(
+        stub,
+        PR(
+            ["docs/website/pricing.md"],  # A: `sensitive:` under POLICY
+            policy=POLICY,
+            files_on_policy_read=["docs/guide.md"],  # B lands as tier 3 starts
+            head_returns_on_arm=True,  # A is back as the enable step starts
+        ),
+    )
+    assert job.arms == 0 and job.arm == "OFF", (
+        f"the run armed a caller-gated revision on tier 3's verdict about another head:\n{job}"
+    )
+    assert job.out("classify").get("classified_head") == "a" * 40, str(job)
+    assert job.verdict("classifier_hold") == {"hold": "0"}, str(job)
+    assert job.out("classifier_hold").get("classified_head") == NEW_HEAD, str(job)
+    assert job.outcome("Enable auto-merge") == "success", str(job)
+
+
+# ---------------------------------------------------------------------------
+# 9. The enable step's own disarm is recorded as github-actions[bot] too.
 # ---------------------------------------------------------------------------
 def test_removing_a_bots_arm_before_a_stand_down_is_not_a_human_hold(tmp_path):
     """A bot's arm (a GITHUB_TOKEN arm from before the attribution gate)

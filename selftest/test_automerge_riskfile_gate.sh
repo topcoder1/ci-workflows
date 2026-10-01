@@ -221,6 +221,10 @@ fi
 #                                (classifier-deps.mjs) served verbatim;
 #                                classify.mjs imports it relatively, so the
 #                                gate cannot run without it
+#       STUB_HEAD              — the PR head the gate reads before listing
+#       STUB_HEAD_RC           — nonzero: that read fails as gh does on an
+#                                HTTP error (the JSON body on STDOUT, rc=1)
+#       STUB_CALLS             — every call is appended here, in order
 #
 #     Any rules read whose ref is neither the base ref nor the default
 #     branch exits 64 — pinning is asserted on EVERY case, not just one.
@@ -229,10 +233,19 @@ mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 args="$*"
+[ -n "${STUB_CALLS:-}" ] && printf '%s\n' "$args" >> "$STUB_CALLS"
 case "$args" in
   *issues/*/labels*)
     [ "${STUB_LABELS_RC:-0}" != "0" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
     printf '%s\n' "${STUB_LABELS:-}"
+    ;;
+  *"--jq .head.sha"*)
+    if [ "${STUB_HEAD_RC:-0}" != "0" ]; then
+      echo '{"message":"Server Error","status":"502"}'
+      echo "gh: Server Error (HTTP 502)" >&2
+      exit 1
+    fi
+    printf '%s\n' "$STUB_HEAD"
     ;;
   *contents/.github/scripts/classify.mjs*)
     base64 < "${STUB_CLASSIFY_FILE:-$REAL_CLASSIFY}"
@@ -304,15 +317,19 @@ REAL_DEPS="$PWD/$DEPS"
 # ---------------------------------------------------------------------------
 # Runner + assertions.
 # ---------------------------------------------------------------------------
+STUB_HEAD_DEFAULT="c0ffee0000000000000000000000000000000001"
 STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
 STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""; STUB_RENAMES=""; STUB_RENAMES_RC=0
 STUB_FILES="$T/files.txt"; CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
+STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0; STUB_CALLS="$T/calls.log"
 
 reset_case() {
   STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
   STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""; STUB_RENAMES=""; STUB_RENAMES_RC=0
   CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
+  STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0
   : > "$STUB_FILES"
+  : > "$STUB_CALLS"
 }
 
 run_gate() {
@@ -329,7 +346,8 @@ run_gate() {
     STUB_RISK_RC="$STUB_RISK_RC" STUB_CLASSIFY_FILE="$STUB_CLASSIFY_FILE" \
     STUB_FILES="$STUB_FILES" REAL_CLASSIFY="$REAL_CLASSIFY" \
     STUB_RENAMES="$STUB_RENAMES" STUB_RENAMES_RC="$STUB_RENAMES_RC" \
-    REAL_DEPS="$REAL_DEPS" \
+    REAL_DEPS="$REAL_DEPS" STUB_HEAD="$STUB_HEAD" STUB_HEAD_RC="$STUB_HEAD_RC" \
+    STUB_CALLS="$STUB_CALLS" \
     bash gate.sh 2>&1)
   GATE_RC=$?
   set -e
@@ -570,6 +588,64 @@ STUB_RENAMES_RC=1
 printf '%s\n' "docs/archive/loop.py" > "$STUB_FILES"
 run_gate
 expect_fail_closed "unreadable rename listing fails closed" "could not list PR rename sources"
+
+# ---------------------------------------------------------------------------
+# 16-18. THE LISTED HEAD. This step classifies the PR's LIVE files, while the
+# arm binds --match-head-commit to the event's head; a head that went A → B
+# before the listing and back to A before the arm would arm A on a verdict
+# about B's files. So the step records the head it read just BEFORE listing,
+# and the arm step requires it to be the event's head.
+# ---------------------------------------------------------------------------
+
+# 16. The head is read before the first listing and recorded.
+reset_case
+STUB_RISK_FILE="$T/risk-fixture.yml"
+printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+run_gate
+first_head=$(grep -n -m1 -F -- '--jq .head.sha' "$STUB_CALLS" | cut -d: -f1 || true)
+first_list=$(grep -n -m1 -F -- '/files' "$STUB_CALLS" | cut -d: -f1 || true)
+if [ "$GATE_RC" = "0" ] && [ "$(out_get classified_head)" = "$STUB_HEAD_DEFAULT" ] \
+   && [ -n "$first_head" ] && [ -n "$first_list" ] && [ "$first_head" -lt "$first_list" ]; then
+  echo "✓ the head read before the listing is recorded as classified_head"
+else
+  echo "✗ classified_head missing, wrong, or read after the listing — got '$(out_get classified_head)'. Calls:"
+  sed 's/^/    /' "$STUB_CALLS"
+  echo "$GATE_LOG" | sed 's/^/    /'
+  failed=1
+fi
+
+# 17. An unreadable head fails closed before any listing, in both shapes: an
+#     HTTP error on every attempt (gh prints its JSON body to STDOUT, rc=1)
+#     and a read that answers something other than a SHA.
+for shape in rc body; do
+  reset_case
+  STUB_RISK_FILE="$T/risk-fixture.yml"
+  case "$shape" in
+    rc) STUB_HEAD_RC=1 ;;
+    body) STUB_HEAD='{"message":"Server Error","status":"502"}' ;;
+  esac
+  printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+  run_gate
+  expect_fail_closed "unreadable head before the listing ($shape) fails closed" "could not read the PR's head before listing its files"
+  if grep -qF -- '/files' "$STUB_CALLS" || [ -n "$(out_get classified_head)" ]; then
+    echo "✗ an unreadable head ($shape) still listed the files or recorded a head"
+    failed=1
+  fi
+done
+
+# 18. No risk-paths.yml anywhere ⇒ nothing listed, so no head is read or
+#     recorded (the arm step reads an empty one as "listed nothing").
+reset_case
+CASE_BASE_REF="release/0.9"
+printf '%s\n' "src/anything.py" > "$STUB_FILES"
+run_gate
+expect_verdict "no policy ⇒ not blocked" 0 "" ""
+if grep -qF -- '--jq .head.sha' "$STUB_CALLS" || [ -n "$(out_get classified_head)" ]; then
+  echo "✗ no policy, yet the gate read or recorded a head"
+  failed=1
+else
+  echo "✓ no policy ⇒ no head read, no classified_head"
+fi
 
 echo ""
 if [ "$failed" -gt 0 ]; then
