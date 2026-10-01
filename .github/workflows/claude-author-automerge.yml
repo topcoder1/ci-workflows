@@ -2326,10 +2326,9 @@ jobs:
           # it ran (RISKY is set) a missing head fails this step, decided
           # after the mismatches so that a stale run ends on its stand-down.
           # The always() error revoke then disarms, as github-actions[bot]
-          # behind its head guard; disarm_then_exit would disarm with this
-          # step's GH_TOKEN, the caller's PAT, and the hold step reads a
-          # disable by anyone but github-actions[bot] as a human's durable
-          # hold, so one API blip would leave the PR unarmed for good. Decided
+          # behind its head guard, which disarm_then_exit lacks: once the head
+          # has moved since this event, the newer head's own run owns the arm,
+          # and a disarm here could land after that run validly armed. Decided
           # after the refusals, with no network call before the arm.
           # Residual: a head that leaves and comes back between a step's head
           # read and its own listing is invisible to every read.

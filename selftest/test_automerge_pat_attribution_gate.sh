@@ -55,6 +55,8 @@
 #        ⇒ refused — the exception is an exact login match.
 #    5.  no PAT AND the base moved ⇒ the base revalidation still runs first:
 #        disarm + stood_down=base, not no-pat.
+#    5b. a user PAT AND the base moved ⇒ that stand-down disarms as
+#        github-actions[bot] (BOT_TOKEN), never as the PAT user.
 #    2h. the classifier or risk-tier step listed the files of a head other
 #        than the event's (CLASSIFIER_HEAD / RISK_HEAD) ⇒ no arm, no disarm,
 #        exit 0 with a notice. Both steps classify the PR's LIVE files while
@@ -678,10 +680,9 @@ fi
 # 2i: the risk-tier step ran (RISKY is set) but recorded no head — it keeps
 # going on an unreadable head so that its revoke still works — ⇒ exit 1, no
 # arm, no stood_down label, and NO disarm here: the always() error revoke
-# disarms as github-actions[bot] behind its head guard, while a disarm in
-# this step would run with the caller's PAT, which the hold step reads as a
-# human's durable hold (test_automerge_standing_arm_revoke.py runs that
-# path). risky=1 reaches the arm only through a bypass (the Codex one here).
+# disarms as github-actions[bot] behind its head guard, which a disarm in
+# this step lacks (test_automerge_standing_arm_revoke.py runs that path).
+# risky=1 reaches the arm only through a bypass (the Codex one here).
 for risky in 0 1; do
   export CASE_RISK_HEAD="" CASE_RISKY="$risky" CASE_BYPASS_CODEX="$risky"
   run_step "$T/ca.sh" 1 "topcoder1"
