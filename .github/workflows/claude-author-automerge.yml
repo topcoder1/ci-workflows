@@ -2072,7 +2072,8 @@ jobs:
           # second open-PR listing: the retarget's own event re-gates from
           # scratch.
           #
-          # Every rejection below DISARMS before exiting. Declining to call
+          # Every revalidation rejection below (base, body, open heads, opt-in
+          # label) DISARMS before exiting. Declining to call
           # `gh pr merge --auto` is not enough when an earlier run already
           # armed this PR: the base-gate refusal-revoke did not fire (that
           # run's gate passed) and the always() error-revoke does not fire
@@ -2279,7 +2280,6 @@ jobs:
             if [ -z "$arm_as" ]; then
               refuse_unattributed_arm "automerge_pat is not a user credential (GET /user did not return a User after 3 attempts)."
             fi
-            echo "Arming as $arm_as (user credential)."
           fi
           # Arm only a revision the gates LISTED. The classifier and risk-tier
           # steps judge the PR's LIVE files, and each records the head it read
@@ -2289,22 +2289,23 @@ jobs:
           # so a run that bound only HEAD_SHA armed A on a verdict about B's
           # files (a [skip ci] B starts no run to cancel this one). So each
           # recorded head must be HEAD_SHA. A different one stands down
-          # WITHOUT a disarm, unlike every rejection above: this run's
-          # verdict is about another revision, so it owns nothing to revoke,
-          # and a disarm could land after that head's own run validly armed
-          # it — the head-moved rule below. An empty CLASSIFIER_HEAD means
-          # that step listed nothing (no risk-paths.yml): it fails on an
+          # WITHOUT a disarm, unlike the revalidation rejections above: this
+          # run's verdict is about another revision, so it owns nothing to
+          # revoke, and a disarm could land after that head's own run validly
+          # armed it — the head-moved rule below. An empty CLASSIFIER_HEAD
+          # means that step listed nothing (no risk-paths.yml): it fails on an
           # unreadable head, and this step never runs after a failed one. The
           # risk-tier step records a head only when it can read one, so once
-          # it ran (RISKY is set) a missing head fails this step. The always()
-          # error revoke then disarms, as github-actions[bot] behind its head
-          # guard; disarm_then_exit would disarm with this step's GH_TOKEN, the
-          # caller's PAT, and the hold step reads a disable by anyone but
-          # github-actions[bot] as a human's durable hold, so one API blip
-          # would leave the PR unarmed for good. Decided after the refusals,
-          # with no network call before the arm. Residual: a head that leaves
-          # and comes back between a step's head read and its own listing is
-          # invisible to every read.
+          # it ran (RISKY is set) a missing head fails this step, decided
+          # after the mismatches so that a stale run ends on its stand-down.
+          # The always() error revoke then disarms, as github-actions[bot]
+          # behind its head guard; disarm_then_exit would disarm with this
+          # step's GH_TOKEN, the caller's PAT, and the hold step reads a
+          # disable by anyone but github-actions[bot] as a human's durable
+          # hold, so one API blip would leave the PR unarmed for good. Decided
+          # after the refusals, with no network call before the arm.
+          # Residual: a head that leaves and comes back between a step's head
+          # read and its own listing is invisible to every read.
           stand_down_unlisted() { # step, the head it listed
             echo "::notice::the $1 step listed the files of '$2', not of this run's head '${HEAD_SHA}' — not arming; a verdict about one revision must not arm another."
             exit 0
@@ -2313,14 +2314,17 @@ jobs:
             echo "::error::$1"
             exit 1
           }
-          if [ -n "${RISKY:-}" ] && ! [[ "${RISK_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
-            fail_to_error_revoke "the risk-tier step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed); the error revoke disarms."
-          fi
           if [ -n "${CLASSIFIER_HEAD:-}" ] && [ "$CLASSIFIER_HEAD" != "$HEAD_SHA" ]; then
             stand_down_unlisted classifier "$CLASSIFIER_HEAD"
           fi
           if [ -n "${RISK_HEAD:-}" ] && [ "$RISK_HEAD" != "$HEAD_SHA" ]; then
             stand_down_unlisted risk-tier "$RISK_HEAD"
+          fi
+          if [ -n "${RISKY:-}" ] && ! [[ "${RISK_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            fail_to_error_revoke "the risk-tier step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed); the error revoke disarms unless the head has moved since this event."
+          fi
+          if [ "$PR_AUTHOR" != "dependabot[bot]" ]; then
+            echo "Arming as $arm_as (user credential)."
           fi
           if [ "$BYPASS_LABEL" = "1" ]; then
             echo "Enabling auto-merge ($METHOD) — detection: $REASON; risk bypassed via approval label"

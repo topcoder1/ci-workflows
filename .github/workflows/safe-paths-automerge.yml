@@ -677,13 +677,17 @@ jobs:
           # enable step arms only when it is the event's head (see that
           # step). Only a SHA counts (gh api prints an HTTP error's JSON body
           # to stdout), and an unreadable head holds like every other
-          # unreadable input here, so an empty classified_head always means
-          # this step listed nothing.
-          listed_head=$(retry gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha) || listed_head=""
-          [[ "$listed_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || \
-            hold "head-unreadable" \
-              "could not read the PR's head before listing its files — refusing to arm auto-merge (fail closed)."
-          echo "classified_head=$listed_head" >> "$GITHUB_OUTPUT"
+          # unreadable input here, so on the would-arm route an empty
+          # classified_head always means this step listed nothing. The
+          # standing-arm route arms nothing and reads no head: there a failed
+          # read would only add a revoke.
+          if [ "${STANDING_ARM:-}" != "1" ]; then
+            listed_head=$(retry gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha) || listed_head=""
+            [[ "$listed_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || \
+              hold "head-unreadable" \
+                "could not read the PR's head before listing its files — refusing to arm auto-merge (fail closed)."
+            echo "classified_head=$listed_head" >> "$GITHUB_OUTPUT"
+          fi
 
           changed=$(retry gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[].filename') || \
@@ -1069,22 +1073,24 @@ jobs:
           # this one). So each recorded head must be HEAD_SHA, and a different
           # one stands down like a moved head. An unknown classified head
           # fails the step, as an unreadable head does below: no newer run may
-          # be coming. An empty TIER3_HEAD means tier 3 listed nothing: it
-          # holds on an unreadable head, and this step runs only on hold=0.
-          # Decided after the refusals, which it must not pre-empt, and with no
-          # network call. Residual: a head that leaves and comes back between
-          # a step's head read and its own listing is invisible to every read.
-          if ! [[ "${CLASSIFIED_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
-            echo "::error::the classify step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed). Re-run this PR's newest safe-paths run."
-            exit 1
-          fi
-          if [ "$CLASSIFIED_HEAD" != "$HEAD_SHA" ]; then
+          # be coming. That is decided after the mismatches, so a run whose
+          # verdict is positively about another head ends on its stand-down.
+          # An empty TIER3_HEAD means tier 3 listed nothing: it holds on an
+          # unreadable head, and this step runs only on hold=0. Decided after
+          # the refusals, which it must not pre-empt, and with no network
+          # call. Residual: a head that leaves and comes back between a step's
+          # head read and its own listing is invisible to every read.
+          if [[ "${CLASSIFIED_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$CLASSIFIED_HEAD" != "$HEAD_SHA" ]; then
             echo "::notice::the classify step listed the files of '${CLASSIFIED_HEAD}', not of this run's head '${HEAD_SHA}' — not arming; a verdict about one revision must not arm another."
             exit 0
           fi
           if [ -n "${TIER3_HEAD:-}" ] && [ "$TIER3_HEAD" != "$HEAD_SHA" ]; then
             echo "::notice::tier 3 listed the files of '${TIER3_HEAD}', not of this run's head '${HEAD_SHA}' — not arming; a verdict about one revision must not arm another."
             exit 0
+          fi
+          if ! [[ "${CLASSIFIED_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "::error::the classify step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed). Re-run this PR's newest safe-paths run."
+            exit 1
           fi
           # Arm only the head this run actually classified: `gh pr merge
           # --auto` acts on the PR's CURRENT head, which may be a newer

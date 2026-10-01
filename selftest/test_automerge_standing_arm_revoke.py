@@ -1420,6 +1420,20 @@ def test_a_head_that_came_back_is_not_armed_on_the_risk_tier_verdict(tmp_path):
     assert job.outcome("arm") == "success" and "armed" not in job.out("arm"), str(job)
 
 
+def test_the_risk_tier_step_reads_its_head_before_it_lists(tmp_path):
+    """The recorded head binds the listing only if it is read first: read
+    after the listing, a head that moved during it would pass for the head
+    the listing saw."""
+    job = run_job(Stub(tmp_path), Revision(CLEAN))
+    calls = [" ".join(c["argv"]) for c in job.state["calls"] if c["step"] == "risk"]
+    head = next((i for i, c in enumerate(calls) if "--jq .head.sha" in c), None)
+    listing = next((i for i, c in enumerate(calls) if "/files" in c), None)
+    assert head is not None and listing is not None and head < listing, (
+        f"the risk-tier step did not read its head before listing:\n{job}"
+    )
+    assert job.out("risk").get("classified_head") == "a" * 40, str(job)
+
+
 def test_a_risk_tier_verdict_with_no_head_is_disarmed_as_github_actions(tmp_path):
     """The risk-tier step keeps its verdict when it cannot read the head, and
     the arm step then refuses to arm on it. The disarm must be the error

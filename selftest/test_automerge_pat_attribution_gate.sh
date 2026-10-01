@@ -65,6 +65,8 @@
 #        github-actions[bot], which the hold step never reads as a hold.
 #    2j. no step listed anything (no policy, bypass label) ⇒ the bound arm.
 #    2k. no PAT with a mismatched head ⇒ the refusal still comes first.
+#    2l. a mismatched classifier head with no risk-tier head ⇒ the clean
+#        stand-down: a positive mismatch is decided before a missing head.
 #   safe-paths-automerge.yml
 #    6.  no PAT, non-Dependabot author ⇒ exit 0, NO arm, ::error:: + summary.
 #    7.  PAT that is a user ⇒ arms, bound with --match-head-commit.
@@ -109,6 +111,8 @@
 #        first (exit 0).
 #    7v. tier 3 listed a different head (TIER3_HEAD) ⇒ no arm, exit 0.
 #    7w. tier 3 listed nothing (no caller policy, empty TIER3_HEAD) ⇒ arms.
+#    7x. a mismatched tier-3 head with an empty classified head ⇒ the clean
+#        stand-down: a positive mismatch is decided before an unknown head.
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
@@ -621,12 +625,27 @@ for which in classifier risk-tier; do
   unset CASE_CLASSIFIER_HEAD CASE_RISK_HEAD
   if ! armed && ! disarmed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
      && ! has "$T/ghout" "armed=1" && ! has "$T/ghout" "stood_down=" \
+     && ! has "$T/out.log" "Arming as" \
      && has "$T/out.log" "the $which step listed the files of '$OTHER', not of this run's head '$HEAD'"; then
     pass "2h: claude-author, the $which step listed a different head ⇒ no arm, no disarm, exit 0 with the notice"
   else
     fail "2h: claude-author armed its event's head on a $which verdict about another head's files"; dump
   fi
 done
+
+# 2l: a positively mismatched head stands down BEFORE a missing one fails:
+# a stale run (the classifier listed a newer head) whose risk-tier read also
+# failed must end as the clean stand-down. Failing would claim an error
+# revoke that its head guard then skips, on a head this run does not own.
+export CASE_CLASSIFIER_HEAD="$OTHER" CASE_RISK_HEAD=""
+run_step "$T/ca.sh" 1 "topcoder1"
+unset CASE_CLASSIFIER_HEAD CASE_RISK_HEAD
+if ! armed && ! disarmed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
+   && has "$T/out.log" "the classifier step listed the files of '$OTHER'"; then
+  pass "2l: claude-author, a mismatched classifier head and no risk-tier head ⇒ the clean stand-down, not a failure"
+else
+  fail "2l: claude-author failed a stale run whose verdict is about another head"; dump
+fi
 
 # 2i: the risk-tier step ran (RISKY is set) but recorded no head — it keeps
 # going on an unreadable head so that its revoke still works — ⇒ exit 1, no
@@ -946,6 +965,19 @@ if ! armed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
   pass "7v: safe-paths, tier 3 listed a different head ⇒ no arm, exit 0 with the notice"
 else
   fail "7v: safe-paths armed its event's head on a tier-3 verdict about another head's files"; dump
+fi
+
+# 7x: a positively mismatched head stands down BEFORE an unknown one fails:
+# a run whose tier 3 listed another head ends as the clean stand-down even
+# when classify recorded no head.
+export CASE_CLASSIFIED_HEAD="" CASE_TIER3_HEAD="$OTHER"
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset CASE_CLASSIFIED_HEAD CASE_TIER3_HEAD
+if ! armed && has "$T/out.log" "rc=0" && ! has "$T/out.log" "::error::" \
+   && has "$T/out.log" "tier 3 listed the files of '$OTHER'"; then
+  pass "7x: safe-paths, a mismatched tier-3 head and no classified head ⇒ the clean stand-down, not a failure"
+else
+  fail "7x: safe-paths failed a run whose tier-3 verdict is about another head"; dump
 fi
 
 # 7w: no caller policy, so tier 3 listed nothing and recorded no head ⇒ the

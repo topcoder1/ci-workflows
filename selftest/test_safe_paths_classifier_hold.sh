@@ -43,7 +43,8 @@
 #  10. THE LISTED HEAD: the head read just before the listing is recorded as
 #      classified_head, which the enable step requires to be the event's
 #      head; an unreadable head holds (head-unreadable) before any listing;
-#      with no policy nothing is listed, so no head is read or recorded.
+#      with no policy nothing is listed, and on the standing-arm route
+#      nothing arms, so neither reads or records a head.
 #
 # The step's bash is EXTRACTED from the workflow YAML and executed against
 # the REAL classify.mjs, so this exercises the shipped gate rather than a
@@ -271,13 +272,13 @@ STUB_HEAD_DEFAULT="c0ffee0000000000000000000000000000000001"
 STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""; STUB_RISK_RC=0
 STUB_FILES="$T/files.txt"; STUB_FILES_RC=0
 STUB_RENAMES=""; STUB_RENAMES_RC=0; STUB_CLASSIFY_FILE=""
-CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
+CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"; CASE_STANDING_ARM=""
 STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0; STUB_CALLS="$T/calls.log"
 
 reset_case() {
   STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""; STUB_RISK_RC=0
   STUB_FILES_RC=0; STUB_RENAMES=""; STUB_RENAMES_RC=0; STUB_CLASSIFY_FILE=""
-  CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
+  CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"; CASE_STANDING_ARM=""
   STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0
   : > "$STUB_FILES"
   : > "$STUB_CALLS"
@@ -290,7 +291,7 @@ run_hold() {
   HOLD_LOG=$(cd "$T" && \
     PATH="$T/bin:$PATH" \
     REPO="acme/fixture" PR=123 BASE_REF="$CASE_BASE_REF" \
-    DEFAULT_BRANCH="$CASE_DEFAULT_BRANCH" \
+    DEFAULT_BRANCH="$CASE_DEFAULT_BRANCH" STANDING_ARM="$CASE_STANDING_ARM" \
     GITHUB_OUTPUT="$OUT_FILE" GH_TOKEN=stub \
     STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_DEFAULT_FILE="$STUB_RISK_DEFAULT_FILE" \
     STUB_RISK_RC="$STUB_RISK_RC" STUB_FILES="$STUB_FILES" STUB_FILES_RC="$STUB_FILES_RC" \
@@ -535,6 +536,23 @@ for shape in rc body; do
     failed=1
   fi
 done
+
+# The standing-arm route arms nothing, so it reads no head: the head is only
+# for the enable step's binding, and a read failing there would only add a
+# revoke. The stub fails any head read, so a read here would hold.
+reset_case
+CASE_STANDING_ARM=1
+STUB_RISK_FILE="$T/risk-fixture.yml"
+STUB_HEAD_RC=1
+printf '%s\n' "src/x.py" "docs/notes.md" > "$STUB_FILES"
+run_hold
+expect "standing-arm route ⇒ no head read; the caller's verdict decides" 0 -
+if grep -qF -- '--jq .head.sha' "$STUB_CALLS" || [ -n "$(out_get classified_head)" ]; then
+  echo "✗ the standing-arm route read or recorded a head"
+  failed=1
+else
+  echo "✓ standing-arm route ⇒ no head read, no classified_head"
+fi
 
 # No caller policy ⇒ nothing listed, so no head is read or recorded (the
 # enable step reads an empty one as "tier 3 listed nothing").
