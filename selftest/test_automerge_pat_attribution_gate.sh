@@ -73,6 +73,16 @@
 #        ⇒ exit 1 (a failed read never counts as a move). Either half of
 #        the fix alone keeps 7e failing closed; 7g and 7h pin each half.
 #    7i. the head moved to a 64-hex (SHA-256) head ⇒ exit 0 with a notice.
+#    7j. the PRE-ARM head read answers an HTTP error's JSON body (404, 403,
+#        502), rc=1 ⇒ no arm, exit 1 with an ::error::, and no "head is"
+#        notice claiming a newer run owns the decision.
+#    7k. the pre-arm read fails with nothing on stdout ⇒ no arm, exit 1.
+#    7l. the pre-arm read exits 0 with a non-SHA answer ⇒ no arm, exit 1.
+#    7m. the pre-arm read exits 1 with a well-formed SHA on stdout ⇒ no
+#        arm, exit 1 (a failed read is never a move).
+#    7n. the pre-arm read answers a different, well-formed head (40 or 64
+#        hex) ⇒ no arm, exit 0 with the notice (that head's own run owns
+#        the decision).
 #    8.  no PAT, author dependabot[bot] ⇒ arms (wxa-mcp-server's
 #        docs/package.json bumps take this path).
 #    6b. no PAT + a BOT's arm ⇒ the bot's arm is removed, then the refusal.
@@ -95,6 +105,9 @@
 #    10c. safe-paths with the old post-failure head read planted back ⇒ an
 #        error body reads as a moved head and the failed arm exits 0 (case
 #        7e can fail).
+#    10d. safe-paths with the old pre-arm head read planted back ⇒ an error
+#        body reads as a moved head and the step exits 0 behind the "head
+#        is" notice (case 7j can fail).
 #
 # Structural pins (hardcoded, not derived from the files under test):
 #   * exactly ONE non-comment `gh pr merge --auto` per workflow, and both
@@ -265,6 +278,8 @@ fi
 #                                    print gh's HTTP-error JSON body on
 #                                    STDOUT, stderr prints nothing there,
 #                                    sha prints a different, well-formed SHA
+#       STUB_HEAD_FIRST_FAIL       — the FIRST head read (safe-paths' pre-arm
+#                                    read) fails, in the same shapes
 #       STUB_USER_TYPE             — GET /user's `type` (default User)
 #       STUB_USER_FAIL_TIMES       — first N /user reads exit 1 (a 403)
 #     `gh pr merge --auto` models GitHub: it sets the enabler only when the
@@ -309,14 +324,16 @@ if [ "$1" = "api" ]; then
   case "$*" in
     *"--jq .base.ref"*) printf '%s\n' "${STUB_BASE:-main}" ;;
     *"--jq .head.sha"*)
-      # The first head read answers STUB_HEAD (default: the event's head);
-      # later reads answer STUB_HEAD_LATER when set (a push mid-run), or
-      # fail as STUB_HEAD_LATER_FAIL says. gh's HTTP-error shape: the JSON
-      # body on STDOUT even with --jq, the message on stderr, rc=1
-      # (measured 2026-09-30 on gh 2.89.0).
+      # The first head read answers STUB_HEAD (default: the event's head) or
+      # fails as STUB_HEAD_FIRST_FAIL says; later reads answer
+      # STUB_HEAD_LATER when set (a push mid-run), or fail as
+      # STUB_HEAD_LATER_FAIL says. gh's HTTP-error shape: the JSON body on
+      # STDOUT even with --jq, the message on stderr, rc=1 (measured
+      # 2026-09-30 on gh 2.89.0).
       h=$(cat "$HEAD_READS" 2>/dev/null || echo 0); h=$((h + 1)); echo "$h" > "$HEAD_READS"
-      if [ "$h" -gt 1 ] && [ -n "${STUB_HEAD_LATER_FAIL:-}" ]; then
-        case "$STUB_HEAD_LATER_FAIL" in
+      if [ "$h" -eq 1 ]; then fail="${STUB_HEAD_FIRST_FAIL:-}"; else fail="${STUB_HEAD_LATER_FAIL:-}"; fi
+      if [ -n "$fail" ]; then
+        case "$fail" in
           404) echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/pulls/pulls#get-a-pull-request","status":"404"}'
                echo "gh: Not Found (HTTP 404)" >&2 ;;
           403) echo '{"message":"API rate limit exceeded for user ID 1234567.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api","status":"403"}'
@@ -325,7 +342,7 @@ if [ "$1" = "api" ]; then
                echo "gh: Server Error (HTTP 502)" >&2 ;;
           stderr) echo "error connecting to api.github.com" >&2 ;;
           sha) echo "0000000000000000000000000000000000000bad" ;;
-          *) echo "STUB: unknown STUB_HEAD_LATER_FAIL '$STUB_HEAD_LATER_FAIL'" >&2; exit 99 ;;
+          *) echo "STUB: unknown head-read failure '$fail'" >&2; exit 99 ;;
         esac
         exit 1
       fi
@@ -623,6 +640,66 @@ else
   fail "7i: a moved 64-hex (SHA-256) head must stand down like a 40-hex one"; dump
 fi
 
+# 7j–7n: the PRE-ARM head read (the step's first head read) fails closed and
+# says so. The old read kept an HTTP error's JSON body, took it for a moved
+# head, and ended the step green and unarmed behind a notice that "the
+# current head's own run owns that decision", with no newer run coming.
+for code in $HTTP_ERROR_CODES; do
+  export STUB_HEAD_FIRST_FAIL="$code"
+  run_step "$T/sp.sh" 1 "wxacoeur"
+  unset STUB_HEAD_FIRST_FAIL
+  if ! armed && has "$T/out.log" "rc=1" && ! has "$T/out.log" "head is '" \
+     && has "$T/out.log" "::error::could not read the live head before arming"; then
+    pass "7j: safe-paths, the pre-arm head read answers an HTTP $code error body ⇒ no arm, exit 1, no 'head is' notice"
+  else
+    fail "7j: safe-paths took an HTTP $code error body at the pre-arm read for a moved head — unarmed, green, and a false notice"; dump
+  fi
+done
+
+export STUB_HEAD_FIRST_FAIL=stderr
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_HEAD_FIRST_FAIL
+if ! armed && has "$T/out.log" "rc=1" && ! has "$T/out.log" "head is '" \
+   && has "$T/out.log" "::error::could not read the live head before arming"; then
+  pass "7k: safe-paths, the pre-arm head read fails with nothing on stdout ⇒ no arm, exit 1"
+else
+  fail "7k: a failed pre-arm head read must fail the step, not stand down quietly"; dump
+fi
+
+export STUB_HEAD='{"message":"x"}'
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_HEAD
+if ! armed && has "$T/out.log" "rc=1" \
+   && has "$T/out.log" "::error::could not read the live head before arming"; then
+  pass "7l: safe-paths, the pre-arm head read exits 0 with a non-SHA answer ⇒ no arm, exit 1"
+else
+  fail "7l: safe-paths took a non-SHA pre-arm head answer for a moved head"; dump
+fi
+
+export STUB_HEAD_FIRST_FAIL=sha
+run_step "$T/sp.sh" 1 "wxacoeur"
+unset STUB_HEAD_FIRST_FAIL
+if ! armed && has "$T/out.log" "rc=1" && ! has "$T/out.log" "head is '" \
+   && has "$T/out.log" "::error::could not read the live head before arming"; then
+  pass "7m: safe-paths, the pre-arm head read exits 1 with a SHA on stdout ⇒ no arm, exit 1"
+else
+  fail "7m: safe-paths took a failed pre-arm head read for a moved head because its stdout held a SHA"; dump
+fi
+
+# 7n: a positively read move, 40 or 64 hex, still stands down with the notice.
+for other in "0000000000000000000000000000000000000bad" "$(printf 'c0ffee%058d' 3)"; do
+  export STUB_HEAD="$other"
+  run_step "$T/sp.sh" 1 "wxacoeur"
+  unset STUB_HEAD
+  if ! armed && has "$T/out.log" "rc=0" \
+     && has "$T/out.log" "head is '$other' but this run classified '$HEAD'" \
+     && ! has "$T/out.log" "::error::"; then
+    pass "7n: safe-paths, the pre-arm head read answers a different ${#other}-hex head ⇒ no arm, exit 0 with the notice"
+  else
+    fail "7n: a positively read moved ${#other}-hex head must stand down with the notice, not fail"; dump
+  fi
+done
+
 export STUB_USER_FAIL_TIMES=3
 run_step "$T/sp.sh" 1 "wxacoeur"
 unset STUB_USER_FAIL_TIMES
@@ -764,18 +841,23 @@ typo_control "10b" "$T/sp.sh" "wxacoeur"
 # 10c: the old post-failure head read, planted back into safe-paths' arm
 # step. An error body must then read as a moved head and end the failed arm
 # green — case 7e sees exactly this regression. Both halves go back: either
-# one alone already fails closed.
+# one alone already fails closed. Only the text after the arm command is
+# touched: the pre-arm read shares the reset.
 if python3 - "$T/sp.sh" "$T/sp_old_read.sh" <<'PY'; then
 import sys
 src = open(sys.argv[1]).read()
+ARM = "if ! gh pr merge --auto"
+if src.count(ARM) != 1:
+    sys.exit(f"cannot plant the old read: {ARM!r} appears {src.count(ARM)} times")
+before, after = src.split(ARM)
 for new, old in [
     ('2>/dev/null) || now=""', '2>/dev/null || echo "")'),
     ('[[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]', '[ -n "$now" ]'),
 ]:
-    if src.count(new) != 1:
-        sys.exit(f"cannot plant the old read: {new!r} appears {src.count(new)} times")
-    src = src.replace(new, old)
-open(sys.argv[2], "w").write(src)
+    if after.count(new) != 1:
+        sys.exit(f"cannot plant the old read: {new!r} appears {after.count(new)} times after the arm")
+    after = after.replace(new, old)
+open(sys.argv[2], "w").write(before + ARM + after)
 PY
   for code in $HTTP_ERROR_CODES; do
     export STUB_ARM_FAIL=1 STUB_HEAD_LATER_FAIL="$code"
@@ -789,6 +871,42 @@ PY
   done
 else
   fail "10c: negative control — the arm step no longer carries the SHA-checked head read to plant the old one over"
+fi
+
+# 10d: the old pre-arm head read, planted back (only the text before the arm
+# command is touched). An error body must then read as a moved head: no arm,
+# exit 0, and the "head is" notice quoting the body — case 7j sees exactly
+# this regression.
+if python3 - "$T/sp.sh" "$T/sp_old_prearm.sh" <<'PY'; then
+import sys
+src = open(sys.argv[1]).read()
+ARM = "if ! gh pr merge --auto"
+if src.count(ARM) != 1:
+    sys.exit(f"cannot plant the old pre-arm read: {ARM!r} appears {src.count(ARM)} times")
+before, after = src.split(ARM)
+reset, old_capture = '2>/dev/null) || now=""', '2>/dev/null || echo "")'
+if before.count(reset) != 1:
+    sys.exit(f"cannot plant the old pre-arm read: the reset appears {before.count(reset)} times before the arm")
+lines = before.replace(reset, old_capture).split("\n")
+checks = [i for i, line in enumerate(lines) if line.startswith('if [[ ! "$now" =~ ')]
+if len(checks) != 1:
+    sys.exit(f"cannot plant the old pre-arm read: {len(checks)} SHA checks before the arm")
+end = next(j for j in range(checks[0], len(lines)) if lines[j] == "fi")
+del lines[checks[0]:end + 1]
+open(sys.argv[2], "w").write("\n".join(lines) + ARM + after)
+PY
+  for code in $HTTP_ERROR_CODES; do
+    export STUB_HEAD_FIRST_FAIL="$code"
+    run_step "$T/sp_old_prearm.sh" 1 "wxacoeur"
+    unset STUB_HEAD_FIRST_FAIL
+    if ! armed && has "$T/out.log" "rc=0" && has "$T/out.log" "head is '{\"message\""; then
+      pass "10d: negative control — with the old pre-arm read, an HTTP $code error body reads as a moved head (case 7j can fail)"
+    else
+      fail "10d: negative control — the planted old pre-arm read did not stand down on an HTTP $code body; case 7j proves nothing"; dump
+    fi
+  done
+else
+  fail "10d: negative control — the arm step no longer carries the SHA-checked pre-arm read to plant the old one over"
 fi
 
 # ---------------------------------------------------------------------------
