@@ -114,13 +114,18 @@ case "${1:-}" in
   pr)
     case "${2:-}" in
       comment) exit 0 ;;
-      merge)   exit 0 ;;
+      # --disable-auto takes the arm off; the revoke reads that back.
+      merge)   echo false > "$GH_ARM_FILE"; exit 0 ;;
       view)
         if [ "${GH_VIEW_FAIL:-0}" = "1" ]; then
           echo "HTTP 500: could not read PR" >&2
           exit 1
         fi
-        echo "${GH_ARMED:-true}"
+        # The step's own --jq filter over the PR's arm state.
+        filter="" prev=""
+        for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
+        jq -n --argjson armed "$(cat "$GH_ARM_FILE")" \
+          '{autoMergeRequest: (if $armed then {} else null end)}' | jq -r "$filter"
         ;;
       *) echo "STUB: unexpected 'gh pr ${2:-}'" >&2; exit 99 ;;
     esac
@@ -349,12 +354,13 @@ if [ -s "$T/revoke.sh" ]; then
     local label="$1" expect="$2" armed="${3:-true}" view_fail="${4:-0}" \
       head="${5:-$EVENT_SHA}" head_fail="${6:-0}"
     : > "$T/ghlog"
+    echo "$armed" > "$T/armed"
     local rc=0
     (
       PATH="$T/bin:$PATH" \
-      GH_LOG="$T/ghlog" GH_ARMED="$armed" GH_VIEW_FAIL="$view_fail" \
+      GH_LOG="$T/ghlog" GH_ARM_FILE="$T/armed" GH_VIEW_FAIL="$view_fail" \
       GH_HEAD="$head" GH_HEAD_FAIL="$head_fail" HEAD_SHA="$EVENT_SHA" \
-      GH_TOKEN=stub PR=1064 ACTOR='dependabot[bot]' NON_BOT=1 \
+      GH_TOKEN=stub BOT_TOKEN=stub USING_PAT=1 PR=1064 ACTOR='dependabot[bot]' NON_BOT=1 \
       REPO='whois-api-llc/wxa-jake-ai' \
       bash "$T/revoke.sh"
     ) > "$T/stdout" 2>&1 || rc=$?
@@ -384,10 +390,11 @@ if [ -s "$T/revoke.sh" ]; then
   revoke_case "head read failed"         revoke true 0 "$EVENT_SHA" 1
 
   : > "$T/ghlog"
+  echo true > "$T/armed"
   (
     PATH="$T/bin:$PATH" \
-    GH_LOG="$T/ghlog" GH_ARMED=true GH_VIEW_FAIL=0 GH_HEAD="$EVENT_SHA" \
-    GH_HEAD_FAIL=0 HEAD_SHA="$EVENT_SHA" GH_TOKEN=stub PR=1064 \
+    GH_LOG="$T/ghlog" GH_ARM_FILE="$T/armed" GH_VIEW_FAIL=0 GH_HEAD="$EVENT_SHA" \
+    GH_HEAD_FAIL=0 HEAD_SHA="$EVENT_SHA" GH_TOKEN=stub BOT_TOKEN=stub USING_PAT=1 PR=1064 \
     ACTOR='dependabot[bot]' NON_BOT=1 REPO='whois-api-llc/wxa-jake-ai' \
     bash "$T/revoke.sh"
   ) > /dev/null 2>&1 || true
