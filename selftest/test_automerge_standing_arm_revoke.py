@@ -480,7 +480,9 @@ def api(args):
             http_error(403, "Resource not accessible by integration")
         emit({"login": "pat-user", "type": "User"}, jq)
     if (method, route) == ("GET", PULL):
-        if state["knobs"].get("pr_read_fails"):
+        if state["knobs"].get("pr_read_fails") or (
+            step and step == state["knobs"].get("pr_read_fails_for")
+        ):
             http_error(502, "Server Error")
         arm = state["arm"]
         emit({
@@ -592,6 +594,7 @@ class Revision:
     bot_cannot_disarm: bool = False  # GitHub refuses github.token's --disable-auto
     disarm_fails_once: bool = False  # the first --disable-auto fails transiently
     pr_read_fails: bool = False  # GET pulls/7 answers HTTP 502, its body on stdout
+    pr_read_fails_for: str = ""  # the one step whose GET pulls/7 reads answer HTTP 502
     pr_view_fails: bool = False  # gh pr view exits 1 with an empty stdout
     checks_read_fails: bool = False  # the check-runs read answers an HTML 502
     labels_fail_for: str = ""  # the step whose live-label reads answer HTTP 502
@@ -682,6 +685,7 @@ class Stub:
         s["knobs"] = {
             "bot_cannot_disarm": rev.bot_cannot_disarm,
             "pr_read_fails": rev.pr_read_fails,
+            "pr_read_fails_for": rev.pr_read_fails_for,
             "pr_view_fails": rev.pr_view_fails,
             "checks_read_fails": rev.checks_read_fails,
             "labels_fail_for": rev.labels_fail_for,
@@ -1414,3 +1418,19 @@ def test_a_head_that_came_back_is_not_armed_on_the_risk_tier_verdict(tmp_path):
     assert job.out("risk").get("risky") == "0", str(job)
     assert job.out("risk").get("classified_head") == "2" * 40, str(job)
     assert job.outcome("arm") == "success" and "armed" not in job.out("arm"), str(job)
+
+
+def test_a_risk_tier_verdict_with_no_head_is_disarmed_as_github_actions(tmp_path):
+    """The risk-tier step keeps its verdict when it cannot read the head, and
+    the arm step then refuses to arm on it. The disarm must be the error
+    revoke's: github-actions[bot] behind its head guard. A disarm in the arm
+    step runs with the caller's PAT, which the hold step reads as a human's
+    durable hold, so one API blip would leave the PR unarmed for good."""
+    stub = armed_by_a_clean_revision(tmp_path)
+    job = run_job(stub, Revision(CLEAN, head_sha="2" * 40, pr_read_fails_for="risk"))
+    assert job.out("risk").get("risky") == "0", str(job)
+    assert "classified_head" not in job.out("risk"), str(job)
+    assert job.outcome("arm") == "failure" and job.arms == 0, str(job)
+    assert job.arm == "OFF" and job.disarmed_by == [(ERROR_REVOKE, GITHUB_TOKEN)], (
+        f"the unbound verdict was not disarmed by the error revoke as github-actions[bot]:\n{job}"
+    )

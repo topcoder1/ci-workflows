@@ -2296,18 +2296,25 @@ jobs:
           # that step listed nothing (no risk-paths.yml): it fails on an
           # unreadable head, and this step never runs after a failed one. The
           # risk-tier step records a head only when it can read one, so once
-          # it ran (RISKY is set) a missing head is an unreadable input, which
-          # disarms and fails like the reads above. Decided after the
-          # refusals, with no network call before the arm. Residual: a head
-          # that leaves and comes back between a step's head read and its own
-          # listing is invisible to every read.
+          # it ran (RISKY is set) a missing head fails this step. The always()
+          # error revoke then disarms, as github-actions[bot] behind its head
+          # guard; disarm_then_exit would disarm with this step's GH_TOKEN, the
+          # caller's PAT, and the hold step reads a disable by anyone but
+          # github-actions[bot] as a human's durable hold, so one API blip
+          # would leave the PR unarmed for good. Decided after the refusals,
+          # with no network call before the arm. Residual: a head that leaves
+          # and comes back between a step's head read and its own listing is
+          # invisible to every read.
           stand_down_unlisted() { # step, the head it listed
             echo "::notice::the $1 step listed the files of '$2', not of this run's head '${HEAD_SHA}' — not arming; a verdict about one revision must not arm another."
             exit 0
           }
+          fail_to_error_revoke() { # message
+            echo "::error::$1"
+            exit 1
+          }
           if [ -n "${RISKY:-}" ] && ! [[ "${RISK_HEAD:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
-            echo "::error::the risk-tier step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed)."
-            disarm_then_exit 1
+            fail_to_error_revoke "the risk-tier step could not read the PR's head before listing its files, so this run cannot tell which revision its verdict is about — not arming (fail closed); the error revoke disarms."
           fi
           if [ -n "${CLASSIFIER_HEAD:-}" ] && [ "$CLASSIFIER_HEAD" != "$HEAD_SHA" ]; then
             stand_down_unlisted classifier "$CLASSIFIER_HEAD"

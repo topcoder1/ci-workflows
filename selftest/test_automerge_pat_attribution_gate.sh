@@ -60,8 +60,9 @@
 #        exit 0 with a notice. Both steps classify the PR's LIVE files while
 #        the arm binds the event's head: a head that went A → B before a
 #        listing and back to A before the arm passes --match-head-commit A.
-#    2i. the risk-tier step ran (RISKY set) but recorded no head ⇒ disarm
-#        and exit 1, like the unreadable reads before it.
+#    2i. the risk-tier step ran (RISKY set) but recorded no head ⇒ exit 1
+#        with no disarm in the step: the error revoke disarms, as
+#        github-actions[bot], which the hold step never reads as a hold.
 #    2j. no step listed anything (no policy, bypass label) ⇒ the bound arm.
 #    2k. no PAT with a mismatched head ⇒ the refusal still comes first.
 #   safe-paths-automerge.yml
@@ -628,18 +629,20 @@ for which in classifier risk-tier; do
 done
 
 # 2i: the risk-tier step ran (RISKY is set) but recorded no head — it keeps
-# going on an unreadable head so that its revoke still works — ⇒ an
-# unreadable input like the reads above it: disarm, exit 1, no arm and no
-# stood_down label. risky=1 reaches the arm only through a bypass (the Codex
-# one here).
+# going on an unreadable head so that its revoke still works — ⇒ exit 1, no
+# arm, no stood_down label, and NO disarm here: the always() error revoke
+# disarms as github-actions[bot] behind its head guard, while a disarm in
+# this step would run with the caller's PAT, which the hold step reads as a
+# human's durable hold (test_automerge_standing_arm_revoke.py runs that
+# path). risky=1 reaches the arm only through a bypass (the Codex one here).
 for risky in 0 1; do
   export CASE_RISK_HEAD="" CASE_RISKY="$risky" CASE_BYPASS_CODEX="$risky"
   run_step "$T/ca.sh" 1 "topcoder1"
   unset CASE_RISK_HEAD CASE_RISKY CASE_BYPASS_CODEX
-  if ! armed && disarmed && has "$T/out.log" "rc=1" && ! has "$T/ghout" "armed=1" \
+  if ! armed && ! disarmed && has "$T/out.log" "rc=1" && ! has "$T/ghout" "armed=1" \
      && ! has "$T/ghout" "stood_down=" \
      && has "$T/out.log" "::error::the risk-tier step could not read the PR's head before listing its files"; then
-    pass "2i: claude-author, the risk-tier step ran (risky=$risky) without a head ⇒ disarms, no arm, exit 1"
+    pass "2i: claude-author, the risk-tier step ran (risky=$risky) without a head ⇒ no arm, no disarm here, exit 1"
   else
     fail "2i: claude-author armed on a risk-tier verdict that carries no head (risky=$risky)"; dump
   fi

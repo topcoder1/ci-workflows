@@ -134,17 +134,22 @@ fi
 # path, and passed vacuously (found 2026-09-18). The line-count floor and the
 # negative control below keep it honest.
 #
-# Two named exceptions are stripped alongside disarm_then_exit, both of which
-# deliberately do NOT disarm: refuse_unattributed_arm, the attribution gate
+# Three named exceptions are stripped alongside disarm_then_exit, none of
+# which disarms in the step: refuse_unattributed_arm, the attribution gate
 # (any arm already on the PR is user-attributed — see its comment in the
-# workflow), and stand_down_unlisted, the listed-head stand-down (its run's
+# workflow); stand_down_unlisted, the listed-head stand-down (its run's
 # verdict is about another revision, so it owns nothing to revoke — the same
-# rule as the head-moved branch after the arm).
+# rule as the head-moved branch after the arm); and fail_to_error_revoke,
+# which exits 1 so the always() error revoke disarms as github-actions[bot]
+# behind its head guard (a disarm here runs with the caller's PAT, which the
+# hold step reads as a human's durable hold).
 # selftest/test_automerge_pat_attribution_gate.sh pins that the first never
-# calls --disable-auto and that the second disarms nothing (case 2h).
+# calls --disable-auto and that the other two disarm nothing (cases 2h, 2i);
+# selftest/test_automerge_standing_arm_revoke.py runs the error revoke's
+# disarm for the third.
 prearm_of() {
   awk '!/^[[:space:]]*#/ && /gh pr merge --auto/{armed=1} !armed {print}' \
-    | awk '/(disarm_then_exit|refuse_unattributed_arm|stand_down_unlisted)\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf'
+    | awk '/(disarm_then_exit|refuse_unattributed_arm|stand_down_unlisted|fail_to_error_revoke)\(\) \{/{inf=1} inf && /^ *\}$/{inf=0; next} !inf'
 }
 prearm=$(prearm_of <<< "$enable_block")
 prearm_lines=$(printf '%s\n' "$prearm" | wc -l | tr -d ' ')
