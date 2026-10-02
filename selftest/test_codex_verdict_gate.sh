@@ -538,6 +538,16 @@ check "quiet: a BLOCKER posts" "0 false" "$(run_quiet true 'No regressions found
 #   nothing to review:
 check "quiet: \"no changes relative to origin/main\" posts" "0 false" "$(run_quiet true 'No regressions found; the branch has no changes relative to origin/main.
 VERDICT: CLEAN')"
+# Delta review of #289: the token rule's normalization, hidden line breaks,
+# and small wording gaps.
+check "quiet: \"regression *:\" posts (token rule, decorated)" "0 false" "$(run_quiet true 'No regressions found; regression *: the cron line is unguarded.')"
+check "quiet: a lone CR joining a finding posts" "0 false" "$(run_quiet true "$(printf 'No regressions found.\rThe cron line is unguarded.')")"
+check "quiet: a U+2028 joining a finding posts" "0 false" "$(run_quiet true "$(printf 'No regressions found.\342\200\250The cron line is unguarded.')")"
+check "quiet: CRLF line ends stay quiet" "0 true" "$(run_quiet true "$(printf 'No regressions found.\r\nVERDICT: CLEAN\r\n')")"
+check "quiet: \"doesn't assert\" posts" "0 false" "$(run_quiet true "No regressions found; the test doesn't assert the retry count.")"
+check "quiet: \"nothing covers\" posts" "0 false" "$(run_quiet true 'No regressions found; nothing covers the new branch.')"
+check "quiet: \"P-1\" posts" "0 false" "$(run_quiet true 'No regressions found. P-1: rename the helper.')"
+check "quiet: \"(high)\" posts" "0 false" "$(run_quiet true 'No regressions found. (high) the cache key ignores the tenant.')"
 # The length backstop: an all-clear followed by a long elaboration posts,
 # whatever words it uses (all 85 quiet corpus verdicts are under 400 bytes).
 long_tail=$(awk 'BEGIN{for(i=0;i<12;i++) printf "The %02d-th changed helper keeps its documented contract intact. ", i}')

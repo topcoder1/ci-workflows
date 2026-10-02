@@ -224,15 +224,20 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 // human". Silence removes that human, so it needs POSITIVE evidence, all of:
 //   - at most QUIET_MAX_BYTES of verdict;
 //   - state clean, with the strict signals applied whatever STRICT_FINDINGS
-//     says (redundant with the line and token rules below; kept as depth);
-//   - no P0-P3 token, spaced or not: a P3 is a finding the gate lets
-//     through, not an all-clear, and strict mode counts only P0-P2;
+//     says. It overlaps the token and line rules below, and the overlap is
+//     load-bearing: it caught `regression *:` before the token rule did
+//     (independent review), so keep it;
+//   - no P0-P3 token, however separated ("P3", "P 2", "P-1", "P#0"): a P3
+//     is a finding the gate lets through, not an all-clear, and strict mode
+//     counts only P0-P2;
 //   - no `regression:` token at all: an all-clear never needs the finding
 //     shape, and the strict marker test stops at a backtick the gate's
 //     normalized form admits (independent review);
 //   - EVERY non-empty line is the `VERDICT: CLEAN` trailer or itself an
 //     all-clear (ALL_CLEAR), so a finding on a line of its own — `[high]`,
 //     `BLOCKER:`, `1. …`, `Contract drift: …` — posts (independent review);
+//     and no line break the line split cannot see (a lone CR, U+2028/9,
+//     NEL, VT, FF), which would join a finding onto an all-clear line;
 //   - no caveat word, including the prompt's own finding wording ("never
 //     asserted", "isn't covered", "stale", "inconsistent"), and no word
 //     saying the review itself fell short ("unable", "didn't inspect", "no
@@ -251,8 +256,12 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 // words none of the lists know ("No regressions found; the cron line is
 // unguarded.") is quiet. codex-review.yml still prints it to the run log and
 // the step summary, and the automerge gate reads it as clean either way.
-const P_TOKEN = /\bp\s?[0-3]\b/i;
-const REGRESSION_TOKEN = /regression[*_`]*\s*:/i;
+const P_TOKEN = /\bp[\s.#-]?[0-3]\b/i;
+// What the findings scan admits after normalization: whitespace or
+// decoration between the word and the colon ("regression *:").
+const REGRESSION_TOKEN = /regression[\s*_`]*:/i;
+// A CR at the very end joins nothing, so only a CR with text after it counts.
+const HIDDEN_LINE_BREAK = /\r(?!\n|$)|[\u2028\u2029\u0085\v\f]/;
 // The all-clear must COMPLETE as one: "no regression(s) / issues /
 // findings", optionally "were/was/is/are", then "found / identified /
 // detected / reported / evident". A bare "no regression" also opens the
@@ -267,7 +276,7 @@ const CAVEAT = new RegExp(
     // the prompt's own finding wording, and severity words (independent
     // review): "is never asserted", "has no assertion", "isn't covered by any
     // test", "the JSDoc is now stale", "BLOCKER", "[high]"
-    "\\bnever\\b|\\bno assertions?\\b|\\bnothing asserts\\b|\\b(?:is|are|was|were)n['’]t (?:covered|tested|asserted|exercised)\\b|\\bstale\\b|\\bstill documents?\\b|\\bout of date\\b|\\binconsistent\\b|\\bblocker\\b|\\btodo\\b|\\bseverity\\b|\\bpriority\\b|\\[(?:high|medium|low)\\]",
+    "\\bnever\\b|\\bno assertions?\\b|\\bnothing (?:asserts?|tests?|covers?|exercises?)\\b|\\b(?:does|do|did)n['’]t (?:assert|test|cover|exercise)\\b|\\((?:high|medium|low|critical)\\)|\\b(?:is|are|was|were)n['’]t (?:covered|tested|asserted|exercised)\\b|\\bstale\\b|\\bstill documents?\\b|\\bout of date\\b|\\binconsistent\\b|\\bblocker\\b|\\btodo\\b|\\bseverity\\b|\\bpriority\\b|\\[(?:high|medium|low)\\]",
   ].join('|'),
   'i'
 );
@@ -305,6 +314,7 @@ const quiet =
   !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
   !P_TOKEN.test(raw) &&
   !REGRESSION_TOKEN.test(raw) &&
+  !HIDDEN_LINE_BREAK.test(raw) &&
   everyLineClears &&
   !CAVEAT.test(raw) &&
   !SHORTFALL.test(raw);
