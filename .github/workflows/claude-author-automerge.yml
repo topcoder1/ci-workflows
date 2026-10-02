@@ -2435,6 +2435,21 @@ jobs:
       # from the regex-based comment below — classifier-blocked has no
       # bypass mechanism (it's a hard policy block), so the message
       # shouldn't dangle bypass options the user can't actually use.
+      #
+      # One notice per blocked PR instead of two, outside a late-pr-classify
+      # race stated at pr_classify_notice (WS2 step 4, 2026-10-02).
+      # pr-classify posts its own on every risk:blocked PR ("Risk class:
+      # `blocked` — manual merge required", which also says this workflow
+      # refuses auto-merge), and this step used to post a second one: 103
+      # of 104 blocked PRs in five repos carried both (09-15..10-02). So for
+      # risk:blocked it CREATES no comment once pr-classify's notice is on
+      # the PR (pr_classify_notice below, which waits up to 90 s for it). It
+      # still creates one when the notice never appears — a repo without
+      # pr-classify (topcoder1/dotclaude and topcoder1/jz_skills on
+      # 2026-10-02) or pr-classify failing to post — and for every
+      # risk:sensitive PR, which pr-classify never annotates. An existing
+      # comment is still updated in place, since an edit notifies nobody.
+      # Pinned by selftest/test_automerge_blocked_notice.sh.
       - name: Comment when classifier-blocked
         if: |
           steps.detect.outputs.claude_authored == '1' &&
@@ -2447,7 +2462,7 @@ jobs:
         run: |
           set -euo pipefail
           marker="<!-- claude-author-automerge:classifier-blocked -->"
-          existing=$(gh api "/repos/${{ github.repository }}/issues/$PR/comments" \
+          existing=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
             --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -1)
           {
             echo "$marker"
@@ -2476,9 +2491,57 @@ jobs:
               echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
             fi
           } > /tmp/automerge-blocked.md
+          # Is pr-classify's own notice on this PR? Only that comment counts: a
+          # risk:blocked label can be applied by hand, and pr-classify's
+          # comment step is non-fatal, so a label proves nothing about the
+          # notice (Codex pre-review round 1). And only pr-classify's comment:
+          # it is posted by github-actions[bot] with the marker as its first
+          # line, so a person or a review bot quoting the marker cannot stand
+          # in for it (round 2). Both workflows start from the same PR event,
+          # so the first look can come before pr-classify has posted — on 25
+          # of the 104 sampled PRs its comment landed in the same second as
+          # this step's or after it, by up to 43 s — so this looks again
+          # every 15 s for up to 90 s before giving up. A repo without
+          # pr-classify pays that wait on every run that finds no comment of
+          # this step's own — normally just the first; on a PR that first went
+          # blocked after its 30th comment, every run, since the own-comment
+          # lookup above reads one page (pre-existing). A push or label event
+          # during the wait cancels the run through the callers'
+          # cancel-in-progress groups, and the next run starts the wait over;
+          # the auto-merge revoke ran before this step, so nothing is held
+          # open by it. A failed lookup counts as absent: a duplicate notice
+          # beats none. (gh prints an HTTP error's body to stdout, hence the
+          # reset and the id-shape check rather than trusting the captured
+          # text.) The own-comment lookup above is unchanged: a comments API
+          # that fails every read still fails this step, as before.
+          #
+          # This is a bounded wait, not a lock: Actions offers none between
+          # two workflows. If pr-classify posts more than 90 s after the
+          # first look (0 of the 104 sampled PRs; the latest trailed by
+          # 43 s), or between the last look and the post below, both notices
+          # appear — the behaviour before this change. Making pr-classify
+          # defer to this comment would close that too; it is a change to
+          # pr-classify.yml, which every caller runs on every PR, and is not
+          # taken here (Codex pre-review round 3).
+          pr_classify_notice() {
+            local found look
+            for look in 1 2 3 4 5 6 7; do
+              found=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+                --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- pr-classify:blocked -->")) | .id') || found=""
+              if [[ "$found" =~ ^[0-9]+ ]]; then
+                return 0
+              fi
+              if [ "$look" -lt 7 ]; then
+                sleep 15
+              fi
+            done
+            return 1
+          }
           if [ -n "$existing" ]; then
-            gh api -X PATCH "/repos/${{ github.repository }}/issues/comments/$existing" \
+            gh api -X PATCH "/repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
               -f body="$(cat /tmp/automerge-blocked.md)" >/dev/null
+          elif [ "$VERDICT" = "risk:blocked" ] && pr_classify_notice; then
+            echo "pr-classify's risk:blocked notice covers this PR; not posting a second one."
           else
             gh pr comment "$PR" --body-file /tmp/automerge-blocked.md
           fi
