@@ -348,6 +348,8 @@ No issues found on coverage, but P1 unscoped token reaches push.
 ===CASE===
 Flagged 3 issues inline.
 ===CASE===
+No regressions found. Flagged 3 confirmed issues inline.
+===CASE===
 VERDICT: REGRESSION on the coverage axis.
 VERDICT: CLEAN
 ===CASE===
@@ -499,5 +501,11 @@ check "quiet: \"haven't reviewed\" posts" "0 false" "$(run_quiet true "No regres
 check "quiet: \"No regression test covers …\" is a finding and posts" "0 false" "$(run_quiet true 'No regression test covers the new retry branch.')"
 check "quiet: \"no regression is evident\" is an all-clear" "0 true" "$(run_quiet true 'Only dependency metadata changed, and no regression is evident.')"
 check "quiet: \"wasn't available\" posts" "0 false" "$(run_quiet true "No regressions found. The repository wasn't available; the assessment used only the PR title.")"
+# Codex pre-review round 5: the gate's flagged-count form allows words
+# between the count and "issue", and the perfect tense hides "able".
+check "quiet: \"Flagged 3 confirmed issues\" is a finding and posts" "0 false" "$(run_quiet true 'No regressions found. Flagged 3 confirmed issues inline.')"
+check "quiet: \"haven't been able\" posts" "0 false" "$(run_quiet true "No regressions found. I haven't been able to inspect the diff.
+VERDICT: CLEAN")"
+check "quiet: \"had not been able\" posts" "0 false" "$(run_quiet true 'No regressions found. I had not been able to read the changed files.')"
 
 exit "$failed"

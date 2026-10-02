@@ -152,7 +152,11 @@ const NO_VERDICT_SENTINEL = /codex produced no parseable verdict/;
 // has no path-shaped target and stays clean.
 const STRICT_SIGNALS = [
   { name: 'P[012] severity token', re: /\bp[012]\b/i },
-  { name: 'flagged-N-issues summary', re: /flagged [0-9]+ issue/i },
+  // The gate's own form (FINDING_RE): up to 60 non-sentence-ending
+  // characters between the count and "issue", so "Flagged 3 confirmed
+  // issues inline" is a finding to it — and was clean here until Codex
+  // pre-review round 5 on WS2 step 3 found the gap.
+  { name: 'flagged-N-issues summary', re: /flagged [0-9]+[^.!?\n]{0,60}? issue/i },
   { name: 'VERDICT: REGRESSION (anywhere)', re: /verdict:\s*regression/i },
   {
     name: 'regression marker (path-shaped target)',
@@ -256,8 +260,9 @@ const SHORTFALL = new RegExp(
     "\\b(?:unable|cannot|can['’]t|couldn['’]t|incomplete|partial(?:ly)?|unavailable|denied|permissions?|sandbox(?:ed)?|fail(?:ed|ure|ing|s)?|errors?|skip(?:ped|s)?|timed? out|time-?out)\\b",
     // a negated auxiliary, spelled out or contracted (either apostrophe),
     // before a verb of reviewing: "didn't inspect", "wasn’t able",
-    // "haven't reviewed", "could not access" (Codex pre-review round 3)
-    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not) (?:able|available|accessible|given|allowed|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
+    // "haven't reviewed", "could not access" (Codex pre-review round 3),
+    // and the perfect tense, "haven't been able" (round 5)
+    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not)(?: been)? (?:able|available|accessible|given|allowed|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
     "\\bnot (?:able|available|accessible|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied))\\b",
   ].join('|'),
   'i'
