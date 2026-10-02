@@ -2032,11 +2032,14 @@ jobs:
         env:
           # The caller's PAT, so the merge is user-attributed: GitHub then
           # deletes the head branch and push-on-main workflows run. The
-          # github.token fallback only serves the pre-arm revalidation
-          # reads/disarms and a Dependabot PR's arm; the attribution gate in
-          # the script refuses every other arm without the PAT. See the
-          # `automerge_pat` secret docstring above.
+          # github.token fallback only serves the pre-arm revalidation reads
+          # and a Dependabot PR's arm; the attribution gate in the script
+          # refuses every other arm without the PAT. See the `automerge_pat`
+          # secret docstring above.
           GH_TOKEN: ${{ secrets.automerge_pat || github.token }}
+          # Every disarm in this step runs as github-actions[bot] first; see
+          # disarm() in the script.
+          BOT_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -2079,10 +2082,37 @@ jobs:
           # run's gate passed) and the always() error-revoke does not fire
           # either when this step exits 0. Without the disarm, the change
           # would be detected and then ignored, the stale arm merging anyway.
+          #
+          # Every disarm here runs as github-actions[bot] first, like every
+          # revoke in this workflow: the manual-hold step's Signal 2 reads an
+          # auto_merge_disabled by any other actor as a HUMAN's durable hold.
+          # A stand-down arms nothing after its disarm, so that disarm is the
+          # PR's newest auto-merge event, and under the PAT it held the PR on
+          # every later run, not just until its next event. GITHUB_TOKEN can
+          # disable an arm the PAT user placed (whois-api-llc/wxa_webcat#1715).
+          # The PAT is the fallback only, after the bot's attempts, so the
+          # disarm stays fail-closed; one that needed it is recorded as the
+          # PAT user, the old hold, and the PR then waits for a human to
+          # re-arm it. Only a verified OFF counts, as in safe-paths' revoke.
+          disarm_as() { # token → 0 once auto-merge reads OFF, up to 3 attempts
+            for _ in 1 2 3; do
+              GH_TOKEN="$1" gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+              [ "$state" = "OFF" ] && return 0
+              sleep 3
+            done
+            return 1
+          }
+          disarm() {
+            disarm_as "$BOT_TOKEN" && return 0
+            # Without the PAT, GH_TOKEN is github.token: no other identity.
+            [ "$USING_PAT" = "1" ] || return 1
+            echo "::warning::auto-merge is still '$state' after 3 attempts as github-actions[bot] — retrying as the automerge_pat user (fail closed)."
+            disarm_as "$GH_TOKEN"
+          }
           disarm_then_exit() {
-            gh pr merge --disable-auto "$PR_URL" 2>&1 || true
-            state=$(gh pr view "$PR_URL" --json autoMergeRequest \
-              --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
+            disarm || true
             echo "Auto-merge state after pre-arm revalidation revoke: $state"
             if [ "$state" != "OFF" ]; then
               echo "::error::auto-merge is '$state' after --disable-auto — investigate"
@@ -2135,9 +2165,9 @@ jobs:
           # the probe, so it adds no time between the revalidations and the
           # arm; an unreadable arm state leaves things as they are.
           # Residual race, accepted (Codex round 6): a user arm placed while
-          # this removal runs — from the read through the disable, its
-          # verification, and disarm_then_exit's retry — is revoked too.
-          # GitHub's disable takes no expected enabler, so this cannot be
+          # this removal runs — from the read through the disarm's attempts
+          # and their verification, and disarm_then_exit's retry — is revoked
+          # too. GitHub's disable takes no expected enabler, so this cannot be
           # atomic. The cost is a PR left unarmed until its next event or a
           # click (or a red run): bounded, visible, recoverable — the trade
           # the base-gate disarm below makes — against a bot-attributed merge
@@ -2148,10 +2178,7 @@ jobs:
               2>/dev/null) || armed_by="unknown"
             if [ "$armed_by" = "bot" ]; then
               echo "::notice::a bot armed this PR — its merge would skip the head-branch deletion, so removing that arm."
-              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
-              state=$(gh pr view "$PR_URL" --json autoMergeRequest \
-                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null || echo "UNKNOWN")
-              if [ "$state" != "OFF" ]; then
+              if ! disarm; then
                 echo "::error::could not verify the bot's arm is off (state '$state') — failing closed."
                 disarm_then_exit 1
               fi
@@ -2299,10 +2326,9 @@ jobs:
           # it ran (RISKY is set) a missing head fails this step, decided
           # after the mismatches so that a stale run ends on its stand-down.
           # The always() error revoke then disarms, as github-actions[bot]
-          # behind its head guard; disarm_then_exit would disarm with this
-          # step's GH_TOKEN, the caller's PAT, and the hold step reads a
-          # disable by anyone but github-actions[bot] as a human's durable
-          # hold, so one API blip would leave the PR unarmed for good. Decided
+          # behind its head guard, which disarm_then_exit lacks: once the head
+          # has moved since this event, the newer head's own run owns the arm,
+          # and a disarm here could land after that run validly armed. Decided
           # after the refusals, with no network call before the arm.
           # Residual: a head that leaves and comes back between a step's head
           # read and its own listing is invisible to every read.

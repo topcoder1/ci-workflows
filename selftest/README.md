@@ -174,7 +174,11 @@ arbitrary helper scripts; that's a different kind of repo.
   one listed-head comparison per workflow with `false` (its
   mismatched-head case then arms); structural pins hold one arm call site
   per workflow, wire each listed head from its listing step's own output,
-  and keep `automerge_pat` `required: false`.
+  keep `automerge_pat` `required: false`, and keep `BOT_TOKEN`
+  github.token in both arm steps. Every disarm in an arm step (the bot-arm
+  removal, claude-author's pre-arm stand-downs) runs as github-actions[bot],
+  the PAT only after three bot attempts: claude-author's manual hold reads
+  a disable by any other actor as a human's durable hold.
 - `test_dependabot_pat_warning.sh` — `dependabot-auto-merge.yml` still arms
   without the PAT, since Dependabot deletes its own branch and refusing would
   stall every unprovisioned caller, but never silently. A GITHUB_TOKEN arm
