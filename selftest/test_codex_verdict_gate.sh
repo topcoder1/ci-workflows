@@ -481,5 +481,13 @@ q_p2='No regressions found.
 - [P2] no test exercises the new error path — src/api/handler.ts:41'
 check "quiet: a P2 posts even without STRICT_FINDINGS" "0 false" "$(run_quiet false "$q_p2")"
 check "quiet: the line is written on a regression run too" "0 false" "$(run_quiet false "$d74")"
+# A review that says it fell short is not an all-clear, whatever it
+# concludes (Codex pre-review round 2): Codex has reported "no regressions
+# found" over a review that never read the diff.
+check "quiet: an all-clear over a review that could not inspect the diff posts" "0 false" "$(run_quiet true 'No issues found; I was unable to inspect the diff.
+VERDICT: CLEAN')"
+check "quiet: an all-clear after a sandboxed git failure posts" "0 false" "$(run_quiet true 'No regressions found. git commands failed in the sandbox, so the diff was read from the PR title only.
+VERDICT: CLEAN')"
+check "quiet: an all-clear on a partial review posts" "0 false" "$(run_quiet true 'No regressions found in the files reviewed; the review was partial.')"
 
 exit "$failed"

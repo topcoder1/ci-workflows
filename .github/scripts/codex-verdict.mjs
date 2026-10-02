@@ -224,10 +224,16 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 //     an all-clear, and strict mode counts only P0-P2;
 //   - an all-clear: the `VERDICT: CLEAN` trailer, or "no regression(s) /
 //     issues / findings";
-//   - no caveat word ("but", "missing", "lacks", "no test", "should", ...).
+//   - no caveat word ("but", "missing", "lacks", "no test", "should", ...),
+//     and no word saying the review itself fell short ("unable", "cannot",
+//     "failed", "skipped", "sandbox", ...): Codex has written "no
+//     regressions found" over a review that never read the diff (see the
+//     sandbox note in codex-review.yml), so an all-clear beside one is not
+//     evidence (Codex pre-review round 2).
 // Measured on 220 real verdicts (90 PRs in five repos, 09-15..10-02): 85 are
-// quiet, all 50 distinct texts among them are all-clears, and every
-// strict-clean verdict carrying a P3 or a "lacks an assertion" still posts.
+// quiet, all 50 distinct texts among them are all-clears, every
+// strict-clean verdict carrying a P3 or a "lacks an assertion" still posts,
+// and none of the 85 uses a shortfall word, so that list cost nothing there.
 //
 // Residual, accepted: an all-clear sentence followed by a finding phrased
 // with none of the caveat words ("No regressions found. The cron line is
@@ -238,12 +244,15 @@ const P_TOKEN = /\bp[0-3]\b/i;
 const ALL_CLEAR = /\bno (?:actionable |new )?(?:regressions?|issues|findings)\b/i;
 const CAVEAT =
   /\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\b|review comment|- \[/i;
+const SHORTFALL =
+  /\b(?:unable|cannot|can't|couldn't|could not|fail(?:ed|ure|ing|s)?|errors?|incomplete|partial(?:ly)?|skip(?:ped|s)?|timed? out|time-?out|unavailable|denied|sandbox|not (?:able|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)))\b|did not (?:run|read|inspect|access|review|verify)/i;
 const quiet =
   state === 'clean' &&
   !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
   !P_TOKEN.test(raw) &&
   (trailer === 'clean' || ALL_CLEAR.test(raw)) &&
-  !CAVEAT.test(raw);
+  !CAVEAT.test(raw) &&
+  !SHORTFALL.test(raw);
 
 const summary = {
   clean: 'Codex reported no regressions.',
