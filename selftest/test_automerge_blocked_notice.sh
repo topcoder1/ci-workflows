@@ -35,6 +35,8 @@
 #  10. blocked, a bot comment quoting the marker mid-body ⇒ one created
 #  11. every comment read fails, the step's own lookup too ⇒ the step fails
 #      and creates nothing: unchanged behaviour, pinned so it stays known
+#  12. two pr-classify notices on the PR (a re-post on a long PR, or a second
+#      pr-classify without skip_label) ⇒ none created, no wait
 #
 # Structural pins: the run block is `${{ }}`-free (extraction- and
 # injection-safe), and the sensitive and blocked bodies keep their text.
@@ -110,11 +112,8 @@ done
 case "$method $path" in
   "PATCH "*) exit 0 ;;
   "GET "*/labels*)
-    if [ "${STUB_LABELS_FAIL:-0}" = "1" ]; then
-      # gh prints an HTTP error's JSON body to STDOUT and exits 1.
-      echo '{"message":"Server Error","status":"502"}'
-      exit 1
-    fi
+    # The step no longer reads labels; serving them keeps hand-label honest
+    # against a regression that would.
     src="$FIXTURES/labels.json" ;;
   "GET "*/comments*)
     src="$FIXTURES/comments.json"
@@ -122,8 +121,9 @@ case "$method $path" in
       echo '{"message":"Server Error","status":"502"}'
       exit 1
     fi
-    if [ "$paginate" = "1" ]; then
-      # The notice lookups paginate; the step's own-comment lookup does not.
+    if [[ "$jqf" == *'pr-classify:blocked'* ]]; then
+      # A notice lookup (the step's own-comment lookup filters on its own
+      # marker); routed on the filter so pagination can change freely.
       looks=$(( $(cat "$FIXTURES/looks" 2>/dev/null || echo 0) + 1 ))
       echo "$looks" > "$FIXTURES/looks"
       if [ "${STUB_NOTICE_READS_FAIL:-0}" = "1" ]; then
@@ -223,6 +223,9 @@ expect quoted-by-person 1 0 6 "a person's comment carrying the marker is not pr-
 
 run_case quoted-by-bot "risk:blocked" '[]' "[{\"id\":7,\"user\":{\"login\":\"github-actions[bot]\"},\"body\":\"### Codex review\\nquotes $PC_MARKER mid-body\"}]"
 expect quoted-by-bot 1 0 6 "a bot comment that merely quotes the marker is not pr-classify's notice"
+
+run_case two-notices "risk:blocked" '[]' "[{\"id\":5,\"user\":{\"login\":\"github-actions[bot]\"},\"body\":\"$PC_MARKER\\nfirst\"},{\"id\":8,\"user\":{\"login\":\"github-actions[bot]\"},\"body\":\"$PC_MARKER\\nsecond\"}]"
+expect two-notices 0 0 0 "two pr-classify notices still mean the notice exists"
 
 STUB_ALL_COMMENT_READS_FAIL=1 run_case all-reads-down "risk:blocked" '[]' '[]'
 rc=$(cat "$T/all-reads-down/rc"); c=$(created all-reads-down)

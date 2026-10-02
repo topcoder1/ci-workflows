@@ -2502,8 +2502,14 @@ jobs:
           # of the 104 sampled PRs its comment landed in the same second as
           # this step's or after it, by up to 43 s — so this looks again
           # every 15 s for up to 90 s before giving up. A repo without
-          # pr-classify pays that wait once per blocked PR, then gets its
-          # notice. A failed lookup counts as absent: a duplicate notice
+          # pr-classify pays that wait on every run that finds no comment of
+          # this step's own — normally just the first; on a PR that first went
+          # blocked after its 30th comment, every run, since the own-comment
+          # lookup above reads one page (pre-existing). A push or label event
+          # during the wait cancels the run through the callers'
+          # cancel-in-progress groups, and the next run starts the wait over;
+          # the auto-merge revoke ran before this step, so nothing is held
+          # open by it. A failed lookup counts as absent: a duplicate notice
           # beats none. (gh prints an HTTP error's body to stdout, hence the
           # reset and the id-shape check rather than trusting the captured
           # text.) The own-comment lookup above is unchanged: a comments API
