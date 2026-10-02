@@ -208,6 +208,25 @@ arbitrary helper scripts; that's a different kind of repo.
   - an immediate merge, a failed read and an Actions merge each end in an
     explicit verdict, never silence;
   - the step never fails over this.
+- `test_dependabot_revoke_disarm_as_bot.py` — `dependabot-auto-merge.yml`'s
+  revoke-stale-arm disarms as github-actions[bot], the PAT only after three
+  verified bot attempts. claude-author-automerge's manual hold reads a
+  disable by any other actor as a human's durable hold, and that workflow
+  judges a Dependabot PR once a Claude session's fix (its
+  `Co-Authored-By: Claude` trailer) lands on it: disarmed under the PAT, the
+  revoke held that PR on every later run, silently, though no human disabled
+  anything. Runs the SHIPPED jobs for one event (authorship's step, the job
+  `if:`s on its output, the revoke with its SHIPPED env) against a stub PR
+  that records each auto-merge event under its token's actor, then
+  claude-author's SHIPPED detection step (in a real checkout) and
+  manual-hold step on the same PR. Pins: no hold after the revoke (a human's
+  disable still holds); the PAT only after three refused bot attempts, its
+  disarm still read as a hold and the run's warning saying so, and without
+  a PAT the step fails; an arm still ON or unreadable after every attempt
+  fails the step and posts no explanation; a head pushed mid-revoke ends the
+  revoke before its next attempt, so that head's arm survives and the PAT
+  never runs. Negative control: `BOT_TOKEN` wired to the PAT reads as a
+  human's hold.
 - `test_automerge_revoke_guard.sh` — a revoke's ownership guard (stand down
   when the head moved since the event) counts only a well-formed read, so
   an API error can never pass for a move. `gh api … --jq` prints an HTTP

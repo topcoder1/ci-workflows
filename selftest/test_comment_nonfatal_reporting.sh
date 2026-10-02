@@ -19,8 +19,9 @@
 # decision output unreachable.
 #
 # THE COUNTER-INVARIANT, pinned just as hard: calls that ARE the
-# enforcement stay fatal. `gh pr merge --disable-auto` failing must still
-# fail the revoke step — a swallowed revoke failure leaves a stale arm
+# enforcement stay fatal. A revoke whose `gh pr merge --disable-auto` never
+# takes (the arm does not read OFF after every retry) must still fail the
+# revoke step — a swallowed revoke failure leaves a stale arm
 # live, which is fail-open. Deliberately NOT covered here for the same
 # reason: the lost-findings fallback comment in claude-review.yml (its
 # failure is load-bearing — a green check over unpostable findings is the
@@ -120,9 +121,17 @@ case "${1:-}" in
         ;;
       merge)
         [ "${GH_MERGE_FAIL:-0}" = "1" ] && fail_503
+        # --disable-auto takes the arm off; the revoke reads that back.
+        echo false > "$GH_ARM_FILE"
         exit 0
         ;;
-      view) echo "${GH_ARMED:-true}" ;;
+      view)
+        # The step's own --jq filter over the PR's arm state.
+        filter="" prev=""
+        for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
+        jq -n --argjson armed "$(cat "$GH_ARM_FILE")" \
+          '{autoMergeRequest: (if $armed then {} else null end)}' | jq -r "$filter"
+        ;;
       *) echo "STUB: unexpected 'gh pr ${2:-}'" >&2; exit 99 ;;
     esac
     ;;
@@ -223,12 +232,13 @@ if [ -s "$T/revoke.sh" ]; then
     local label="$1" comment_fail="$2" merge_fail="$3"
     echo "· scenario revoke/$label"
     : > "$T/ghlog"
+    echo true > "$T/armed"
     rc=0
     (
       PATH="$T/bin:$PATH" \
-      GH_LOG="$T/ghlog" GH_ARMED=true GH_HEAD="$EVENT_SHA" HEAD_SHA="$EVENT_SHA" \
+      GH_LOG="$T/ghlog" GH_ARM_FILE="$T/armed" GH_HEAD="$EVENT_SHA" HEAD_SHA="$EVENT_SHA" \
       GH_COMMENT_FAIL="$comment_fail" GH_MERGE_FAIL="$merge_fail" \
-      GH_TOKEN=stub PR=422 ACTOR='dependabot[bot]' NON_BOT=1 \
+      GH_TOKEN=stub BOT_TOKEN=stub USING_PAT=1 PR=422 ACTOR='dependabot[bot]' NON_BOT=1 \
       REPO='whois-api-llc/wxa-graph' \
       bash "$T/revoke.sh"
     ) > "$T/stdout" 2>&1 || rc=$?
@@ -252,7 +262,9 @@ if [ -s "$T/revoke.sh" ]; then
   # COUNTER-INVARIANT: the revoke itself failing must stay fatal. Swallowing
   # it would leave a stale arm live on a PR carrying non-bot commits.
   revoke_case "merge down" 0 1
-  if [ "$rc" -ne 0 ]; then
+  # The disarm must have been tried: a step that crashes before it also
+  # exits nonzero.
+  if [ "$rc" -ne 0 ] && grep -q '^gh pr merge --disable-auto' "$T/ghlog"; then
     pass "revoke/--disable-auto fails: step stays fatal (enforcement is not reporting)"
   else
     fail "revoke/--disable-auto fails: step exited 0 — a failed revoke was swallowed, stale arm stays live (fail-open)"
