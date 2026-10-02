@@ -494,5 +494,10 @@ check "quiet: \"didn't inspect\" posts" "0 false" "$(run_quiet true "No issues f
 VERDICT: CLEAN")"
 check "quiet: \"wasn’t able\" (typographic apostrophe) posts" "0 false" "$(run_quiet true 'No regressions found; I wasn’t able to read the test files.')"
 check "quiet: \"haven't reviewed\" posts" "0 false" "$(run_quiet true "No regressions found. Git was not available, so I haven't reviewed the changes.")"
+# The all-clear must complete as one (Codex pre-review round 4): a bare
+# "no regression" opens the missing-test finding the prompt asks for.
+check "quiet: \"No regression test covers …\" is a finding and posts" "0 false" "$(run_quiet true 'No regression test covers the new retry branch.')"
+check "quiet: \"no regression is evident\" is an all-clear" "0 true" "$(run_quiet true 'Only dependency metadata changed, and no regression is evident.')"
+check "quiet: \"wasn't available\" posts" "0 false" "$(run_quiet true "No regressions found. The repository wasn't available; the assessment used only the PR title.")"
 
 exit "$failed"

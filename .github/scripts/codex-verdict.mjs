@@ -223,7 +223,7 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 //   - no P0-P3 token anywhere: a P3 is a finding the gate lets through, not
 //     an all-clear, and strict mode counts only P0-P2;
 //   - an all-clear: the `VERDICT: CLEAN` trailer, or "no regression(s) /
-//     issues / findings";
+//     issues / findings … found / identified / evident" (ALL_CLEAR);
 //   - no caveat word ("but", "missing", "lacks", "no test", "should", ...),
 //     and no word saying the review itself fell short ("unable", "cannot",
 //     "failed", "skipped", "sandbox", ...): Codex has written "no
@@ -241,7 +241,13 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 // the step summary, and the automerge gate reads it as clean either way.
 // Every miss here fails toward posting, which is today's behaviour.
 const P_TOKEN = /\bp[0-3]\b/i;
-const ALL_CLEAR = /\bno (?:actionable |new )?(?:regressions?|issues|findings)\b/i;
+// The all-clear must COMPLETE as one: "no regression(s) / issues /
+// findings", optionally "were/was/is/are", then "found / identified /
+// detected / reported / evident". A bare "no regression" also opens the
+// missing-test finding the prompt asks for ("No regression test covers the
+// new retry branch."), so it is not evidence (Codex pre-review round 4).
+const ALL_CLEAR =
+  /\bno (?:actionable |new |functional )?(?:regressions?|issues|findings)\b(?:\s+(?:were|was|is|are))?\s+(?:found|identified|detected|reported|evident)\b/i;
 const CAVEAT =
   /\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\b|review comment|- \[/i;
 const SHORTFALL = new RegExp(
@@ -251,7 +257,7 @@ const SHORTFALL = new RegExp(
     // a negated auxiliary, spelled out or contracted (either apostrophe),
     // before a verb of reviewing: "didn't inspect", "wasn’t able",
     // "haven't reviewed", "could not access" (Codex pre-review round 3)
-    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not) (?:able|given|allowed|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
+    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not) (?:able|available|accessible|given|allowed|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
     "\\bnot (?:able|available|accessible|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied))\\b",
   ].join('|'),
   'i'
