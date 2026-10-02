@@ -1526,13 +1526,23 @@ def test_coverage_floor_comment_is_created_only_when_there_is_something_to_act_o
     (whois-api-llc/wxa_vpn, docs/superpowers/plans/
     2026-09-24-maintenance-noise-reduction.md, WS2). So the step CREATES the
     comment only when the job failed, or in seed mode, whose note explains
-    the follow-up seed PR once per install. On every other run `only_update`
-    lets it EDIT a comment that an earlier failing run left (an edit notifies
-    nobody), so a PR fixed after a failure never keeps a stale FAIL table.
-    The action reads the input with core.getBooleanInput, so the expression's
-    "true" or "false" is accepted either way.
+    the follow-up seed PR. On every other run `only_update` lets it EDIT a
+    comment that an earlier failing run left (an edit notifies nobody), so a
+    PR fixed after a failure never keeps a stale FAIL table, and a PR is
+    notified once, at its first failure. The action reads the input with
+    core.getBooleanInput, so the expression's "true" or "false" is accepted
+    either way.
+
+    The inputs are pinned as a set: another mode beside `only_update`
+    (`recreate`, `hide_and_recreate`, `delete`) would make the action either
+    re-create the comment, notifying again, or reject the combination on
+    every passing run, an error `continue-on-error` would hide.
     """
     step = _coverage_floor_comment_step()
+    assert set(step["with"]) == {"header", "only_update", "message"}, (
+        f"unexpected sticky-comment inputs: {sorted(step['with'])}"
+    )
+    assert step["with"]["header"] == "coverage-floor", step["with"]["header"]
     assert step["with"].get("only_update") == (
         "${{ job.status == 'success' && steps.floor.outputs.mode != 'seed' }}"
     ), (
@@ -1564,7 +1574,10 @@ def test_coverage_floor_comment_states_its_result():
 
     The comment now appears on failures, and a later pass edits it in place,
     so the reader must not have to compare two numbers to know which state
-    they are looking at. "Coverage Floor" stays in that line: both
+    they are looking at. It also names the head commit: a later push that
+    skips the job (a docs-only diff in most callers) leaves the comment as it
+    was, and the commit says which head it describes. "Coverage Floor" stays
+    in that line: both
     unaddressed-findings detectors (.github/scripts/unaddressed-findings.sh
     and dotclaude's bb-unaddressed-findings.sh) list the phrase in CLEAN_RE,
     so a coverage table is never read as a review finding.
@@ -1572,3 +1585,4 @@ def test_coverage_floor_comment_states_its_result():
     first = _coverage_floor_comment_step()["with"]["message"].splitlines()[0]
     assert first.startswith("**Coverage Floor**"), first
     assert "${{ job.status == 'success' && 'passed' || 'FAILED' }}" in first, first
+    assert "${{ github.event.pull_request.head.sha }}" in first, first

@@ -780,20 +780,24 @@ jobs:
         # selftest/test_workflow_guards.py.
         #
         # The comment is CREATED only when there is something to act on: a
-        # failed run, or seed mode's one-time note (WS2 step 2, 2026-10-02;
-        # a new comment notifies every watcher, and the table posted on every
-        # passing run was ~55 emails a week). A passing run only EDITS a
-        # comment an earlier failure left, which notifies nobody, so a fixed
-        # PR reads "passed" instead of keeping a stale table. A cancelled run
-        # measured nothing and would create a blank table, so it is skipped.
-        # Pinned by the test_coverage_floor_comment_* tests in the same file.
+        # failed run, or seed mode's note about the follow-up seed PR (WS2
+        # step 2, 2026-10-02; a new comment notifies every watcher, and the
+        # table posted on every passing run was ~55 emails a week). Every
+        # other run only EDITS a comment an earlier failure left, which
+        # notifies nobody: a fixed PR reads "passed" instead of keeping a
+        # stale table, and a PR is notified once, at its first failure. The
+        # first line names the head commit, because a later push that skips
+        # this job (a docs-only diff in most callers) leaves the comment as
+        # it was. A cancelled run measured nothing and would create a blank
+        # table, so it is skipped. Pinned by the test_coverage_floor_comment_*
+        # tests in the same file.
         continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage-floor
           only_update: ${{ job.status == 'success' && steps.floor.outputs.mode != 'seed' }}
           message: |
-            **Coverage Floor** — ${{ job.status == 'success' && 'passed' || 'FAILED' }} — mode: `${{ steps.floor.outputs.mode }}`
+            **Coverage Floor** — ${{ job.status == 'success' && 'passed' || 'FAILED' }} — mode: `${{ steps.floor.outputs.mode }}` — head `${{ github.event.pull_request.head.sha }}`
 
             | metric | value |
             |---|---|
