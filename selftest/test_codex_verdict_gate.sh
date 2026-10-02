@@ -512,6 +512,32 @@ check "quiet: \"didn't have access\" posts" "0 false" "$(run_quiet true "No regr
 VERDICT: CLEAN")"
 check "quiet: \"without read access\" posts" "0 false" "$(run_quiet true 'No regressions found, reviewed without read access to the tests.')"
 check "quiet: \"lacked access\" posts" "0 false" "$(run_quiet true 'No regressions found; the session lacked access to the base branch.')"
+# Independent review of #289. Each case is caught by the one rule it names
+# (as far as the rules allow), so deleting that rule fails here.
+#   P-token alone (a P3, and a spaced "P 2"):
+check "quiet: a P3 alone posts (P-token rule)" "0 false" "$(run_quiet true 'No regressions found. P3: rename the helper for clarity.')"
+check "quiet: a spaced \"P 2\" posts (P-token rule)" "0 false" "$(run_quiet true 'No regressions found. P 2: rename the helper.')"
+#   the finding shape alone ("regression: none" is not an all-clear here):
+check "quiet: any regression: token posts (token rule)" "0 false" "$(run_quiet true 'No regressions found; regression: none.')"
+check "quiet: a backticked marker target posts" "0 false" "$(run_quiet true 'No regression found.
+regression: na`/foo.py:3 - the path is untested')"
+check "quiet: a finding line under an all-clear posts" "0 false" "$(run_quiet true 'No regressions found.
+regression: the retry counter increment is never asserted')"
+#   the line rule alone (a finding on its own line, no listed word):
+check "quiet: a numbered finding line posts (line rule)" "0 false" "$(run_quiet true 'No regressions found.
+1. The cache key ignores the tenant id.')"
+check "quiet: a contract-drift line posts (line rule)" "0 false" "$(run_quiet true 'No regressions found.
+Contract drift: docs/api.md:12 documents the old default.')"
+check "quiet: prose with only a CLEAN trailer posts (the rule's measured cost: 1 of 85)" "0 false" "$(run_quiet true 'The site build covers the dependency update. No state mutations or function bodies changed.
+VERDICT: CLEAN')"
+#   the prompt's own finding wording on an all-clear line:
+check "quiet: \"never asserted\" posts" "0 false" "$(run_quiet true 'No regressions found; the retry counter is never asserted.')"
+check "quiet: \"isn't covered\" posts" "0 false" "$(run_quiet true "No regressions found; the new branch isn't covered by any test.")"
+check "quiet: \"now stale\" posts" "0 false" "$(run_quiet true 'No regressions found; the JSDoc for sync() is now stale.')"
+check "quiet: a BLOCKER posts" "0 false" "$(run_quiet true 'No regressions found; BLOCKER for the release.')"
+#   nothing to review:
+check "quiet: \"no changes relative to origin/main\" posts" "0 false" "$(run_quiet true 'No regressions found; the branch has no changes relative to origin/main.
+VERDICT: CLEAN')"
 # The length backstop: an all-clear followed by a long elaboration posts,
 # whatever words it uses (all 85 quiet corpus verdicts are under 400 bytes).
 long_tail=$(awk 'BEGIN{for(i=0;i<12;i++) printf "The %02d-th changed helper keeps its documented contract intact. ", i}')

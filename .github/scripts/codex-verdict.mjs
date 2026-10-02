@@ -221,31 +221,38 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 //
 // `clean` above is the ABSENCE of finding signals, and the state comment
 // accepts its misses because "the review comment still puts it in front of a
-// human". Silence removes that human, so it needs POSITIVE evidence:
+// human". Silence removes that human, so it needs POSITIVE evidence, all of:
+//   - at most QUIET_MAX_BYTES of verdict;
 //   - state clean, with the strict signals applied whatever STRICT_FINDINGS
-//     says;
-//   - no P0-P3 token anywhere: a P3 is a finding the gate lets through, not
-//     an all-clear, and strict mode counts only P0-P2;
-//   - an all-clear: the `VERDICT: CLEAN` trailer, or "no regression(s) /
-//     issues / findings … found / identified / evident" (ALL_CLEAR);
-//   - at most QUIET_MAX_BYTES of verdict (see below);
-//   - no caveat word ("but", "missing", "lacks", "no test", "should", ...),
-//     and no word saying the review itself fell short ("unable", "cannot",
-//     "failed", "skipped", "sandbox", ...): Codex has written "no
-//     regressions found" over a review that never read the diff (see the
-//     sandbox note in codex-review.yml), so an all-clear beside one is not
-//     evidence (Codex pre-review round 2).
-// Measured on 220 real verdicts (90 PRs in five repos, 09-15..10-02): 85 are
-// quiet, all 50 distinct texts among them are all-clears, every
-// strict-clean verdict carrying a P3 or a "lacks an assertion" still posts,
-// and none of the 85 uses a shortfall word, so that list cost nothing there.
+//     says (redundant with the line and token rules below; kept as depth);
+//   - no P0-P3 token, spaced or not: a P3 is a finding the gate lets
+//     through, not an all-clear, and strict mode counts only P0-P2;
+//   - no `regression:` token at all: an all-clear never needs the finding
+//     shape, and the strict marker test stops at a backtick the gate's
+//     normalized form admits (independent review);
+//   - EVERY non-empty line is the `VERDICT: CLEAN` trailer or itself an
+//     all-clear (ALL_CLEAR), so a finding on a line of its own — `[high]`,
+//     `BLOCKER:`, `1. …`, `Contract drift: …` — posts (independent review);
+//   - no caveat word, including the prompt's own finding wording ("never
+//     asserted", "isn't covered", "stale", "inconsistent"), and no word
+//     saying the review itself fell short ("unable", "didn't inspect", "no
+//     access", "nothing to review", ...): Codex has written "no regressions
+//     found" over a review that never read the diff (see the sandbox note in
+//     codex-review.yml), so an all-clear beside one is not evidence.
+// Codex pre-review rounds 2-6 and the independent review each found a
+// phrasing the lists missed; the line rule and the byte cap are the
+// structural answer, and every miss fails toward posting.
 //
-// Residual, accepted: an all-clear sentence followed by a finding phrased
-// with none of the caveat words ("No regressions found. The cron line is
+// Measured on 220 real verdicts (90 PRs in five repos, 09-15..10-02): 84 are
+// quiet, all of them all-clears; every strict-clean verdict carrying a P3, a
+// "lacks an assertion" or a line that is not itself an all-clear posts.
+//
+// Residual, accepted: a short all-clear LINE that also carries a finding in
+// words none of the lists know ("No regressions found; the cron line is
 // unguarded.") is quiet. codex-review.yml still prints it to the run log and
 // the step summary, and the automerge gate reads it as clean either way.
-// Every miss here fails toward posting, which is today's behaviour.
-const P_TOKEN = /\bp[0-3]\b/i;
+const P_TOKEN = /\bp\s?[0-3]\b/i;
+const REGRESSION_TOKEN = /regression[*_`]*\s*:/i;
 // The all-clear must COMPLETE as one: "no regression(s) / issues /
 // findings", optionally "were/was/is/are", then "found / identified /
 // detected / reported / evident". A bare "no regression" also opens the
@@ -253,8 +260,17 @@ const P_TOKEN = /\bp[0-3]\b/i;
 // new retry branch."), so it is not evidence (Codex pre-review round 4).
 const ALL_CLEAR =
   /\bno (?:actionable |new |functional )?(?:regressions?|issues|findings)\b(?:\s+(?:were|was|is|are))?\s+(?:found|identified|detected|reported|evident)\b/i;
-const CAVEAT =
-  /\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\b|review comment|- \[/i;
+const CLEAN_TRAILER_LINE = /^verdict:\s*clean\s*\.?$/i;
+const CAVEAT = new RegExp(
+  [
+    "\\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\\b|review comment|- \\[",
+    // the prompt's own finding wording, and severity words (independent
+    // review): "is never asserted", "has no assertion", "isn't covered by any
+    // test", "the JSDoc is now stale", "BLOCKER", "[high]"
+    "\\bnever\\b|\\bno assertions?\\b|\\bnothing asserts\\b|\\b(?:is|are|was|were)n['’]t (?:covered|tested|asserted|exercised)\\b|\\bstale\\b|\\bstill documents?\\b|\\bout of date\\b|\\binconsistent\\b|\\bblocker\\b|\\btodo\\b|\\bseverity\\b|\\bpriority\\b|\\[(?:high|medium|low)\\]",
+  ].join('|'),
+  'i'
+);
 const SHORTFALL = new RegExp(
   [
     // the review fell short, in so many words
@@ -268,21 +284,28 @@ const SHORTFALL = new RegExp(
     // having no access, however it is said: "no access", "without access",
     // "lacked read access", "didn't have access" (Codex pre-review round 6)
     "\\b(?:no|without|lack(?:ed|s|ing)?)(?: \\w+){0,2} access\\b",
+    // nothing to review: "no changes relative to origin/main", "empty diff"
+    // (independent review)
+    "\\bno (?:changes|diff)\\b|\\bempty diff\\b|\\bnothing to review\\b",
   ].join('|'),
   'i'
 );
 // A structural backstop beside the word lists: an all-clear is short. All
-// 85 quiet corpus verdicts are at most 397 bytes, the CLI's doubled summary
+// quiet corpus verdicts are at most 397 bytes, the CLI's doubled summary
 // included, while the posted ones run to 2,095; above the cap a verdict
 // posts, so a finding phrased in words no list anticipates has at most a
-// few sentences to hide in (Codex pre-review rounds 2-5 each found one).
+// few sentences to hide in.
 const QUIET_MAX_BYTES = 600;
+const everyLineClears =
+  contentLines.length > 0 &&
+  contentLines.every((l) => CLEAN_TRAILER_LINE.test(l) || ALL_CLEAR.test(l));
 const quiet =
   Buffer.byteLength(raw, 'utf8') <= QUIET_MAX_BYTES &&
   state === 'clean' &&
   !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
   !P_TOKEN.test(raw) &&
-  (trailer === 'clean' || ALL_CLEAR.test(raw)) &&
+  !REGRESSION_TOKEN.test(raw) &&
+  everyLineClears &&
   !CAVEAT.test(raw) &&
   !SHORTFALL.test(raw);
 
