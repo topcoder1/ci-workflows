@@ -2436,7 +2436,8 @@ jobs:
       # bypass mechanism (it's a hard policy block), so the message
       # shouldn't dangle bypass options the user can't actually use.
       #
-      # One notice per blocked PR, not two (WS2 step 4, 2026-10-02).
+      # One notice per blocked PR instead of two, outside a late-pr-classify
+      # race stated at pr_classify_notice (WS2 step 4, 2026-10-02).
       # pr-classify posts its own on every risk:blocked PR ("Risk class:
       # `blocked` — manual merge required", which also says this workflow
       # refuses auto-merge), and this step used to post a second one: 103
@@ -2507,6 +2508,15 @@ jobs:
           # reset and the id-shape check rather than trusting the captured
           # text.) The own-comment lookup above is unchanged: a comments API
           # that fails every read still fails this step, as before.
+          #
+          # This is a bounded wait, not a lock: Actions offers none between
+          # two workflows. If pr-classify posts more than 90 s after the
+          # first look (0 of the 104 sampled PRs; the latest trailed by
+          # 43 s), or between the last look and the post below, both notices
+          # appear — the behaviour before this change. Making pr-classify
+          # defer to this comment would close that too; it is a change to
+          # pr-classify.yml, which every caller runs on every PR, and is not
+          # taken here (Codex pre-review round 3).
           pr_classify_notice() {
             local found look
             for look in 1 2 3 4 5 6 7; do
