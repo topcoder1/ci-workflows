@@ -110,8 +110,9 @@ jobs:
           # ref, so it always serves current main even when a caller pins
           # this workflow to an older sha — deliberate, and safe because new
           # script capabilities ship behind env flags that default off
-          # (FAIL_ON_REGRESSION, STRICT_FINDINGS): older YAML + newer script
-          # is behavior-identical.
+          # (FAIL_ON_REGRESSION, STRICT_FINDINGS) or as an extra output line
+          # older YAML never reads (`quiet=`, WS2 step 3): older YAML + newer
+          # script is behavior-identical.
           # classifier-deps.mjs is the committed, version-pinned bundle of yaml
           # and minimatch that codex-gate.mjs imports relatively, so it has to
           # land in this same directory. It replaced an
@@ -605,6 +606,33 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # An ALL-CLEAR verdict is not posted (WS2 step 3, 2026-10-02):
+          # every new PR comment notifies the PR's watchers, and since WS2
+          # step 1 the automerge gate waits for this lane's check run itself
+          # wherever the caller grants `checks: read`. "All-clear" is the
+          # classifier's `quiet` (codex-verdict.mjs states the rule and its
+          # measured residual). Everything else — a finding, a P3, a caveat,
+          # an off-format answer, the no-verdict sentinel — posts exactly as
+          # before, through the path below. The unposted verdict goes to the
+          # log and the step summary, so the review stays on record. A
+          # classifier that dies here posts: silence needs evidence. Exit 0
+          # keeps the Evaluate step running. Pinned by
+          # selftest/test_comment_nonfatal_reporting.sh (sec. 4).
+          : > /tmp/comment.quiet
+          if VERDICT_FILE=/tmp/codex.verdict.full FAIL_ON_REGRESSION=false \
+               STRICT_FINDINGS=true \
+               GITHUB_OUTPUT=/tmp/comment.quiet GITHUB_STEP_SUMMARY='' \
+               node "${CODEX_SCRIPTS:?}/codex-verdict.mjs" > /dev/null \
+             && grep -qx 'quiet=true' /tmp/comment.quiet; then
+            echo "Codex verdict is an all-clear; not posting it to PR #${PR} (WS2 step 3). The verdict follows."
+            sed 's/^/    | /' /tmp/codex.verdict.full
+            {
+              echo "### Codex review (all-clear; not posted to the PR)"
+              echo
+              sed 's/^/> /' /tmp/codex.verdict.full
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          fi
           # The body is a CAPPED slice of the untruncated verdict. 60000
           # bytes keeps verdict + header + provenance + notice under GitHub's
           # 65536-CHARACTER comment limit (UTF-8: bytes >= characters) with

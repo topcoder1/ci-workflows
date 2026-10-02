@@ -412,4 +412,74 @@ else
   failed=1
 fi
 
+
+# ===========================================================================
+# QUIET — may codex-review.yml leave this verdict off the PR? (WS2 step 3)
+#
+# Every new PR comment notifies the PR's watchers. codex-review.yml stops
+# posting a verdict only on POSITIVE evidence that it is an all-clear: state
+# clean with the strict signals applied, no P0-P3 token (a P3 is a finding
+# the gate lets through, not an all-clear), an all-clear phrase, and no
+# caveat word. Anything else posts exactly as before. Measured on 220 real
+# verdicts (90 PRs in five repos, 09-15..10-02): 85 quiet, and all 50
+# distinct texts among them were all-clears. The fixtures below keep the
+# real corpus's SHAPES; the wording is neutral because the PRs they came
+# from live in private repositories.
+# ===========================================================================
+
+# Usage: run_quiet <strict:true|false> <verdict-text>. Echoes "<rc> <quiet>".
+run_quiet() {
+  local strict="$1" verdict="$2" rc quiet out
+  printf '%s' "$verdict" > "$tmp/verdict"
+  : > "$tmp/ghout"
+  set +e
+  out=$(VERDICT_FILE="$tmp/verdict" FAIL_ON_REGRESSION=false STRICT_FINDINGS="$strict" \
+    GITHUB_OUTPUT="$tmp/ghout" node "$script" 2>&1)
+  rc=$?
+  set -e
+  quiet=$(sed -n 's/^quiet=//p' "$tmp/ghout" | head -1)
+  printf '%s %s' "$rc" "${quiet:-<none>}"
+  printf '%s\n' "$out" > "$tmp/last_out"
+}
+
+# The common all-clear, duplicated as the extractor produces it.
+q_axes='No regressions found on the requested coverage, state-mutation, or contract-drift axes.
+No regressions found on the requested coverage, state-mutation, or contract-drift axes.'
+check "quiet: the common duplicated all-clear" "0 true" "$(run_quiet true "$q_axes")"
+check "quiet: a bare VERDICT: CLEAN trailer" "0 true" "$(run_quiet true 'VERDICT: CLEAN')"
+q_singular='No regression found. The changed outputs are specifically tested; no new runtime state mutation or contract drift was introduced.
+VERDICT: CLEAN'
+check "quiet: singular all-clear with a description of what is covered" "0 true" "$(run_quiet true "$q_singular")"
+
+# A P3 is a finding: clean under every state rule (strict counts only
+# P0-P2), and it must still reach a human.
+q_p3='The new counter mutation lacks a post-state assertion.
+
+Review comment:
+
+- [P3] Assert the counter outcome — src/jobs/counter.py:57-60
+  The new path increments the counter, but no test asserts the value.'
+check "quiet: a P3 review comment posts (state reads clean)" "0 false" "$(run_quiet true "$q_p3")"
+q_p3_after_all_clear='No functional regression or comment-contract drift was found; only a missing assertion remains.
+VERDICT: CLEAN
+
+Review comment:
+
+- [P3] Assert the staged-file post-state — tests/test_stage.py:88'
+check "quiet: an all-clear followed by a P3 posts" "0 false" "$(run_quiet true "$q_p3_after_all_clear")"
+check "quiet: clean prose with no all-clear phrase posts" "0 false" "$(run_quiet true 'Coverage and state-mutation axes look fine.')"
+check "quiet: an all-clear with a caveat posts" "0 false" "$(run_quiet true 'No regressions found. Missing coverage: no test pins the new cron entry.')"
+check "quiet: a regression finding posts" "0 false" "$(run_quiet true "$d79")"
+check "quiet: the no-verdict sentinel posts" "0 false" "$(run_quiet true '(Codex produced no parseable verdict — see workflow logs)')"
+check "quiet: an empty verdict posts" "0 false" "$(run_quiet true '')"
+check "quiet: a REGRESSION trailer outranks the all-clear phrase" "0 false" "$(run_quiet true 'No regressions found on the requested axes.
+VERDICT: REGRESSION')"
+# The strict signals decide quiet whatever STRICT_FINDINGS says: the
+# default classifier calls this clean, but a P2 is a finding.
+q_p2='No regressions found.
+
+- [P2] no test exercises the new error path — src/api/handler.ts:41'
+check "quiet: a P2 posts even without STRICT_FINDINGS" "0 false" "$(run_quiet false "$q_p2")"
+check "quiet: the line is written on a regression run too" "0 false" "$(run_quiet false "$d74")"
+
 exit "$failed"

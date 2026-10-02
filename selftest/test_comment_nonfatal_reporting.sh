@@ -338,6 +338,14 @@ fi
 #    pin — that degrades to a ::warning::. The step classifies with the same
 #    codex-verdict.mjs the Evaluate step runs, so these scenarios also
 #    exercise the real classifier, not a mirror of it.
+#
+#    Since WS2 step 3 (2026-10-02) an ALL-CLEAR verdict (the classifier's
+#    `quiet`: clean under the strict signals, no P0-P3 token, an all-clear
+#    phrase, no caveat word) is not posted at all — it goes to the log and
+#    the step summary. Every other verdict, including a clean one that
+#    carries a note, posts exactly as before, so the cases below that
+#    exercise posting, capping and the lost-comment branch use
+#    `codex_clean_noted`, a clean verdict with a caveat word.
 # ===========================================================================
 extract_run "$CODEX_WF" "Post review comment" "$T/codex_comment.raw" || true
 
@@ -361,6 +369,10 @@ if [ -s "$T/codex_comment.sh" ]; then
   # incident that motivated the verdict gate); the sentinel is the literal
   # string the review step writes when its awk extraction comes up empty.
   codex_clean='No regressions found in the requested coverage, state-mutation, or contract-drift axes.
+VERDICT: CLEAN'
+  # Clean, but it carries a note ("could"), so it is not an all-clear and
+  # still posts: the posting, capping and lost-comment paths use it.
+  codex_clean_noted='No regressions found; the empty-input path could use its own test.
 VERDICT: CLEAN'
   codex_findings='regression: deploy/redeploy-code.sh:171 - no test exercises the new failure path when the resolved compose config cannot be read from the box
 VERDICT: REGRESSION'
@@ -387,7 +399,8 @@ VERDICT: CLEAN'
     printf '%s\n' "$verdict" > "$T/fixtures/codex.verdict.full"
     rm -f "$T/fixtures/codex.verdict" "$T/fixtures/codex.verdict.elided" \
       "$T/fixtures/codex.model" "$T/fixtures/codex.cliversion" \
-      "$T/fixtures/comment.md" "$T/fixtures/comment.classify"
+      "$T/fixtures/comment.md" "$T/fixtures/comment.classify" \
+      "$T/fixtures/summary.md"
     : > "$T/ghlog"
     rc=0
     (
@@ -395,7 +408,7 @@ VERDICT: CLEAN'
       CODEX_FIXTURES="$T/fixtures" \
       CODEX_SCRIPTS="$PWD/.github/scripts" \
       GH_LOG="$T/ghlog" GH_COMMENT_FAIL="$comment_fail" \
-      GH_TOKEN=stub PR=422 \
+      GH_TOKEN=stub PR=422 GITHUB_STEP_SUMMARY="$T/fixtures/summary.md" \
       bash "$T/codex_comment.sh"
     ) > "$T/stdout" 2>&1 || rc=$?
   }
@@ -474,7 +487,7 @@ VERDICT: CLEAN'
   fi
 
   # DEGRADE: clean verdict + comments API down → provenance loss only.
-  codex_case "clean-down" "$codex_clean" 1
+  codex_case "clean-down" "$codex_clean_noted" 1
   if [ "$rc" -eq 0 ] && grep -q '::warning::' "$T/stdout"; then
     pass "codex/clean verdict + comment API down: exit 0 with a ::warning:: (the 2026-08-17 class stays fixed)"
   else
@@ -503,11 +516,42 @@ VERDICT: CLEAN'
   # Controls: healthy API → comment posted and step green REGARDLESS of the
   # verdict. The comment step never enforces on its own; fail_on_regression
   # enforcement lives in the Evaluate step and must stay there.
-  codex_case "clean-healthy" "$codex_clean" 0
-  if [ "$rc" -eq 0 ] && grep -q '^gh pr comment' "$T/ghlog"; then
-    pass "codex/clean verdict + healthy API: comment posted (control)"
+  codex_case "allclear-healthy" "$codex_clean" 0
+  if [ "$rc" -eq 0 ] && ! grep -q '^gh pr comment' "$T/ghlog" \
+    && grep -q 'not posting it to PR #422' "$T/stdout"; then
+    pass "codex/all-clear verdict + healthy API: not posted, step green (WS2 step 3)"
   else
-    fail "codex/clean verdict + healthy API: expected exit 0 + a posted comment (rc=$rc)"
+    fail "codex/all-clear verdict + healthy API: rc=$rc — expected exit 0, no gh pr comment, and the not-posting line"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  if grep -q 'No regressions found in the requested coverage' "$T/stdout" \
+    && grep -q 'No regressions found in the requested coverage' "$T/fixtures/summary.md" 2>/dev/null; then
+    pass "codex/all-clear verdict: the verdict is kept in the log and the step summary"
+  else
+    fail "codex/all-clear verdict: the unposted verdict is missing from the log or the step summary"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  codex_case "allclear-down" "$codex_clean" 1
+  if [ "$rc" -eq 0 ] && ! grep -q '^gh pr comment' "$T/ghlog"; then
+    pass "codex/all-clear verdict + comment API down: no post attempted, step green"
+  else
+    fail "codex/all-clear verdict + comment API down: rc=$rc — an all-clear must not touch the comments API"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  codex_case "noted-healthy" "$codex_clean_noted" 0
+  if [ "$rc" -eq 0 ] && grep -q '^gh pr comment' "$T/ghlog"; then
+    pass "codex/clean verdict with a note + healthy API: comment posted (control)"
+  else
+    fail "codex/clean verdict with a note + healthy API: expected exit 0 + a posted comment (rc=$rc)"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  # A dead classifier cannot vouch for silence: the all-clear posts.
+  CODEX_PATH_OVERRIDE="$T/badbin:$T/bin" codex_case "classifier-broken-healthy" "$codex_clean" 0
+  unset CODEX_PATH_OVERRIDE
+  if [ "$rc" -eq 0 ] && grep -q '^gh pr comment' "$T/ghlog"; then
+    pass "codex/classifier broken + healthy API: the verdict posts (silence needs evidence)"
+  else
+    fail "codex/classifier broken + healthy API: rc=$rc — a dead classifier must fall back to posting"
     sed 's/^/    /' "$T/stdout"
   fi
   codex_case "findings-healthy" "$codex_findings" 0
@@ -605,6 +649,7 @@ VERDICT: REGRESSION" 0
     # T2 — clean overflow: a long but findings-free verdict. The cut costs
     # prose only; redding it would be the 2026-08-17 class in a new spot.
     codex_case "truncated-clean-overflow" "$pad
+The helper could log its retry count.
 VERDICT: CLEAN" 0
     if [ "$rc" -eq 0 ] && grep -q '::warning::' "$T/stdout"; then
       pass "codex/clean overflow: prose-only cut stays green with a ::warning::"
@@ -755,6 +800,7 @@ VERDICT: CLEAN" 0
     }' > "$T/pad_mb"
     codex_case "truncated-multibyte-straddle" "$(cat "$T/pad_mb")
 🤖🤖🤖🤖 robot resilience prose continues beyond the cut here
+The helper could log its retry count.
 VERDICT: CLEAN" 0
     if [ "$rc" -eq 0 ]; then
       pass "codex/multibyte straddle: green — the split character's line carries no findings"
@@ -808,6 +854,7 @@ VERDICT: REGRESSION" 0
     # owns the no-post path, classifying the FULL file (nothing posted, so
     # remainder-scoping would under-count what was lost).
     codex_case "truncated-clean-down" "$pad
+The helper could log its retry count.
 VERDICT: CLEAN" 1
     if [ "$rc" -eq 0 ] && grep -q 'state=clean' "$T/stdout"; then
       pass "codex/clean overflow + comment API down: lost-comment branch classifies the full file, stays green"
@@ -818,7 +865,7 @@ VERDICT: CLEAN" 1
 
     # Control — a small verdict is untouched: posted whole (trailer and
     # all), no truncation notice.
-    codex_case "small-verdict-untouched" "$codex_clean" 0
+    codex_case "small-verdict-untouched" "$codex_clean_noted" 0
     if [ "$rc" -eq 0 ] && grep -q 'VERDICT: CLEAN' "$T/fixtures/comment.md" \
       && ! grep -q 'comment cap' "$T/fixtures/comment.md"; then
       pass "codex/small verdict: posted whole, trailer intact, no truncation notice (control)"

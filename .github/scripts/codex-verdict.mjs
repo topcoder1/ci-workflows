@@ -26,6 +26,7 @@
 //   STRICT_FINDINGS     "true" to also count the automerge findings gate's
 //                       severity signals as findings (see below); default off
 //   GITHUB_OUTPUT       (optional) — verdict_state=clean|regression|no_verdict
+//                       and quiet=true|false (see QUIET below)
 //   GITHUB_STEP_SUMMARY (optional) — append markdown summary
 //
 // Exit code: 1 only when FAIL_ON_REGRESSION=true AND the verdict is not
@@ -208,6 +209,42 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
   }
 }
 
+// QUIET — may codex-review.yml leave this verdict off the PR? (WS2 step 3,
+// 2026-10-02.) Every new PR comment notifies the PR's watchers, and since
+// WS2 step 1 the automerge gate waits for this lane's check run itself
+// wherever the caller grants `checks: read`, so an all-clear comment no
+// longer carries anything a gate needs.
+//
+// `clean` above is the ABSENCE of finding signals, and the state comment
+// accepts its misses because "the review comment still puts it in front of a
+// human". Silence removes that human, so it needs POSITIVE evidence:
+//   - state clean, with the strict signals applied whatever STRICT_FINDINGS
+//     says;
+//   - no P0-P3 token anywhere: a P3 is a finding the gate lets through, not
+//     an all-clear, and strict mode counts only P0-P2;
+//   - an all-clear: the `VERDICT: CLEAN` trailer, or "no regression(s) /
+//     issues / findings";
+//   - no caveat word ("but", "missing", "lacks", "no test", "should", ...).
+// Measured on 220 real verdicts (90 PRs in five repos, 09-15..10-02): 85 are
+// quiet, all 50 distinct texts among them are all-clears, and every
+// strict-clean verdict carrying a P3 or a "lacks an assertion" still posts.
+//
+// Residual, accepted: an all-clear sentence followed by a finding phrased
+// with none of the caveat words ("No regressions found. The cron line is
+// unguarded.") is quiet. codex-review.yml still prints it to the run log and
+// the step summary, and the automerge gate reads it as clean either way.
+// Every miss here fails toward posting, which is today's behaviour.
+const P_TOKEN = /\bp[0-3]\b/i;
+const ALL_CLEAR = /\bno (?:actionable |new )?(?:regressions?|issues|findings)\b/i;
+const CAVEAT =
+  /\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\b|review comment|- \[/i;
+const quiet =
+  state === 'clean' &&
+  !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
+  !P_TOKEN.test(raw) &&
+  (trailer === 'clean' || ALL_CLEAR.test(raw)) &&
+  !CAVEAT.test(raw);
+
 const summary = {
   clean: 'Codex reported no regressions.',
   regression:
@@ -222,6 +259,7 @@ const summary = {
 
 if (process.env.GITHUB_OUTPUT) {
   appendFileSync(process.env.GITHUB_OUTPUT, `verdict_state=${state}\n`);
+  appendFileSync(process.env.GITHUB_OUTPUT, `quiet=${quiet}\n`);
 }
 if (process.env.GITHUB_STEP_SUMMARY) {
   appendFileSync(
