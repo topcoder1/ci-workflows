@@ -2490,23 +2490,29 @@ jobs:
               echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
             fi
           } > /tmp/automerge-blocked.md
-          # Is pr-classify's own notice on this PR? Only the comment counts: a
+          # Is pr-classify's own notice on this PR? Only that comment counts: a
           # risk:blocked label can be applied by hand, and pr-classify's
           # comment step is non-fatal, so a label proves nothing about the
-          # notice (Codex pre-review round 1). Both workflows start from the
-          # same PR event, so the first look can come before pr-classify has
-          # posted — on 25 of the 104 sampled PRs its comment landed in the
-          # same second as this step's or after it, by up to 43 s — so this
-          # looks again every 15 s for up to 90 s before giving up. A repo
-          # without pr-classify pays that wait once per blocked PR, then gets
-          # its notice. A failed read counts as absent: a duplicate notice
+          # notice (Codex pre-review round 1). And only pr-classify's comment:
+          # it is posted by github-actions[bot] with the marker as its first
+          # line, so a person or a review bot quoting the marker cannot stand
+          # in for it (round 2). Both workflows start from the same PR event,
+          # so the first look can come before pr-classify has posted — on 25
+          # of the 104 sampled PRs its comment landed in the same second as
+          # this step's or after it, by up to 43 s — so this looks again
+          # every 15 s for up to 90 s before giving up. A repo without
+          # pr-classify pays that wait once per blocked PR, then gets its
+          # notice. A failed lookup counts as absent: a duplicate notice
           # beats none. (gh prints an HTTP error's body to stdout, hence the
-          # reset rather than trusting the captured text.)
+          # reset and the id-shape check rather than trusting the captured
+          # text.) The own-comment lookup above is unchanged: a comments API
+          # that fails every read still fails this step, as before.
           pr_classify_notice() {
-            local bodies look
+            local found look
             for look in 1 2 3 4 5 6 7; do
-              bodies=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[].body') || bodies=""
-              if [[ "$bodies" == *'<!-- pr-classify:blocked -->'* ]]; then
+              found=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+                --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- pr-classify:blocked -->")) | .id') || found=""
+              if [[ "$found" =~ ^[0-9]+ ]]; then
                 return 0
               fi
               if [ "$look" -lt 7 ]; then
