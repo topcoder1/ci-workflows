@@ -228,6 +228,7 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
 //     an all-clear, and strict mode counts only P0-P2;
 //   - an all-clear: the `VERDICT: CLEAN` trailer, or "no regression(s) /
 //     issues / findings … found / identified / evident" (ALL_CLEAR);
+//   - at most QUIET_MAX_BYTES of verdict (see below);
 //   - no caveat word ("but", "missing", "lacks", "no test", "should", ...),
 //     and no word saying the review itself fell short ("unable", "cannot",
 //     "failed", "skipped", "sandbox", ...): Codex has written "no
@@ -267,7 +268,14 @@ const SHORTFALL = new RegExp(
   ].join('|'),
   'i'
 );
+// A structural backstop beside the word lists: an all-clear is short. All
+// 85 quiet corpus verdicts are at most 397 bytes, the CLI's doubled summary
+// included, while the posted ones run to 2,095; above the cap a verdict
+// posts, so a finding phrased in words no list anticipates has at most a
+// few sentences to hide in (Codex pre-review rounds 2-5 each found one).
+const QUIET_MAX_BYTES = 600;
 const quiet =
+  Buffer.byteLength(raw, 'utf8') <= QUIET_MAX_BYTES &&
   state === 'clean' &&
   !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
   !P_TOKEN.test(raw) &&

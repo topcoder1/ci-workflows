@@ -507,5 +507,10 @@ check "quiet: \"Flagged 3 confirmed issues\" is a finding and posts" "0 false" "
 check "quiet: \"haven't been able\" posts" "0 false" "$(run_quiet true "No regressions found. I haven't been able to inspect the diff.
 VERDICT: CLEAN")"
 check "quiet: \"had not been able\" posts" "0 false" "$(run_quiet true 'No regressions found. I had not been able to read the changed files.')"
+# The length backstop: an all-clear followed by a long elaboration posts,
+# whatever words it uses (all 85 quiet corpus verdicts are under 400 bytes).
+long_tail=$(awk 'BEGIN{for(i=0;i<12;i++) printf "The %02d-th changed helper keeps its documented contract intact. ", i}')
+check "quiet: an all-clear over 600 bytes posts" "0 false" "$(run_quiet true "No regressions found. $long_tail")"
+check "quiet: the same all-clear under the cap is quiet (control)" "0 true" "$(run_quiet true 'No regressions found. The 01-th changed helper keeps its documented contract intact.')"
 
 exit "$failed"
