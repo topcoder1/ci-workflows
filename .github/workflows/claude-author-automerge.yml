@@ -2441,13 +2441,14 @@ jobs:
       # `blocked` — manual merge required", which also says this workflow
       # refuses auto-merge), and this step used to post a second one: 103
       # of 104 blocked PRs in five repos carried both (09-15..10-02). So for
-      # risk:blocked it CREATES no comment while pr-classify's label or
-      # notice is on the PR (pr_classify_notice below). It still creates one
-      # where neither is there — a repo without pr-classify (topcoder1/
-      # dotclaude and topcoder1/jz_skills on 2026-10-02) or pr-classify
-      # lagging — and for every risk:sensitive PR, which pr-classify never
-      # annotates. An existing comment is still updated in place, since an
-      # edit notifies nobody. Pinned by selftest/test_automerge_blocked_notice.sh.
+      # risk:blocked it CREATES no comment once pr-classify's notice is on
+      # the PR (pr_classify_notice below, which waits up to 90 s for it). It
+      # still creates one when the notice never appears — a repo without
+      # pr-classify (topcoder1/dotclaude and topcoder1/jz_skills on
+      # 2026-10-02) or pr-classify failing to post — and for every
+      # risk:sensitive PR, which pr-classify never annotates. An existing
+      # comment is still updated in place, since an edit notifies nobody.
+      # Pinned by selftest/test_automerge_blocked_notice.sh.
       - name: Comment when classifier-blocked
         if: |
           steps.detect.outputs.claude_authored == '1' &&
@@ -2489,19 +2490,30 @@ jobs:
               echo "If this is misclassified, edit the caller repo's \`.github/risk-paths.yml\`."
             fi
           } > /tmp/automerge-blocked.md
-          # pr-classify writes the risk:blocked label one step before its
-          # notice, so either one on the PR means the notice exists or is
-          # seconds away. A failed read counts as absent: a duplicate notice
+          # Is pr-classify's own notice on this PR? Only the comment counts: a
+          # risk:blocked label can be applied by hand, and pr-classify's
+          # comment step is non-fatal, so a label proves nothing about the
+          # notice (Codex pre-review round 1). Both workflows start from the
+          # same PR event, so the first look can come before pr-classify has
+          # posted — on 25 of the 104 sampled PRs its comment landed in the
+          # same second as this step's or after it, by up to 43 s — so this
+          # looks again every 15 s for up to 90 s before giving up. A repo
+          # without pr-classify pays that wait once per blocked PR, then gets
+          # its notice. A failed read counts as absent: a duplicate notice
           # beats none. (gh prints an HTTP error's body to stdout, hence the
           # reset rather than trusting the captured text.)
           pr_classify_notice() {
-            local labels bodies
-            labels=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/labels?per_page=100" --jq '.[].name') || labels=""
-            case $'\n'"$labels"$'\n' in
-              *$'\n''risk:blocked'$'\n'*) return 0 ;;
-            esac
-            bodies=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[].body') || bodies=""
-            [[ "$bodies" == *'<!-- pr-classify:blocked -->'* ]]
+            local bodies look
+            for look in 1 2 3 4 5 6 7; do
+              bodies=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[].body') || bodies=""
+              if [[ "$bodies" == *'<!-- pr-classify:blocked -->'* ]]; then
+                return 0
+              fi
+              if [ "$look" -lt 7 ]; then
+                sleep 15
+              fi
+            done
+            return 1
           }
           if [ -n "$existing" ]; then
             gh api -X PATCH "/repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
