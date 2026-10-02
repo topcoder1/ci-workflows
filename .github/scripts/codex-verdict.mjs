@@ -263,8 +263,11 @@ const SHORTFALL = new RegExp(
     // before a verb of reviewing: "didn't inspect", "wasn’t able",
     // "haven't reviewed", "could not access" (Codex pre-review round 3),
     // and the perfect tense, "haven't been able" (round 5)
-    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not)(?: been)? (?:able|available|accessible|given|allowed|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
+    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not)(?: been)? (?:able|available|accessible|given|allowed|have|get|got|gain(?:ed)?|obtain(?:ed)?|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
     "\\bnot (?:able|available|accessible|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied))\\b",
+    // having no access, however it is said: "no access", "without access",
+    // "lacked read access", "didn't have access" (Codex pre-review round 6)
+    "\\b(?:no|without|lack(?:ed|s|ing)?)(?: \\w+){0,2} access\\b",
   ].join('|'),
   'i'
 );
