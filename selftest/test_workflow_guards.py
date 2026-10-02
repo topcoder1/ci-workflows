@@ -1522,7 +1522,7 @@ def test_coverage_floor_comment_is_created_only_when_there_is_something_to_act_o
     """A passing Coverage Floor run creates no comment (WS2 step 2).
 
     Every new PR comment notifies the PR's watchers, and the table this step
-    posted on every passing run was ~55 of dev@'s ~236 GitHub emails a week
+    posted on every passing run was ~55 of the ops inbox's ~236 GitHub emails a week
     (whois-api-llc/wxa_vpn, docs/superpowers/plans/
     2026-09-24-maintenance-noise-reduction.md, WS2). So the step CREATES the
     comment only when the job failed, or in seed mode, whose note explains
