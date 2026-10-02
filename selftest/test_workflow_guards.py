@@ -1502,3 +1502,87 @@ def test_sticky_comment_action_steps_are_nonfatal():
         "however the reporting step is implemented now, so it keeps guarding "
         "the real one"
     )
+
+
+def _coverage_floor_comment_step():
+    workflow = yaml.safe_load((WORKFLOWS_DIR / "coverage-floor.yml").read_text())
+    steps = [
+        s
+        for s in workflow["jobs"]["measure"]["steps"]
+        if "marocchino/sticky-pull-request-comment" in (s.get("uses") or "")
+    ]
+    assert len(steps) == 1, (
+        f"expected exactly one sticky-comment step in coverage-floor.yml's "
+        f"measure job, found {len(steps)}"
+    )
+    return steps[0]
+
+
+def test_coverage_floor_comment_is_created_only_when_there_is_something_to_act_on():
+    """A passing Coverage Floor run creates no comment (WS2 step 2).
+
+    Every new PR comment notifies the PR's watchers, and the table this step
+    posted on every passing run was ~55 of the ops inbox's ~236 GitHub emails a week
+    (whois-api-llc/wxa_vpn, docs/superpowers/plans/
+    2026-09-24-maintenance-noise-reduction.md, WS2). So the step CREATES the
+    comment only when the job failed, or in seed mode, whose note explains
+    the follow-up seed PR. On every other run `only_update` lets it EDIT a
+    comment that an earlier failing run left (an edit notifies nobody), so a
+    PR fixed after a failure never keeps a stale FAIL table, and a PR is
+    notified once, at its first failure. The action reads the input with
+    core.getBooleanInput, so the expression's "true" or "false" is accepted
+    either way.
+
+    The inputs are pinned as a set: another mode beside `only_update`
+    (`recreate`, `hide_and_recreate`, `delete`) would make the action either
+    re-create the comment, notifying again, or reject the combination on
+    every passing run, an error `continue-on-error` would hide.
+    """
+    step = _coverage_floor_comment_step()
+    assert set(step["with"]) == {"header", "only_update", "message"}, (
+        f"unexpected sticky-comment inputs: {sorted(step['with'])}"
+    )
+    assert step["with"]["header"] == "coverage-floor", step["with"]["header"]
+    assert step["with"].get("only_update") == (
+        "${{ job.status == 'success' && steps.floor.outputs.mode != 'seed' }}"
+    ), (
+        "the coverage comment must be created only on a failed or seed-mode "
+        "run and only updated otherwise, got "
+        f"only_update={step['with'].get('only_update')!r}"
+    )
+
+
+def test_coverage_floor_comment_skips_a_cancelled_run():
+    """A cancelled run writes no comment.
+
+    The step ran under `always()`, which includes cancellation, so a run
+    cancelled before it measured anything rewrote the table with blank
+    values. Under the create-on-failure rule above, `job.status` would be
+    `cancelled`, not `success`, so such a run would also CREATE a blank table,
+    a notification for a run that measured nothing. The step therefore runs
+    on success or failure only: `cancelled()` is a status function, so
+    `!cancelled()` replaces the implicit `success()` instead of joining it.
+    """
+    step = _coverage_floor_comment_step()
+    assert step["if"] == "github.event_name == 'pull_request' && !cancelled()", (
+        f"the coverage comment step must skip cancelled runs, got if={step['if']!r}"
+    )
+
+
+def test_coverage_floor_comment_states_its_result():
+    """The table's first line says whether the floor held.
+
+    The comment now appears on failures, and a later pass edits it in place,
+    so the reader must not have to compare two numbers to know which state
+    they are looking at. It also names the head commit: a later push that
+    skips the job (a docs-only diff in most callers) leaves the comment as it
+    was, and the commit says which head it describes. "Coverage Floor" stays
+    in that line: both
+    unaddressed-findings detectors (.github/scripts/unaddressed-findings.sh
+    and dotclaude's bb-unaddressed-findings.sh) list the phrase in CLEAN_RE,
+    so a coverage table is never read as a review finding.
+    """
+    first = _coverage_floor_comment_step()["with"]["message"].splitlines()[0]
+    assert first.startswith("**Coverage Floor**"), first
+    assert "${{ job.status == 'success' && 'passed' || 'FAILED' }}" in first, first
+    assert "${{ github.event.pull_request.head.sha }}" in first, first
