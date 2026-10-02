@@ -489,5 +489,10 @@ VERDICT: CLEAN')"
 check "quiet: an all-clear after a sandboxed git failure posts" "0 false" "$(run_quiet true 'No regressions found. git commands failed in the sandbox, so the diff was read from the PR title only.
 VERDICT: CLEAN')"
 check "quiet: an all-clear on a partial review posts" "0 false" "$(run_quiet true 'No regressions found in the files reviewed; the review was partial.')"
+# Contractions and typographic apostrophes (Codex pre-review round 3).
+check "quiet: \"didn't inspect\" posts" "0 false" "$(run_quiet true "No issues found. I didn't inspect the diff due to permissions.
+VERDICT: CLEAN")"
+check "quiet: \"wasn’t able\" (typographic apostrophe) posts" "0 false" "$(run_quiet true 'No regressions found; I wasn’t able to read the test files.')"
+check "quiet: \"haven't reviewed\" posts" "0 false" "$(run_quiet true "No regressions found. Git was not available, so I haven't reviewed the changes.")"
 
 exit "$failed"

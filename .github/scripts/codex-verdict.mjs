@@ -244,8 +244,18 @@ const P_TOKEN = /\bp[0-3]\b/i;
 const ALL_CLEAR = /\bno (?:actionable |new )?(?:regressions?|issues|findings)\b/i;
 const CAVEAT =
   /\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\b|review comment|- \[/i;
-const SHORTFALL =
-  /\b(?:unable|cannot|can't|couldn't|could not|fail(?:ed|ure|ing|s)?|errors?|incomplete|partial(?:ly)?|skip(?:ped|s)?|timed? out|time-?out|unavailable|denied|sandbox|not (?:able|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)))\b|did not (?:run|read|inspect|access|review|verify)/i;
+const SHORTFALL = new RegExp(
+  [
+    // the review fell short, in so many words
+    "\\b(?:unable|cannot|can['’]t|couldn['’]t|incomplete|partial(?:ly)?|unavailable|denied|permissions?|sandbox(?:ed)?|fail(?:ed|ure|ing|s)?|errors?|skip(?:ped|s)?|timed? out|time-?out)\\b",
+    // a negated auxiliary, spelled out or contracted (either apostrophe),
+    // before a verb of reviewing: "didn't inspect", "wasn’t able",
+    // "haven't reviewed", "could not access" (Codex pre-review round 3)
+    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not) (?:able|given|allowed|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
+    "\\bnot (?:able|available|accessible|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied))\\b",
+  ].join('|'),
+  'i'
+);
 const quiet =
   state === 'clean' &&
   !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
