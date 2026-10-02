@@ -429,7 +429,7 @@ jobs:
           }
           state="UNKNOWN"
           if ! disarm_as "$BOT_TOKEN" "github-actions[bot]" && [ "$USING_PAT" = "1" ]; then
-            echo "::warning::auto-merge is still '${state}' after 3 attempts as github-actions[bot] — retrying as the automerge_pat user (fail closed)."
+            echo "::warning::auto-merge is still '${state}' after 3 attempts as github-actions[bot] — retrying as the automerge_pat user (fail closed). claude-author-automerge reads a disarm by that user as a manual hold, so it will not re-arm a Claude-authored PR until someone re-arms it by hand."
             disarm_as "$GH_TOKEN" "the automerge_pat user" || true
           fi
           if [ "$state" != "OFF" ]; then

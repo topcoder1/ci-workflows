@@ -220,11 +220,13 @@ arbitrary helper scripts; that's a different kind of repo.
   that records each auto-merge event under its token's actor, then
   claude-author's SHIPPED detection step (in a real checkout) and
   manual-hold step on the same PR. Pins: no hold after the revoke (a human's
-  disable still holds); the PAT only after three refused bot attempts, and
-  without a PAT the step fails; an arm still ON or unreadable after every
-  attempt fails the step and posts no explanation; a head pushed mid-revoke
-  keeps its arm and the PAT never runs. Negative control: `BOT_TOKEN` wired
-  to the PAT reads as a human's hold.
+  disable still holds); the PAT only after three refused bot attempts, its
+  disarm still read as a hold and the run's warning saying so, and without
+  a PAT the step fails; an arm still ON or unreadable after every attempt
+  fails the step and posts no explanation; a head pushed mid-revoke ends the
+  revoke before its next attempt, so that head's arm survives and the PAT
+  never runs. Negative control: `BOT_TOKEN` wired to the PAT reads as a
+  human's hold.
 - `test_automerge_revoke_guard.sh` — a revoke's ownership guard (stand down
   when the head moved since the event) counts only a well-formed read, so
   an API error can never pass for a move. `gh api … --jq` prints an HTTP

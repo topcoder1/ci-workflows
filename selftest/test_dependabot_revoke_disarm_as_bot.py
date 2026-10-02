@@ -466,6 +466,13 @@ def test_the_revoke_falls_back_to_the_pat_when_the_bot_cannot_disarm(tmp_path):
     assert stub.disarmed_by() == [GITHUB_TOKEN] * 3 + [PAT], (
         f"expected three attempts as github-actions[bot], then the PAT:\n{run}"
     )
+    # The fallback's disarm is recorded as the PAT user, the old hold; the run
+    # must say so rather than leave it silent.
+    assert "manual hold" in run.revoke.log, str(run)
+    assert claude_author_hold(stub) == {
+        "hold": "1",
+        "reason": "timeline:human-disable-newest",
+    }
 
 
 def test_without_a_pat_a_bot_that_cannot_disarm_fails_the_step(tmp_path):
@@ -497,6 +504,12 @@ def test_a_head_pushed_mid_revoke_keeps_its_own_arm(tmp_path):
     run = run_dependabot_auto_merge(stub, pr)
     assert stub.arm() == "ON" and PAT not in stub.disarmed_by(), (
         f"the revoke disarmed the arm the newer head's own run placed:\n{run}"
+    )
+    # The push lands during the first attempt, so the guard before the second
+    # must end the revoke. A guard checked once per identity would try twice
+    # more as the bot, and a bot that can disarm removes the newer head's arm.
+    assert stub.disarmed_by() == [GITHUB_TOKEN], (
+        f"disarm attempts went on after the head moved:\n{run}"
     )
     assert run.revoke.rc == 0 and "head moved" in run.revoke.log, str(run)
 

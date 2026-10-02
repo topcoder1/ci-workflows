@@ -19,8 +19,9 @@
 # decision output unreachable.
 #
 # THE COUNTER-INVARIANT, pinned just as hard: calls that ARE the
-# enforcement stay fatal. `gh pr merge --disable-auto` failing must still
-# fail the revoke step — a swallowed revoke failure leaves a stale arm
+# enforcement stay fatal. A revoke whose `gh pr merge --disable-auto` never
+# takes (the arm does not read OFF after every retry) must still fail the
+# revoke step — a swallowed revoke failure leaves a stale arm
 # live, which is fail-open. Deliberately NOT covered here for the same
 # reason: the lost-findings fallback comment in claude-review.yml (its
 # failure is load-bearing — a green check over unpostable findings is the
