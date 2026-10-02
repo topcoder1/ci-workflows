@@ -26,6 +26,7 @@
 //   STRICT_FINDINGS     "true" to also count the automerge findings gate's
 //                       severity signals as findings (see below); default off
 //   GITHUB_OUTPUT       (optional) — verdict_state=clean|regression|no_verdict
+//                       and quiet=true|false (see QUIET below)
 //   GITHUB_STEP_SUMMARY (optional) — append markdown summary
 //
 // Exit code: 1 only when FAIL_ON_REGRESSION=true AND the verdict is not
@@ -151,7 +152,11 @@ const NO_VERDICT_SENTINEL = /codex produced no parseable verdict/;
 // has no path-shaped target and stays clean.
 const STRICT_SIGNALS = [
   { name: 'P[012] severity token', re: /\bp[012]\b/i },
-  { name: 'flagged-N-issues summary', re: /flagged [0-9]+ issue/i },
+  // The gate's own form (FINDING_RE): up to 60 non-sentence-ending
+  // characters between the count and "issue", so "Flagged 3 confirmed
+  // issues inline" is a finding to it — and was clean here until Codex
+  // pre-review round 5 on WS2 step 3 found the gap.
+  { name: 'flagged-N-issues summary', re: /flagged [0-9]+[^.!?\n]{0,60}? issue/i },
   { name: 'VERDICT: REGRESSION (anywhere)', re: /verdict:\s*regression/i },
   {
     name: 'regression marker (path-shaped target)',
@@ -208,6 +213,112 @@ if (findings.length > 0 || trailer === 'regression' || strictHits.length > 0) {
   }
 }
 
+// QUIET — may codex-review.yml leave this verdict off the PR? (WS2 step 3,
+// 2026-10-02.) Every new PR comment notifies the PR's watchers, and since
+// WS2 step 1 the automerge gate waits for this lane's check run itself
+// wherever the caller grants `checks: read`, so an all-clear comment no
+// longer carries anything a gate needs.
+//
+// `clean` above is the ABSENCE of finding signals, and the state comment
+// accepts its misses because "the review comment still puts it in front of a
+// human". Silence removes that human, so it needs POSITIVE evidence, all of:
+//   - at most QUIET_MAX_BYTES of verdict;
+//   - state clean, with the strict signals applied whatever STRICT_FINDINGS
+//     says. It overlaps the token and line rules below, and the overlap is
+//     load-bearing: it caught `regression *:` before the token rule did
+//     (independent review), so keep it;
+//   - no P0-P3 token, however separated ("P3", "P 2", "P-1", "P#0"): a P3
+//     is a finding the gate lets through, not an all-clear, and strict mode
+//     counts only P0-P2;
+//   - no `regression:` token at all: an all-clear never needs the finding
+//     shape, and the strict marker test stops at a backtick the gate's
+//     normalized form admits (independent review);
+//   - EVERY non-empty line is the `VERDICT: CLEAN` trailer or itself an
+//     all-clear (ALL_CLEAR), so a finding on a line of its own — `[high]`,
+//     `BLOCKER:`, `1. …`, `Contract drift: …` — posts (independent review);
+//     and no line break the line split cannot see (a lone CR, U+2028/9,
+//     NEL, VT, FF), which would join a finding onto an all-clear line;
+//   - no caveat word, including the prompt's own finding wording ("never
+//     asserted", "isn't covered", "stale", "inconsistent"), and no word
+//     saying the review itself fell short ("unable", "didn't inspect", "no
+//     access", "nothing to review", ...): Codex has written "no regressions
+//     found" over a review that never read the diff (see the sandbox note in
+//     codex-review.yml), so an all-clear beside one is not evidence.
+// Codex pre-review rounds 2-6 and the independent review each found a
+// phrasing the lists missed; the line rule and the byte cap are the
+// structural answer, and every miss fails toward posting.
+//
+// Measured on 220 real verdicts (90 PRs in five repos, 09-15..10-02): 84 are
+// quiet, all of them all-clears; every strict-clean verdict carrying a P3, a
+// "lacks an assertion" or a line that is not itself an all-clear posts.
+//
+// Residual, accepted: a short all-clear LINE that also carries a finding in
+// words none of the lists know ("No regressions found; the cron line is
+// unguarded.") is quiet. codex-review.yml still prints it to the run log and
+// the step summary, and the automerge gate reads it as clean either way.
+const P_TOKEN = /\bp[\s.#-]?[0-3]\b/i;
+// What the findings scan admits after normalization: whitespace or
+// decoration between the word and the colon ("regression *:").
+const REGRESSION_TOKEN = /regression[\s*_`]*:/i;
+// A CR at the very end joins nothing, so only a CR with text after it counts.
+const HIDDEN_LINE_BREAK = /\r(?!\n|$)|[\u2028\u2029\u0085\v\f]/;
+// The all-clear must COMPLETE as one: "no regression(s) / issues /
+// findings", optionally "were/was/is/are", then "found / identified /
+// detected / reported / evident". A bare "no regression" also opens the
+// missing-test finding the prompt asks for ("No regression test covers the
+// new retry branch."), so it is not evidence (Codex pre-review round 4).
+const ALL_CLEAR =
+  /\bno (?:actionable |new |functional )?(?:regressions?|issues|findings)\b(?:\s+(?:were|was|is|are))?\s+(?:found|identified|detected|reported|evident)\b/i;
+const CLEAN_TRAILER_LINE = /^verdict:\s*clean\s*\.?$/i;
+const CAVEAT = new RegExp(
+  [
+    "\\b(?:but|however|although|though|except|missing|lacks?|lacking|no (?:automated |direct |dedicated )?tests?|not (?:covered|tested|asserted|exercised)|untested|unasserted|should|consider|could|might|suggest|recommend|nit)\\b|review comment|- \\[",
+    // the prompt's own finding wording, and severity words (independent
+    // review): "is never asserted", "has no assertion", "isn't covered by any
+    // test", "the JSDoc is now stale", "BLOCKER", "[high]"
+    "\\bnever\\b|\\bno assertions?\\b|\\bnothing (?:asserts?|tests?|covers?|exercises?)\\b|\\b(?:does|do|did)n['’]t (?:assert|test|cover|exercise)\\b|\\((?:high|medium|low|critical)\\)|\\b(?:is|are|was|were)n['’]t (?:covered|tested|asserted|exercised)\\b|\\bstale\\b|\\bstill documents?\\b|\\bout of date\\b|\\binconsistent\\b|\\bblocker\\b|\\btodo\\b|\\bseverity\\b|\\bpriority\\b|\\[(?:high|medium|low)\\]",
+  ].join('|'),
+  'i'
+);
+const SHORTFALL = new RegExp(
+  [
+    // the review fell short, in so many words
+    "\\b(?:unable|cannot|can['’]t|couldn['’]t|incomplete|partial(?:ly)?|unavailable|denied|permissions?|sandbox(?:ed)?|fail(?:ed|ure|ing|s)?|errors?|skip(?:ped|s)?|timed? out|time-?out)\\b",
+    // a negated auxiliary, spelled out or contracted (either apostrophe),
+    // before a verb of reviewing: "didn't inspect", "wasn’t able",
+    // "haven't reviewed", "could not access" (Codex pre-review round 3),
+    // and the perfect tense, "haven't been able" (round 5)
+    "\\b(?:did|was|were|could|would|have|has|had|is|are)(?:n['’]t| not)(?: been)? (?:able|available|accessible|given|allowed|have|get|got|gain(?:ed)?|obtain(?:ed)?|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied)|see|seen|open(?:ed)?|load(?:ed)?|fetch(?:ed)?|check(?:ed)?|examine(?:d)?|reach(?:ed)?)\\b",
+    "\\bnot (?:able|available|accessible|run|read|inspect(?:ed)?|access(?:ed)?|review(?:ed)?|verif(?:y|ied))\\b",
+    // having no access, however it is said: "no access", "without access",
+    // "lacked read access", "didn't have access" (Codex pre-review round 6)
+    "\\b(?:no|without|lack(?:ed|s|ing)?)(?: \\w+){0,2} access\\b",
+    // nothing to review: "no changes relative to origin/main", "empty diff"
+    // (independent review)
+    "\\bno (?:changes|diff)\\b|\\bempty diff\\b|\\bnothing to review\\b",
+  ].join('|'),
+  'i'
+);
+// A structural backstop beside the word lists: an all-clear is short. All
+// quiet corpus verdicts are at most 397 bytes, the CLI's doubled summary
+// included, while the posted ones run to 2,095; above the cap a verdict
+// posts, so a finding phrased in words no list anticipates has at most a
+// few sentences to hide in.
+const QUIET_MAX_BYTES = 600;
+const everyLineClears =
+  contentLines.length > 0 &&
+  contentLines.every((l) => CLEAN_TRAILER_LINE.test(l) || ALL_CLEAR.test(l));
+const quiet =
+  Buffer.byteLength(raw, 'utf8') <= QUIET_MAX_BYTES &&
+  state === 'clean' &&
+  !STRICT_SIGNALS.some((s) => s.re.test(raw)) &&
+  !P_TOKEN.test(raw) &&
+  !REGRESSION_TOKEN.test(raw) &&
+  !HIDDEN_LINE_BREAK.test(raw) &&
+  everyLineClears &&
+  !CAVEAT.test(raw) &&
+  !SHORTFALL.test(raw);
+
 const summary = {
   clean: 'Codex reported no regressions.',
   regression:
@@ -222,6 +333,7 @@ const summary = {
 
 if (process.env.GITHUB_OUTPUT) {
   appendFileSync(process.env.GITHUB_OUTPUT, `verdict_state=${state}\n`);
+  appendFileSync(process.env.GITHUB_OUTPUT, `quiet=${quiet}\n`);
 }
 if (process.env.GITHUB_STEP_SUMMARY) {
   appendFileSync(

@@ -348,6 +348,8 @@ No issues found on coverage, but P1 unscoped token reaches push.
 ===CASE===
 Flagged 3 issues inline.
 ===CASE===
+No regressions found. Flagged 3 confirmed issues inline.
+===CASE===
 VERDICT: REGRESSION on the coverage axis.
 VERDICT: CLEAN
 ===CASE===
@@ -411,5 +413,145 @@ else
   echo "✗ parity sweep skipped: jq not installed (required — the automerge gate runs on jq)"
   failed=1
 fi
+
+
+# ===========================================================================
+# QUIET — may codex-review.yml leave this verdict off the PR? (WS2 step 3)
+#
+# Every new PR comment notifies the PR's watchers. codex-review.yml stops
+# posting a verdict only on POSITIVE evidence that it is an all-clear: state
+# clean with the strict signals applied, no P0-P3 token (a P3 is a finding
+# the gate lets through, not an all-clear), an all-clear phrase, and no
+# caveat word. Anything else posts exactly as before. Measured on 220 real
+# verdicts (90 PRs in five repos, 09-15..10-02): 85 quiet, and all 50
+# distinct texts among them were all-clears. The fixtures below keep the
+# real corpus's SHAPES; the wording is neutral because the PRs they came
+# from live in private repositories.
+# ===========================================================================
+
+# Usage: run_quiet <strict:true|false> <verdict-text>. Echoes "<rc> <quiet>".
+run_quiet() {
+  local strict="$1" verdict="$2" rc quiet out
+  printf '%s' "$verdict" > "$tmp/verdict"
+  : > "$tmp/ghout"
+  set +e
+  out=$(VERDICT_FILE="$tmp/verdict" FAIL_ON_REGRESSION=false STRICT_FINDINGS="$strict" \
+    GITHUB_OUTPUT="$tmp/ghout" node "$script" 2>&1)
+  rc=$?
+  set -e
+  quiet=$(sed -n 's/^quiet=//p' "$tmp/ghout" | head -1)
+  printf '%s %s' "$rc" "${quiet:-<none>}"
+  printf '%s\n' "$out" > "$tmp/last_out"
+}
+
+# The common all-clear, duplicated as the extractor produces it.
+q_axes='No regressions found on the requested coverage, state-mutation, or contract-drift axes.
+No regressions found on the requested coverage, state-mutation, or contract-drift axes.'
+check "quiet: the common duplicated all-clear" "0 true" "$(run_quiet true "$q_axes")"
+check "quiet: a bare VERDICT: CLEAN trailer" "0 true" "$(run_quiet true 'VERDICT: CLEAN')"
+q_singular='No regression found. The changed outputs are specifically tested; no new runtime state mutation or contract drift was introduced.
+VERDICT: CLEAN'
+check "quiet: singular all-clear with a description of what is covered" "0 true" "$(run_quiet true "$q_singular")"
+
+# A P3 is a finding: clean under every state rule (strict counts only
+# P0-P2), and it must still reach a human.
+q_p3='The new counter mutation lacks a post-state assertion.
+
+Review comment:
+
+- [P3] Assert the counter outcome — src/jobs/counter.py:57-60
+  The new path increments the counter, but no test asserts the value.'
+check "quiet: a P3 review comment posts (state reads clean)" "0 false" "$(run_quiet true "$q_p3")"
+q_p3_after_all_clear='No functional regression or comment-contract drift was found; only a missing assertion remains.
+VERDICT: CLEAN
+
+Review comment:
+
+- [P3] Assert the staged-file post-state — tests/test_stage.py:88'
+check "quiet: an all-clear followed by a P3 posts" "0 false" "$(run_quiet true "$q_p3_after_all_clear")"
+check "quiet: clean prose with no all-clear phrase posts" "0 false" "$(run_quiet true 'Coverage and state-mutation axes look fine.')"
+check "quiet: an all-clear with a caveat posts" "0 false" "$(run_quiet true 'No regressions found. Missing coverage: no test pins the new cron entry.')"
+check "quiet: a regression finding posts" "0 false" "$(run_quiet true "$d79")"
+check "quiet: the no-verdict sentinel posts" "0 false" "$(run_quiet true '(Codex produced no parseable verdict — see workflow logs)')"
+check "quiet: an empty verdict posts" "0 false" "$(run_quiet true '')"
+check "quiet: a REGRESSION trailer outranks the all-clear phrase" "0 false" "$(run_quiet true 'No regressions found on the requested axes.
+VERDICT: REGRESSION')"
+# The strict signals decide quiet whatever STRICT_FINDINGS says: the
+# default classifier calls this clean, but a P2 is a finding.
+q_p2='No regressions found.
+
+- [P2] no test exercises the new error path — src/api/handler.ts:41'
+check "quiet: a P2 posts even without STRICT_FINDINGS" "0 false" "$(run_quiet false "$q_p2")"
+check "quiet: the line is written on a regression run too" "0 false" "$(run_quiet false "$d74")"
+# A review that says it fell short is not an all-clear, whatever it
+# concludes (Codex pre-review round 2): Codex has reported "no regressions
+# found" over a review that never read the diff.
+check "quiet: an all-clear over a review that could not inspect the diff posts" "0 false" "$(run_quiet true 'No issues found; I was unable to inspect the diff.
+VERDICT: CLEAN')"
+check "quiet: an all-clear after a sandboxed git failure posts" "0 false" "$(run_quiet true 'No regressions found. git commands failed in the sandbox, so the diff was read from the PR title only.
+VERDICT: CLEAN')"
+check "quiet: an all-clear on a partial review posts" "0 false" "$(run_quiet true 'No regressions found in the files reviewed; the review was partial.')"
+# Contractions and typographic apostrophes (Codex pre-review round 3).
+check "quiet: \"didn't inspect\" posts" "0 false" "$(run_quiet true "No issues found. I didn't inspect the diff due to permissions.
+VERDICT: CLEAN")"
+check "quiet: \"wasn’t able\" (typographic apostrophe) posts" "0 false" "$(run_quiet true 'No regressions found; I wasn’t able to read the test files.')"
+check "quiet: \"haven't reviewed\" posts" "0 false" "$(run_quiet true "No regressions found. Git was not available, so I haven't reviewed the changes.")"
+# The all-clear must complete as one (Codex pre-review round 4): a bare
+# "no regression" opens the missing-test finding the prompt asks for.
+check "quiet: \"No regression test covers …\" is a finding and posts" "0 false" "$(run_quiet true 'No regression test covers the new retry branch.')"
+check "quiet: \"no regression is evident\" is an all-clear" "0 true" "$(run_quiet true 'Only dependency metadata changed, and no regression is evident.')"
+check "quiet: \"wasn't available\" posts" "0 false" "$(run_quiet true "No regressions found. The repository wasn't available; the assessment used only the PR title.")"
+# Codex pre-review round 5: the gate's flagged-count form allows words
+# between the count and "issue", and the perfect tense hides "able".
+check "quiet: \"Flagged 3 confirmed issues\" is a finding and posts" "0 false" "$(run_quiet true 'No regressions found. Flagged 3 confirmed issues inline.')"
+check "quiet: \"haven't been able\" posts" "0 false" "$(run_quiet true "No regressions found. I haven't been able to inspect the diff.
+VERDICT: CLEAN")"
+check "quiet: \"had not been able\" posts" "0 false" "$(run_quiet true 'No regressions found. I had not been able to read the changed files.')"
+# Having no access, however it is said (Codex pre-review round 6).
+check "quiet: \"didn't have access\" posts" "0 false" "$(run_quiet true "No regressions found. I didn't have access to the diff.
+VERDICT: CLEAN")"
+check "quiet: \"without read access\" posts" "0 false" "$(run_quiet true 'No regressions found, reviewed without read access to the tests.')"
+check "quiet: \"lacked access\" posts" "0 false" "$(run_quiet true 'No regressions found; the session lacked access to the base branch.')"
+# Independent review of #289. Each case is caught by the one rule it names
+# (as far as the rules allow), so deleting that rule fails here.
+#   P-token alone (a P3, and a spaced "P 2"):
+check "quiet: a P3 alone posts (P-token rule)" "0 false" "$(run_quiet true 'No regressions found. P3: rename the helper for clarity.')"
+check "quiet: a spaced \"P 2\" posts (P-token rule)" "0 false" "$(run_quiet true 'No regressions found. P 2: rename the helper.')"
+#   the finding shape alone ("regression: none" is not an all-clear here):
+check "quiet: any regression: token posts (token rule)" "0 false" "$(run_quiet true 'No regressions found; regression: none.')"
+check "quiet: a backticked marker target posts" "0 false" "$(run_quiet true 'No regression found.
+regression: na`/foo.py:3 - the path is untested')"
+check "quiet: a finding line under an all-clear posts" "0 false" "$(run_quiet true 'No regressions found.
+regression: the retry counter increment is never asserted')"
+#   the line rule alone (a finding on its own line, no listed word):
+check "quiet: a numbered finding line posts (line rule)" "0 false" "$(run_quiet true 'No regressions found.
+1. The cache key ignores the tenant id.')"
+check "quiet: a contract-drift line posts (line rule)" "0 false" "$(run_quiet true 'No regressions found.
+Contract drift: docs/api.md:12 documents the old default.')"
+check "quiet: prose with only a CLEAN trailer posts (the rule's measured cost: 1 of 85)" "0 false" "$(run_quiet true 'The site build covers the dependency update. No state mutations or function bodies changed.
+VERDICT: CLEAN')"
+#   the prompt's own finding wording on an all-clear line:
+check "quiet: \"never asserted\" posts" "0 false" "$(run_quiet true 'No regressions found; the retry counter is never asserted.')"
+check "quiet: \"isn't covered\" posts" "0 false" "$(run_quiet true "No regressions found; the new branch isn't covered by any test.")"
+check "quiet: \"now stale\" posts" "0 false" "$(run_quiet true 'No regressions found; the JSDoc for sync() is now stale.')"
+check "quiet: a BLOCKER posts" "0 false" "$(run_quiet true 'No regressions found; BLOCKER for the release.')"
+#   nothing to review:
+check "quiet: \"no changes relative to origin/main\" posts" "0 false" "$(run_quiet true 'No regressions found; the branch has no changes relative to origin/main.
+VERDICT: CLEAN')"
+# Delta review of #289: the token rule's normalization, hidden line breaks,
+# and small wording gaps.
+check "quiet: \"regression *:\" posts (token rule, decorated)" "0 false" "$(run_quiet true 'No regressions found; regression *: the cron line is unguarded.')"
+check "quiet: a lone CR joining a finding posts" "0 false" "$(run_quiet true "$(printf 'No regressions found.\rThe cron line is unguarded.')")"
+check "quiet: a U+2028 joining a finding posts" "0 false" "$(run_quiet true "$(printf 'No regressions found.\342\200\250The cron line is unguarded.')")"
+check "quiet: CRLF line ends stay quiet" "0 true" "$(run_quiet true "$(printf 'No regressions found.\r\nVERDICT: CLEAN\r\n')")"
+check "quiet: \"doesn't assert\" posts" "0 false" "$(run_quiet true "No regressions found; the test doesn't assert the retry count.")"
+check "quiet: \"nothing covers\" posts" "0 false" "$(run_quiet true 'No regressions found; nothing covers the new branch.')"
+check "quiet: \"P-1\" posts" "0 false" "$(run_quiet true 'No regressions found. P-1: rename the helper.')"
+check "quiet: \"(high)\" posts" "0 false" "$(run_quiet true 'No regressions found. (high) the cache key ignores the tenant.')"
+# The length backstop: an all-clear followed by a long elaboration posts,
+# whatever words it uses (all 85 quiet corpus verdicts are under 400 bytes).
+long_tail=$(awk 'BEGIN{for(i=0;i<12;i++) printf "The %02d-th changed helper keeps its documented contract intact. ", i}')
+check "quiet: an all-clear over 600 bytes posts" "0 false" "$(run_quiet true "No regressions found. $long_tail")"
+check "quiet: the same all-clear under the cap is quiet (control)" "0 true" "$(run_quiet true 'No regressions found. The 01-th changed helper keeps its documented contract intact.')"
 
 exit "$failed"
