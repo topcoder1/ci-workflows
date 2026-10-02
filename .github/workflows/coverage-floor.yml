@@ -30,8 +30,9 @@ name: Coverage Floor
 #         eligible) and lands the real floor.
 #   - ENFORCE (`current > 0.0`):
 #       • On pull_request: compare measured vs `current`. Below → FAIL.
-#       • On push:main: no-op (post-merge baselines tracked via PR
-#         comments, not enforced).
+#         The PR comment is created only on a failure; a later passing
+#         run updates it (see "Post sticky PR comment").
+#       • On push:main: no-op (the measured value is logged, not enforced).
 #
 # Why split the seed into a separate post-merge PR (not a self-commit on
 # the install PR):
@@ -768,7 +769,7 @@ jobs:
           echo "post-merge baseline: measured $MEASURED% vs floor $FLOOR% (no enforcement on main; PR gates handle regressions)"
 
       - name: Post sticky PR comment
-        if: github.event_name == 'pull_request' && always()
+        if: github.event_name == 'pull_request' && !cancelled()
         # Reporting only — the enforce step above is the gate and has already
         # passed or failed by the time this runs. Without this, a
         # comments-API failure fails the JOB and turns a PASSING required
@@ -777,12 +778,22 @@ jobs:
         # measured 83.0% against a floor of 80.2%. Pinned by
         # test_sticky_comment_action_steps_are_nonfatal in
         # selftest/test_workflow_guards.py.
+        #
+        # The comment is CREATED only when there is something to act on: a
+        # failed run, or seed mode's one-time note (WS2 step 2, 2026-10-02;
+        # a new comment notifies every watcher, and the table posted on every
+        # passing run was ~55 emails a week). A passing run only EDITS a
+        # comment an earlier failure left, which notifies nobody, so a fixed
+        # PR reads "passed" instead of keeping a stale table. A cancelled run
+        # measured nothing and would create a blank table, so it is skipped.
+        # Pinned by the test_coverage_floor_comment_* tests in the same file.
         continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage-floor
+          only_update: ${{ job.status == 'success' && steps.floor.outputs.mode != 'seed' }}
           message: |
-            **Coverage Floor** — mode: `${{ steps.floor.outputs.mode }}`
+            **Coverage Floor** — ${{ job.status == 'success' && 'passed' || 'FAILED' }} — mode: `${{ steps.floor.outputs.mode }}`
 
             | metric | value |
             |---|---|
