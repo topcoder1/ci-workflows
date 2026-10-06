@@ -1587,3 +1587,238 @@ def test_coverage_floor_comment_states_its_result():
     assert first.startswith("**Coverage Floor**"), first
     assert "${{ job.status == 'success' && 'passed' || 'FAILED' }}" in first, first
     assert "${{ github.event.pull_request.head.sha }}" in first, first
+
+
+# ── Coverage Floor: a failing test run fails the job ─────────────────────
+#
+# The measure step ran every default test invocation as `<runner> || true`,
+# so a failing suite reported SUCCESS. topcoder1/inbox_superpilot's main run
+# 37390781154 (2026-10-05) printed "45 failed, 7940 passed, 4 errors" inside
+# a green job, and some of that repo's test files run in no other CI lane.
+# The step now records the runner's exit status and still parses the
+# coverage file; the "Fail when the tests failed" step turns a non-zero
+# status into a red job after the floor comparison has reported. The tests
+# below execute the workflow's own scripts with every toolchain faked.
+
+_TESTS_GATE_STEP = "Fail when the tests failed"
+
+# Install and sync calls succeed. The TEST invocation writes the coverage
+# file the workflow parses for its language (87.5% throughout), then exits
+# $RUNNER_RC.
+_FAKE_JS_RUNNER = """#!/bin/bash
+if [ "$1" = test ]; then
+  mkdir -p coverage
+  echo '{"total": {"lines": {"pct": 87.5}}}' > coverage/coverage-summary.json
+  exit "${RUNNER_RC:?}"
+fi
+"""
+_FAKE_TOOLCHAIN = {
+    # `uv run --no-sync <cmd>` runs <cmd>; sync and pip succeed.
+    "uv": """#!/bin/bash
+if [ "$1" = run ]; then
+  shift
+  [ "$1" = --no-sync ] && shift
+  exec "$@"
+fi
+""",
+    "pytest": """#!/bin/bash
+echo '{"totals": {"percent_covered": 87.5}}' > coverage.json
+exit "${RUNNER_RC:?}"
+""",
+    # `python -m venv .venv` lays down a venv whose pip succeeds and whose
+    # pytest is the fake above.
+    "python": """#!/bin/bash
+[ "$1 $2" = "-m venv" ] || exit 99
+mkdir -p "$3/bin"
+printf '#!/bin/bash\\n' > "$3/bin/pip"
+cp "$(command -v pytest)" "$3/bin/pytest"
+chmod +x "$3/bin/pip" "$3/bin/pytest"
+""",
+    "go": """#!/bin/bash
+case "$1" in
+  test) echo "mode: set" > cov.out; exit "${RUNNER_RC:?}" ;;
+  tool) printf 'total:\\t(statements)\\t87.5%%\\n' ;;
+esac
+""",
+    "npm": _FAKE_JS_RUNNER,
+    "pnpm": _FAKE_JS_RUNNER,
+    "yarn": _FAKE_JS_RUNNER,
+    "bun": _FAKE_JS_RUNNER,
+    # bun's install is `curl -fsSL https://bun.sh/install | bash`.
+    "curl": "#!/bin/bash\necho true\n",
+}
+
+# Every default install+test path in the measure step: (language, the
+# manifest/lock files that route the step into that path).
+_MEASURE_PATHS = {
+    "python-uv": ("python", ["pyproject.toml"]),
+    "python-pip": ("python", ["requirements.txt"]),
+    "go": ("go", ["go.mod"]),
+    "js-npm": ("js", ["package.json"]),
+    "js-pnpm": ("js", ["package.json", "pnpm-lock.yaml"]),
+    "js-yarn": ("js", ["package.json", "yarn.lock"]),
+    "js-bun": ("js", ["package.json", "bun.lock"]),
+}
+
+
+def _coverage_floor_steps():
+    workflow = yaml.safe_load((WORKFLOWS_DIR / "coverage-floor.yml").read_text())
+    return workflow["jobs"]["measure"]["steps"]
+
+
+def _coverage_floor_step(name):
+    (step,) = [s for s in _coverage_floor_steps() if s.get("name") == name]
+    return step
+
+
+def _run_step_script(workdir, script, env):
+    """Run a step's script as `shell: bash` does."""
+    (workdir / "step.sh").write_text(script)
+    github_output = workdir / "github_output"
+    github_output.write_text("")
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(workdir / "step.sh")],
+        cwd=env.pop("CWD", workdir),
+        env={"GITHUB_OUTPUT": str(github_output), **env},
+        capture_output=True,
+        text=True,
+    )
+    outputs = dict(
+        line.split("=", 1)
+        for line in github_output.read_text().splitlines()
+        if "=" in line
+    )
+    return SimpleNamespace(
+        rc=proc.returncode, log=proc.stdout + proc.stderr, outputs=outputs
+    )
+
+
+def _run_coverage_measure(workdir, script, path, runner_rc, test_command=""):
+    """Run the measure step on a fake checkout routed into `path`."""
+    lang, manifests = _MEASURE_PATHS[path]
+    shim = workdir / "bin"
+    shim.mkdir(parents=True)
+    for name, body in _FAKE_TOOLCHAIN.items():
+        (shim / name).write_text(body)
+        (shim / name).chmod(0o755)
+    checkout = workdir / "checkout"
+    checkout.mkdir()
+    for manifest in manifests:
+        (checkout / manifest).write_text("")
+    (workdir / "runner_temp").mkdir()
+    return _run_step_script(
+        workdir,
+        script,
+        {
+            "CWD": checkout,
+            "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+            "HOME": str(workdir / "home"),
+            "RUNNER_TEMP": str(workdir / "runner_temp"),
+            "LANG_TYPE": lang,
+            "EXTRAS": "all",
+            "INPUT_TEST_COMMAND": test_command,
+            "RUNNER_RC": str(runner_rc),
+        },
+    )
+
+
+@pytest.mark.parametrize("runner_rc", [0, 3])
+@pytest.mark.parametrize("path", _MEASURE_PATHS)
+def test_coverage_floor_records_the_test_exit_status(tmp_path, path, runner_rc):
+    """Every default invocation records its runner's exact exit status.
+
+    The step itself still succeeds and still reports the coverage number, so
+    the floor comparison and the PR comment run either way; the gate step
+    below owns the verdict. Exit 3, not 1, so a step that merely notices
+    "something failed" cannot pass for one that records the status. The
+    exit-0 cases are the harness's positive control: a broken fake or a
+    missing tool fails them instead of passing everything vacuously.
+    """
+    script = _coverage_floor_step("Measure coverage")["run"]
+    run = _run_coverage_measure(tmp_path, script, path, runner_rc)
+    assert run.rc == 0, run.log
+    assert run.outputs.get("measured") == "87.5", run.log
+    assert run.outputs.get("test_exit") == str(runner_rc), (
+        f"{path}: the step must record the test runner's exit status "
+        f"{runner_rc}, got {run.outputs.get('test_exit')!r}\n{run.log}"
+    )
+
+
+@pytest.mark.parametrize("path", _MEASURE_PATHS)
+def test_coverage_floor_harness_sees_a_swallowed_exit_status(tmp_path, path):
+    """The guard above must be able to fail.
+
+    Put back the `|| true` this fix removed: a failing suite must then read
+    as exit 0, which the test above rejects.
+    """
+    script = _coverage_floor_step("Measure coverage")["run"]
+    assert "|| TEST_EXIT=$?" in script, "re-point this control at the step"
+    swallowed = script.replace("|| TEST_EXIT=$?", "|| true")
+    run = _run_coverage_measure(tmp_path, swallowed, path, runner_rc=3)
+    assert run.outputs.get("test_exit") == "0", run.log
+
+
+def test_coverage_floor_test_command_owns_its_exit_status(tmp_path):
+    """A caller test_command records no status: it owns its own.
+
+    The command runs under the step's `set -e`, so a failing one stops the
+    step there. A recorded status would be a promise this workflow cannot
+    keep: a command ending in `|| true` exits 0 whatever its tests did.
+    """
+    script = _coverage_floor_step("Measure coverage")["run"]
+    ok = _run_coverage_measure(
+        tmp_path / "ok", script, "python-uv", 0, test_command="pytest --cov"
+    )
+    assert ok.rc == 0, ok.log
+    assert ok.outputs.get("measured") == "87.5", ok.log
+    assert "test_exit" not in ok.outputs, ok.outputs
+    failing = _run_coverage_measure(
+        tmp_path / "failing", script, "python-uv", 3, test_command="pytest --cov"
+    )
+    assert failing.rc != 0, failing.log
+    assert "test_exit" not in failing.outputs, failing.outputs
+
+
+def test_coverage_floor_gate_follows_the_floor_verdict():
+    """The gate runs after the floor comparison and before the comment.
+
+    After the comparison, so a run that is both below the floor and failing
+    its tests reports both, each in its own step; `!cancelled()` in place of
+    the implicit success() keeps it running when the comparison failed.
+    Before the comment, whose `job.status` must already include the gate's
+    verdict. An empty test_exit means no default invocation ran (the
+    pre-measured or test_command paths), so the step stays out of the way.
+    """
+    steps = _coverage_floor_steps()
+    names = [s.get("name") for s in steps]
+    gate = names.index(_TESTS_GATE_STEP)
+    enforce = names.index("Enforce mode — compare measured vs floor")
+    comment = names.index("Post sticky PR comment")
+    assert enforce < gate < comment, names
+    step = steps[gate]
+    assert step["if"] == "steps.measure_fresh.outputs.test_exit != '' && !cancelled()", (
+        step["if"]
+    )
+    assert step["env"] == {"TEST_EXIT": "${{ steps.measure_fresh.outputs.test_exit }}"}
+    assert "continue-on-error" not in step, "the gate must be able to fail the job"
+
+
+@pytest.mark.parametrize("status,fails", [("0", False), ("1", True), ("3", True)])
+def test_coverage_floor_gate_fails_a_failed_test_run(tmp_path, status, fails):
+    """The gate's own script turns a non-zero status into a red step."""
+    script = _coverage_floor_step(_TESTS_GATE_STEP)["run"]
+    run = _run_step_script(
+        tmp_path, script, {"PATH": os.environ["PATH"], "TEST_EXIT": status}
+    )
+    assert (run.rc != 0) is fails, run.log
+    assert ("::error::" in run.log) is fails, run.log
+
+
+def test_coverage_floor_comment_reports_the_test_run():
+    """A run failed by its tests says so in the comment.
+
+    Its floor numbers can look passing, so without this line the table would
+    read FAILED beside a measured value above the floor.
+    """
+    message = _coverage_floor_comment_step()["with"]["message"]
+    assert "steps.measure_fresh.outputs.test_exit" in message, message
