@@ -1877,6 +1877,18 @@ def test_coverage_floor_never_seeds_from_a_failing_suite(tmp_path, test_exit, se
         assert "::warning::" in run.log, run.log
 
 
+def test_coverage_floor_seed_step_reads_the_recorded_status():
+    """The seed guard's input is wired to the measure step's output.
+
+    The harness above injects TEST_EXIT itself, so it cannot see this
+    mapping go missing. If it did, `set -u` would kill the seed step on
+    every seed-mode push to main, pre-measured callers included
+    (independent review).
+    """
+    env = _coverage_floor_step(_SEED_STEP)["env"]
+    assert env.get("TEST_EXIT") == "${{ steps.measure_fresh.outputs.test_exit }}", env
+
+
 def test_coverage_floor_seed_harness_sees_an_unguarded_step(tmp_path):
     """Without the guard, the harness must watch a failing suite seed."""
     script = _coverage_floor_step(_SEED_STEP)["run"]
