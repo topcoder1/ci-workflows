@@ -50,7 +50,8 @@ name: Coverage Floor
 # floor comparison and the PR comment report a number either way; the
 # "Fail when the tests failed" step then turns a non-zero status into a red
 # job. Each verdict has its own step, so a run that is below the floor AND
-# failing its tests shows both.
+# failing its tests shows both. Seed mode opens no seed PR from a failing
+# suite.
 #
 # Until then every default test invocation ended in `|| true`, on the theory
 # that tests-runner.yml gates pass/fail and this job only needs the number.
@@ -675,8 +676,17 @@ jobs:
           # so the seed PR will sit "blocked" until a user pushes an
           # empty commit to its branch).
           AUTOMERGE_PAT: ${{ secrets.AUTOMERGE_PAT }}
+          TEST_EXIT: ${{ steps.measure_fresh.outputs.test_exit }}
         run: |
           set -euo pipefail
+          # Never seed from a failing suite: its coverage is not a baseline,
+          # and the fixed seed branch below would block the correct seed PR
+          # once the tests are fixed. "Fail when the tests failed" reds this
+          # run afterwards. An empty TEST_EXIT (pre-measured caller) seeds.
+          if [[ -n "$TEST_EXIT" && "$TEST_EXIT" != "0" ]]; then
+            echo "::warning::the test run exited $TEST_EXIT on main — not opening a seed PR from a failing suite. The first push:main run with passing tests seeds the floor."
+            exit 0
+          fi
           # Loop-prevention guard: refuse to seed below seed_minimum.
           # Otherwise an install on a repo with broken test infra would
           # generate a 0% seed PR; here on main, we just no-op with a warning.

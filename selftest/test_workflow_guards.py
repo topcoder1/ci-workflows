@@ -1814,6 +1814,79 @@ def test_coverage_floor_gate_fails_a_failed_test_run(tmp_path, status, fails):
     assert ("::error::" in run.log) is fails, run.log
 
 
+_SEED_STEP = "Seed-not-yet on main — open follow-up seed PR"
+
+# Records every gh/git call. `gh pr create` prints a PR URL; everything else
+# succeeds silently, so `gh pr list ... | grep -q .` finds no open seed PR.
+_RECORDING_SHIM = """#!/bin/bash
+echo "$(basename "$0") $*" >> "${CALLS:?}"
+if [ "$(basename "$0") $1 $2" = "gh pr create" ]; then
+  echo https://github.com/o/r/pull/1
+fi
+"""
+
+
+def _run_seed_step(workdir, script, test_exit):
+    """Run the seed step on push:main in seed mode, with gh and git faked."""
+    shim = workdir / "bin"
+    shim.mkdir(parents=True)
+    for tool in ("gh", "git"):
+        (shim / tool).write_text(_RECORDING_SHIM)
+        (shim / tool).chmod(0o755)
+    (workdir / ".coverage-floor").write_text(
+        '{"current": 0.0, "target": 100.0, "last_bumped": null}'
+    )
+    calls = workdir / "calls"
+    calls.write_text("")
+    run = _run_step_script(
+        workdir,
+        script,
+        {
+            "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "MEASURED": "87.5",
+            "TARGET": "100.0",
+            "INPUT_FLOOR_FILE": ".coverage-floor",
+            "SEED_MIN": "1.0",
+            "AUTOMERGE_PAT": "fake-pat",
+            "GITHUB_REPOSITORY": "o/r",
+            "GITHUB_REF_NAME": "main",
+            "TEST_EXIT": test_exit,
+        },
+    )
+    run.calls = calls.read_text().splitlines()
+    return run
+
+
+@pytest.mark.parametrize("test_exit,seeds", [("0", True), ("", True), ("3", False)])
+def test_coverage_floor_never_seeds_from_a_failing_suite(tmp_path, test_exit, seeds):
+    """Seed mode on main opens no seed PR when the tests failed.
+
+    The seed step runs before the gate. It pushes a branch, opens a PR and
+    arms auto-merge, and the gate's red verdict undoes none of that. A floor
+    measured on a failing suite is not a baseline, and the fixed seed branch
+    would block the correct seed PR later (Codex, round 1). An empty status
+    (a pre-measured caller) still seeds. Exit 0 is the positive control.
+    """
+    run = _run_seed_step(tmp_path, _coverage_floor_step(_SEED_STEP)["run"], test_exit)
+    assert run.rc == 0, run.log
+    if seeds:
+        assert any(c.startswith("gh pr create") for c in run.calls), run.calls
+    else:
+        assert run.calls == [], "a failing suite must reach neither git nor gh"
+        assert "::warning::" in run.log, run.log
+
+
+def test_coverage_floor_seed_harness_sees_an_unguarded_step(tmp_path):
+    """Without the guard, the harness must watch a failing suite seed."""
+    script = _coverage_floor_step(_SEED_STEP)["run"]
+    guard_start = script.index('if [[ -n "$TEST_EXIT"')
+    guard_end = script.index("fi\n", guard_start) + len("fi\n")
+    unguarded = script[:guard_start] + script[guard_end:]
+    run = _run_seed_step(tmp_path, unguarded, "3")
+    assert any(c.startswith("gh pr create") for c in run.calls), run.calls
+
+
 def test_coverage_floor_comment_reports_the_test_run():
     """A run failed by its tests says so in the comment.
 
