@@ -45,10 +45,23 @@ name: Coverage Floor
 #   re-trigger problem entirely. The two-PR flow (install + seed) keeps
 #   each PR minimal and auto-mergeable.
 #
-# Coverage gating is intentionally separate from tests-runner.yml. Reasoning:
-# tests must pass before coverage is meaningful. Bundling would couple "tests
-# green" and "coverage above floor" into one signal, hiding which actually
-# failed. Two reusables, two signals.
+# A failing test run fails this job (2026-10-06). The measure step records
+# the test runner's exit status and still parses the coverage file, so the
+# floor comparison and the PR comment report a number either way; the
+# "Fail when the tests failed" step then turns a non-zero status into a red
+# job. Each verdict has its own step, so a run that is below the floor AND
+# failing its tests shows both. Seed mode opens no seed PR from a failing
+# suite.
+#
+# Until then every default test invocation ended in `|| true`, on the theory
+# that tests-runner.yml gates pass/fail and this job only needs the number.
+# That holds only where another lane runs every test this job runs. In
+# topcoder1/inbox_superpilot it did not: ci.yml's hand-listed lanes skip
+# files this job's bare `pytest` collects, so main's run 37390781154
+# reported SUCCESS on "45 failed, 7940 passed, 4 errors", and a break in a
+# file that runs nowhere else surfaced nowhere. The number was wrong too: a
+# test that dies early never runs the code it covers. Coverage is
+# meaningful only on a passing suite.
 
 on:
   pull_request:
@@ -179,10 +192,11 @@ on:
           Use when the default install path can't handle your repo's structure (e.g. layered
           projects where root pyproject defines the package and tests live in a subdir, or
           repos that need pre-install steps the reusable doesn't know about). Run with
-          `set -euo pipefail` style discipline. Trailing `|| true` is appropriate after the
-          test invocation so the coverage file gets parsed even when tests fail (coverage
-          floor cares about the number, not pass/fail — that's tests-runner.yml's job).
-          Default empty (use the language-specific default path).
+          `set -euo pipefail` style discipline: the command runs under the step's
+          `set -e`, so a failing test run stops the step there and fails the job. Do NOT
+          end the test invocation with `|| true` — that reports SUCCESS for a failing
+          suite, which the default invocations stopped doing on 2026-10-06 (see the
+          header). Default empty (use the language-specific default path).
         required: false
         type: string
         default: ""
@@ -479,6 +493,19 @@ jobs:
           if [[ -f "$CROSS_ORG_GITCONFIG" ]]; then
             export GIT_CONFIG_GLOBAL="$CROSS_ORG_GITCONFIG"
           fi
+          # The default test invocations RECORD their runner's exit status
+          # (`|| TEST_EXIT=$?`) rather than stopping here, so the coverage file
+          # is still parsed; "Fail when the tests failed" acts on it after the
+          # floor comparison. Recorded before each coverage-file check, so a
+          # missing file still reports how the run ended. A caller test_command
+          # records nothing: it owns its exit status, and set -e stops this
+          # step when it fails.
+          TEST_EXIT=0
+          record_test_exit() {
+            if [[ -z "$INPUT_TEST_COMMAND" ]]; then
+              echo "test_exit=$TEST_EXIT" >> "$GITHUB_OUTPUT"
+            fi
+          }
           # When the caller provides test_command, it replaces the language-specific
           # install + pytest/go-test/npm-test invocation. The coverage-file existence
           # check + MEASURED extraction at the end of each case branch still runs,
@@ -538,18 +565,17 @@ jobs:
                 [[ -f requirements-dev.txt ]] && uv pip install --quiet -r requirements-dev.txt
                 uv pip install --quiet pytest-cov
                 rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
-                # `|| true` lets us still parse coverage.json even when tests fail
-                # (tests-runner.yml is the gate for test pass/fail; we just need
-                # the coverage number here). --no-sync: the env was fully
-                # synced above; the test invocation must never trigger a
-                # re-resolve (the credential is already deleted).
-                uv run --no-sync pytest --cov --cov-report=json --quiet || true
+                # --no-sync: the env was fully synced above; the test
+                # invocation must never trigger a re-resolve (the credential
+                # is already deleted).
+                uv run --no-sync pytest --cov --cov-report=json --quiet || TEST_EXIT=$?
               else
                 python -m venv .venv
                 .venv/bin/pip install -q -r requirements.txt pytest pytest-cov
                 rm -f "$CROSS_ORG_GITCONFIG"; unset GIT_CONFIG_GLOBAL
-                .venv/bin/pytest --cov --cov-report=json --quiet || true
+                .venv/bin/pytest --cov --cov-report=json --quiet || TEST_EXIT=$?
               fi
+              record_test_exit
               if [[ ! -f coverage.json ]]; then
                 echo "::error::pytest-cov did not produce coverage.json — check [tool.coverage.run] config or test discovery"
                 exit 1
@@ -561,8 +587,9 @@ jobs:
                 echo "==> caller test_command override (go)"
                 eval "$INPUT_TEST_COMMAND"
               else
-                go test -coverprofile=cov.out ./... 2>&1 || true
+                go test -coverprofile=cov.out ./... 2>&1 || TEST_EXIT=$?
               fi
+              record_test_exit
               if [[ ! -f cov.out ]]; then
                 echo "::error::go test did not produce cov.out — no testable packages?"
                 exit 1
@@ -588,18 +615,19 @@ jobs:
                 curl -fsSL https://bun.sh/install | bash
                 export PATH="$HOME/.bun/bin:$PATH"
                 bun install --frozen-lockfile
-                bun test --coverage || true
+                bun test --coverage || TEST_EXIT=$?
               elif [[ -f pnpm-lock.yaml ]]; then
                 npm install -g pnpm
                 pnpm install --frozen-lockfile
-                pnpm test -- --coverage || true
+                pnpm test -- --coverage || TEST_EXIT=$?
               elif [[ -f yarn.lock ]]; then
                 yarn install --frozen-lockfile
-                yarn test --coverage || true
+                yarn test --coverage || TEST_EXIT=$?
               else
                 npm ci
-                npm test -- --coverage || true
+                npm test -- --coverage || TEST_EXIT=$?
               fi
+              record_test_exit
               if [[ ! -f coverage/coverage-summary.json ]]; then
                 echo "::error::no coverage/coverage-summary.json produced. Configure your test runner to emit json-summary:"
                 echo "::error::  vitest: add 'coverage: { reporter: [\"json-summary\"] }' to vite.config.ts"
@@ -648,8 +676,17 @@ jobs:
           # so the seed PR will sit "blocked" until a user pushes an
           # empty commit to its branch).
           AUTOMERGE_PAT: ${{ secrets.AUTOMERGE_PAT }}
+          TEST_EXIT: ${{ steps.measure_fresh.outputs.test_exit }}
         run: |
           set -euo pipefail
+          # Never seed from a failing suite: its coverage is not a baseline,
+          # and the fixed seed branch below would block the correct seed PR
+          # once the tests are fixed. "Fail when the tests failed" reds this
+          # run afterwards. An empty TEST_EXIT (pre-measured caller) seeds.
+          if [[ -n "$TEST_EXIT" && "$TEST_EXIT" != "0" ]]; then
+            echo "::warning::the test run exited $TEST_EXIT on main — not opening a seed PR from a failing suite. The first push:main run with passing tests seeds the floor."
+            exit 0
+          fi
           # Loop-prevention guard: refuse to seed below seed_minimum.
           # Otherwise an install on a repo with broken test infra would
           # generate a 0% seed PR; here on main, we just no-op with a warning.
@@ -768,10 +805,30 @@ jobs:
         run: |
           echo "post-merge baseline: measured $MEASURED% vs floor $FLOOR% (no enforcement on main; PR gates handle regressions)"
 
+      - name: Fail when the tests failed
+        # The verdict on the exit status the measure step recorded (see the
+        # header). It runs after the floor comparison, and `!cancelled()`
+        # keeps it running when that comparison failed, so both failures
+        # show. Every mode and event: main's own run goes red too. An empty
+        # test_exit means no default test invocation ran, so there is no
+        # status to judge: a pre-measured caller's own job ran its tests, and
+        # a failing test_command already stopped the measure step. Pinned by
+        # the test_coverage_floor_* tests in selftest/test_workflow_guards.py.
+        if: steps.measure_fresh.outputs.test_exit != '' && !cancelled()
+        env:
+          TEST_EXIT: ${{ steps.measure_fresh.outputs.test_exit }}
+        run: |
+          set -euo pipefail
+          if [[ "$TEST_EXIT" != "0" ]]; then
+            echo "::error::the test run exited $TEST_EXIT: tests failed, or the runner could not run them. See the 'Measure coverage' step's log. Some callers run tests in this job that no other CI lane runs."
+            exit 1
+          fi
+          echo "the test run passed (exit 0)"
+
       - name: Post sticky PR comment
         if: github.event_name == 'pull_request' && !cancelled()
-        # Reporting only — the enforce step above is the gate and has already
-        # passed or failed by the time this runs. Without this, a
+        # Reporting only — the enforce and test-run steps above are the gates
+        # and have already passed or failed by the time this runs. Without this, a
         # comments-API failure fails the JOB and turns a PASSING required
         # check red: observed 2026-08-17 (run 32055207104), when a ~2-minute
         # GitHub 503 window redded `coverage-floor` on wxa-graph PRs that had
@@ -805,5 +862,6 @@ jobs:
             | floor (current) | `${{ steps.floor.outputs.current }}%` |
             | target | `${{ steps.floor.outputs.target }}%` |
             | last bumped | `${{ steps.floor.outputs.last_bumped }}` |
+            | test run exit status | `${{ steps.measure_fresh.outputs.test_exit || 'not recorded' }}` |
 
             ${{ steps.floor.outputs.mode == 'seed' && '_Seed-not-yet: floor==0 means coverage is not enforced yet. After this PR merges, the push:main run opens a follow-up PR `chore(coverage): seed floor at X.X%` to commit the real value. From then on, future PRs run in enforce mode._' || '' }}
