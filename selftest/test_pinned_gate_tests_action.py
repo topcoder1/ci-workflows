@@ -30,6 +30,7 @@ Expectations are hardcoded, never derived from the action under test.
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -214,6 +215,40 @@ def _write_fixture(root: pathlib.Path):
         p.write_text(content)
 
 
+def _write_python_shim(path: pathlib.Path):
+    """Make `path` the `python` the action's bare `python -I -m venv` runs:
+    this test's interpreter, by an exec wrapper of its real path.
+
+    Never a symlink: outside a macOS framework build, venv takes the new venv's
+    `home` from the path python was started through, which for a symlink is
+    the shim's own directory, with no stdlib in it. That venv's python then
+    finds one only by fallback (a compile-time prefix that matches, as on CI's
+    setup-python, or uv's python-build-standalone patch
+    astral-sh/python-build-standalone#896). A uv-managed build without that
+    patch (cpython 3.13.9, on macOS and Linux alike) fails venv's ensurepip
+    step: the new python dies with "No module named 'encodings'".
+    """
+    real = os.path.realpath(sys.executable)
+    path.write_text(f'#!/bin/sh\nexec {shlex.quote(real)} "$@"\n')
+    path.chmod(0o755)
+
+
+def _assert_venv_on_the_real_interpreter(venv: pathlib.Path, shim_dir: pathlib.Path):
+    """`venv`, built through the shim in `shim_dir`, must sit on this test's
+    interpreter where it really lives: its `home` is not the shim's directory
+    (what a symlink shim records outside a macOS framework build), and the
+    python in `home` is this interpreter. CI's setup-python finds its stdlib
+    by fallback even with `home` at the shim, so there a case's own assertions
+    stay green through a symlink shim; this check is what fails."""
+    cfg = (venv / "pyvenv.cfg").read_text()
+    home = re.search(r"(?m)^home = (.*)$", cfg)
+    assert home, cfg
+    home_dir = pathlib.Path(home.group(1)).resolve()
+    assert home_dir != shim_dir.resolve(), f"venv home is the python shim's dir:\n{cfg}"
+    real = pathlib.Path(sys.executable).resolve()
+    assert (home_dir / real.name).resolve() == real, cfg
+
+
 def _run_action(
     wheelhouse,
     *,
@@ -226,7 +261,8 @@ def _run_action(
 ):
     """Run the action's shipped run: block against a fresh copy of the fixture.
 
-    Returns (returncode, combined_output)."""
+    Returns (returncode, combined_output). Fails the calling case if a venv the
+    action built does not sit on this interpreter (see _write_python_shim)."""
     run = _shipped_step()["run"]
     with tempfile.TemporaryDirectory() as tmp:
         d = pathlib.Path(tmp)
@@ -238,7 +274,7 @@ def _run_action(
 
         shim = d / "shim"
         shim.mkdir()
-        (shim / "python").symlink_to(sys.executable)
+        _write_python_shim(shim / "python")
         runner_temp = d / "runner_temp"
         runner_temp.mkdir()
         step = d / "step.sh"
@@ -266,6 +302,10 @@ def _run_action(
             stdin=subprocess.DEVNULL,
             timeout=300,
         )
+        # Past input validation the action makes one workdir and builds its
+        # venv in it, so a missing pyvenv.cfg fails here rather than skipping.
+        for workdir in runner_temp.glob("pinned-gate-tests.*"):
+            _assert_venv_on_the_real_interpreter(workdir / "venv", shim)
         return proc.returncode, proc.stdout + proc.stderr
 
 
