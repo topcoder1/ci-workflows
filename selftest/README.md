@@ -280,7 +280,10 @@ arbitrary helper scripts; that's a different kind of repo.
   bullets the PR did not touch, and bullets with no test citation, must both
   pass — adopting the cap must not tax a repo's existing backlog. Also pins
   that it stays opt-in (`default: 0`), since a default-on cap would fail PRs
-  fleet-wide the day it lands.
+  fleet-wide the day it lands, and that an untouched bullet still reads as
+  untouched in a 256 KiB section: topcoder1/dotclaude#458 failed on one
+  because `printf | grep -q` under pipefail lost a pipe race. A control
+  rebuilds the step with that pipe and must fail on the same fixture.
 - `test_prettier_scope_failsafe.sh` — a failed changed-file listing must
   SKIP the prettier run (mode=none), never fall open to the full-tree
   glob; and prettier-autofix must revert writes under

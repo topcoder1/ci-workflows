@@ -287,7 +287,10 @@ jobs:
                 emit; exit 0 ;;
               *)
                 body="$(show "$found" || true)"
-                if printf '%s' "$body" | grep -q 'plugins'; then
+                # A here-string, never a pipe: grep -q exits at its first match,
+                # and under pipefail printf's EPIPE on its next write read a large
+                # config's plugins as absent (the race of topcoder1/dotclaude#458).
+                if grep -q 'plugins' <<<"$body"; then
                   echo "::warning::prettier-autofix: base prettier config '${found}' declares plugins; plugin code is not loaded. Formatting with an empty config (editorconfig honored)."
                   emit; exit 0
                 fi

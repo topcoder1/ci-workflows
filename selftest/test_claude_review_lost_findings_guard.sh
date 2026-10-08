@@ -292,7 +292,7 @@ run_guard() {
         GH_PULLS_JSON="${GH_PULLS_JSON:-$T/none.json}" GH_ISSUES_JSON="${GH_ISSUES_JSON:-$T/none.json}" \
         GH_PULLS_FAIL="${GH_PULLS_FAIL:-0}" GH_ISSUES_FAIL="${GH_ISSUES_FAIL:-0}" GH_POST_FAIL="${GH_POST_FAIL:-0}" \
         REAL_GREP="$REAL_GREP" GUARD_GREP_FAIL_PATTERN="${GUARD_GREP_FAIL_PATTERN:-}" \
-        /bin/bash -e -o pipefail "$T/guard.sh" 2>&1)
+        /bin/bash -e -o pipefail "${GUARD_SH:-$T/guard.sh}" 2>&1)
   RC=$?
   set -e
   echo "$OUT" > "$T/out.$name.txt"
@@ -670,6 +670,91 @@ if [ "$RC" -eq 0 ] && ! posted \
   pass "S21 total_cost_usd 0.61: spend noted, no warning, exit 0"
 else
   fail "S21 (rc=$RC):"; sed 's/^/    /' "$T/out.s21.txt"
+fi
+
+# --- S22/S23: an early-exit reader must not race its writer under pipefail ------------------
+# INCIDENT (topcoder1/dotclaude#458, 2026-10-08): `printf ... | grep -q` under
+# pipefail read a FOUND line as absent — grep -q exits at its first match, the
+# writer's next write() takes EPIPE, and pipefail fails the pipeline. This
+# guard had the same shape twice:
+#   S22  `printf '%s' "$SUMMARIES" | grep -qi 'inline'`: a lost race read the
+#        claim as no claim, and the guard went silent over the loss it exists
+#        to catch;
+#   S23  `{ ...comment... } | head -c 60000`: head exits at its byte cap, the
+#        group's next write takes EPIPE, and the runner's errexit aborts the
+#        step before the fallback comment posts.
+# Both fixtures are 256 KiB+ with the early exit on line 1, where the race is
+# deterministic (measurements in test_regression_convention_bullet_cap.sh).
+# Each control rebuilds the guard with its old pipe and must reproduce the
+# failure; if one passes, its fixture no longer exercises the race.
+pipe_control() {  # pipe_control OUT OLD NEW: guard.sh with its one OLD replaced by NEW
+  python3 - "$T/guard.sh" "$@" <<'PY'
+import sys
+src, dst, old, new = sys.argv[1:]
+text = open(src).read()
+if text.count(old) != 1:
+    sys.exit(f"pipe control: expected exactly one {old!r} in the guard, found {text.count(old)}")
+open(dst, "w").write(text.replace(old, new))
+PY
+}
+
+# S22: five bot comments of ~61 KB each (one GitHub comment holds 65,536
+# chars), the claim on the first line of the first.
+jq -nc '[range(5) as $i | {id: (900 + $i), user: {login: "claude[bot]"}, created_at: "2026-08-16T04:44:54Z",
+  body: ((if $i == 0 then "Flagged 6 issues inline — see comments.\n" else "" end)
+         + ([range(750) | "  review detail \(.) of comment \($i): context the bot wrote, padding the body out"] | join("\n")))}]' > "$T/i22.json"
+if [ "$(jq '[.[].body | length] | add' "$T/i22.json")" -lt 262144 ]; then
+  fail "S22 fixture is under the 256 KiB the race needs"
+fi
+EXECUTION_FILE="$T/x2.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i22.json" run_guard s22
+if [ "$RC" -eq 1 ] && posted && posted_has "Nothing beyond the summary was recoverable" \
+   && grep -qF "::error::review-guard: summary claims 6 inline finding(s), 0 posted, nothing recoverable" "$T/out.s22.txt"; then
+  pass "S22 claim on line 1 of a 300 KB summary is still read: claim 6 / posted 0 FAILS loudly"
+else
+  fail "S22 (rc=$RC):"; sed 's/^/    /' "$T/out.s22.txt" | head -20
+fi
+# shellcheck disable=SC2016  # the guard's own text, matched literally
+if pipe_control "$T/guard_s22_pipe.sh" \
+     'if grep -qi '"'inline'"' <<<"$SUMMARIES"; then' \
+     'if printf '"'%s'"' "$SUMMARIES" | grep -qi '"'inline'"'; then'; then
+  GUARD_SH="$T/guard_s22_pipe.sh" EXECUTION_FILE="$T/x2.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i22.json" run_guard s22c
+  if [ "$RC" -eq 0 ] && ! posted && grep -qF "summary claims 0 inline finding(s); 0 inline review comment(s)" "$T/out.s22c.txt"; then
+    pass "S22 CONTROL: the old printf | grep -qi form misses that claim and goes silent"
+  else
+    fail "S22 CONTROL no longer reproduces the race (rc=$RC) — grow the fixture:"; sed 's/^/    /' "$T/out.s22c.txt" | head -10
+  fi
+else
+  fail "S22 CONTROL could not be built from the shipped guard"
+fi
+
+# S23: one denied inline-comment call whose body alone is ~270 KB.
+jq -nc --arg t "$INLINE_TOOL" '[
+  {type: "system", subtype: "init"},
+  {type: "result", subtype: "success", is_error: false, num_turns: 3, result: "Flagged 6 issues inline.",
+   permission_denials: [{tool_name: $t, tool_use_id: "tu_big", tool_input: {path: "x.go", line: 1,
+     body: ([range(3500) | "finding detail \(.): the reviewer quoted a long stretch of the diff here"] | join("\n"))}}]}
+]' > "$T/x23.json"
+EXECUTION_FILE="$T/x23.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i1.json" run_guard s23
+if [ "$RC" -eq 0 ] && posted && posted_has "#### Findings recovered from the transcript" \
+   && [ "$(wc -c < "$T/posted.md")" -le 60000 ] \
+   && grep -qF "recovered findings were posted as a fallback comment" "$T/out.s23.txt"; then
+  pass "S23 a 270 KB recovered finding is capped at 60000 bytes and POSTED, exit 0"
+else
+  fail "S23 (rc=$RC):"; sed 's/^/    /' "$T/out.s23.txt" | head -20
+fi
+# shellcheck disable=SC2016  # the guard's own text, matched literally
+if pipe_control "$T/guard_s23_pipe.sh" \
+     '} > "$T/comment.full.md"
+head -c 60000 "$T/comment.full.md" > "$T/comment.md"' \
+     '} | head -c 60000 > "$T/comment.md"'; then
+  GUARD_SH="$T/guard_s23_pipe.sh" EXECUTION_FILE="$T/x23.json" GH_PULLS_JSON="$T/p1.json" GH_ISSUES_JSON="$T/i1.json" run_guard s23c
+  if [ "$RC" -ne 0 ] && ! posted; then
+    pass "S23 CONTROL: the old { ... } | head -c form aborts the step before posting (rc=$RC)"
+  else
+    fail "S23 CONTROL no longer reproduces the race (rc=$RC) — grow the fixture:"; sed 's/^/    /' "$T/out.s23c.txt" | head -10
+  fi
+else
+  fail "S23 CONTROL could not be built from the shipped guard"
 fi
 
 echo

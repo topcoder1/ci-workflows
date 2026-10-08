@@ -354,9 +354,12 @@ jobs:
             claude/*) claude=1; reason="branch=$BRANCH";;
           esac
 
-          # 2. Co-Authored-By trailer in any PR commit
+          # 2. Co-Authored-By trailer in any PR commit. Captured, never piped:
+          #    grep -q exits at its first match, git log takes EPIPE on the
+          #    older commits it is still writing, and pipefail read a FOUND
+          #    trailer as none (the race of topcoder1/dotclaude#458).
           if [ "$claude" -eq 0 ]; then
-            if git log --format=%B "$BASE_SHA..$HEAD_SHA" | grep -qiE '^Co-Authored-By:\s*Claude'; then
+            if bodies=$(git log --format=%B "$BASE_SHA..$HEAD_SHA") && grep -qiE '^Co-Authored-By:\s*Claude' <<<"$bodies"; then
               claude=1
               reason="trailer"
             fi
@@ -1998,7 +2001,10 @@ jobs:
             echo "The quiet-period gate ran the unaddressed-findings check and it flagged:"
             echo ""
             echo '```'
-            printf '%s\n' "$report" | head -40
+            # A here-string, never a pipe: head exits after 40 lines, printf
+            # takes EPIPE on its next write, and pipefail + errexit aborted
+            # the step before this comment posted (topcoder1/dotclaude#458).
+            head -40 <<<"$report"
             echo '```'
             echo ""
             echo "- Push a commit addressing them — the push re-runs this gate and re-arms"
