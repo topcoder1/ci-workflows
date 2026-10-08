@@ -119,7 +119,7 @@ run_case() {
   : > "$T/gh_output"
   export GITHUB_OUTPUT="$T/gh_output"
 
-  if ! bash "$T/classify.sh" > "$T/log" 2>&1; then
+  if ! bash "${CLASSIFY_SH:-$T/classify.sh}" > "$T/log" 2>&1; then
     echo "FAIL[$name]: classify block exited non-zero"
     sed 's/^/    /' "$T/log"
     failed=1
@@ -224,6 +224,32 @@ run_case "gitleaks-root-shape-never-arms" 0 none "docs/runbook.md" ".gitleaksign
 #    revoke step on the PR the label just released.
 LABELS="auto-merge-approved"
 run_case "bypass-releases-hold" 1 none "web/tests/e2e/auth/signup.spec.ts"
+# The bypass label FIRST in a ~285 KB label list still releases. The check
+# was `printf '%s\n' "$pr_labels" | grep -Fxq` under pipefail: grep -q exits
+# at its first match, printf's next write takes EPIPE, and pipefail read the
+# label as absent, so the hold stood (fail-closed, but a spurious hold; the
+# race of topcoder1/dotclaude#458). The control reverts the check to the old
+# pipe and must keep the hold, or the fixture no longer exercises the race.
+LARGE_LABELS="auto-merge-approved
+$(awk 'BEGIN { for (i = 1; i <= 15000; i++) printf "filler-label-%05d\n", i }')"
+LABELS="$LARGE_LABELS"
+run_case "bypass-first-in-large-label-list-releases" 1 none "web/tests/e2e/auth/signup.spec.ts"
+# shellcheck disable=SC2016  # the block's own text, matched literally
+if SHIPPED='if grep -Fxq "$bypass_label" <<<"$pr_labels"; then' \
+   PIPED='if printf '"'%s\n'"' "$pr_labels" | grep -Fxq "$bypass_label"; then' awk '
+     (i = index($0, ENVIRON["SHIPPED"])) > 0 {
+       $0 = substr($0, 1, i - 1) ENVIRON["PIPED"] substr($0, i + length(ENVIRON["SHIPPED"]))
+       n++
+     }
+     { print }
+     END { exit n != 1 }
+   ' "$T/classify.sh" > "$T/classify_pipe.sh"; then
+  LABELS="$LARGE_LABELS"
+  CLASSIFY_SH="$T/classify_pipe.sh" run_case "CONTROL-old-printf-pipe-keeps-the-hold" 0 risk-tier-hold "web/tests/e2e/auth/signup.spec.ts"
+else
+  echo "FAIL[control]: the block no longer has exactly one here-string bypass-label test"
+  failed=1
+fi
 # ADRs are tier-2, not tier-1: unlike docs/legal below, the label DOES
 # release them — a label click on an ADR PR is a human decision on that PR.
 LABELS="auto-merge-approved"

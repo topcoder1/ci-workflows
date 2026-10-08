@@ -393,7 +393,10 @@ jobs:
             done <<< "$candidates"
             [ -n "$risk_hits" ] || return 0
             pr_labels=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.labels[].name' 2>/dev/null || echo "")
-            if printf '%s\n' "$pr_labels" | grep -Fxq "$bypass_label"; then
+            # A here-string, never a pipe: grep -q exits at its first match,
+            # and under pipefail printf's EPIPE on its next write read the
+            # label as absent (the race of topcoder1/dotclaude#458).
+            if grep -Fxq "$bypass_label" <<<"$pr_labels"; then
               risk_released=1
             fi
           }

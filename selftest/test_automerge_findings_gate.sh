@@ -235,7 +235,7 @@ exec_gate() {
     GITHUB_OUTPUT="$CASE/output" GITHUB_REPOSITORY="o/r" \
     PR=1 PR_URL="https://example.invalid/pr/1" QUIET_MINUTES="$1" \
     PR_CREATED_AT="" \
-    bash "$T/qf.sh" > "$CASE/stdout" 2>&1
+    bash "${QF_SH:-$T/qf.sh}" > "$CASE/stdout" 2>&1
   RC=$?
   set -e
 }
@@ -272,6 +272,56 @@ if [ "$RC" -eq 0 ] && grep -q '^clear=0$' "$CASE/output" && grep -q '^reason=fin
   echo "✓ B3 findings decline the arm, disarm stale arms, and post the sticky comment"
 else
   echo "✗ B3: rc=$RC output=[$(tr '\n' ' ' < "$CASE/output")] calls=[$(tr '\n' ' ' < "$CASE/calls.log")] stdout: $(tail -3 "$CASE/stdout" | tr '\n' ' ')"
+  failed=1
+fi
+
+# B3b. Quiet + a LARGE findings report ⇒ the same clear=0 and sticky comment.
+#      The comment quotes the report's first 40 lines. `printf '%s\n'
+#      "$report" | head -40` under pipefail + errexit lost a race once the
+#      report took more than one write(): head exits after 40 lines, printf's
+#      next write takes EPIPE, and the step ABORTED before the comment posted —
+#      the race of topcoder1/dotclaude#458. A ~340 KB report makes it
+#      deterministic (measurements in test_regression_convention_bullet_cap.sh);
+#      the control rebuilds the step with the old pipe and must abort, or the
+#      fixture no longer exercises the race.
+big_report_case() {  # big_report_case <step script>
+  new_case
+  printf '%s' "$OLD_COMMITS" > "$CASE/commits.json"
+  echo 1 > "$CASE/checker_rc"
+  cat > "$CASE/checker_stub.sh" <<'EOF'
+#!/usr/bin/env bash
+awk 'BEGIN { for (i = 1; i <= 4000; i++) print "finding " i ": a report line the detector printed for one unaddressed review comment" }'
+exit "$(cat "$T_DIR/checker_rc")"
+EOF
+  rm -f /tmp/automerge-findings.md
+  QF_SH="$1" exec_gate 20
+}
+big_report_case "$T/qf.sh"
+if [ "$RC" -eq 0 ] && grep -q '^clear=0$' "$CASE/output" && grep -q 'comment-posted' "$CASE/calls.log" \
+   && [ "$(grep -c '^finding ' /tmp/automerge-findings.md 2>/dev/null)" = 40 ]; then
+  echo "✓ B3b a ~340 KB findings report still posts the sticky comment, quoting its first 40 lines"
+else
+  echo "✗ B3b: rc=$RC output=[$(tr '\n' ' ' < "$CASE/output")] calls=[$(tr '\n' ' ' < "$CASE/calls.log")] stdout: $(tail -3 "$CASE/stdout" | tr '\n' ' ' | head -c 300)"
+  failed=1
+fi
+# shellcheck disable=SC2016  # the step's own text, matched literally
+if SHIPPED='head -40 <<<"$report"' PIPED='printf '"'%s\n'"' "$report" | head -40' awk '
+     (i = index($0, ENVIRON["SHIPPED"])) > 0 {
+       $0 = substr($0, 1, i - 1) ENVIRON["PIPED"] substr($0, i + length(ENVIRON["SHIPPED"]))
+       n++
+     }
+     { print }
+     END { exit n != 1 }
+   ' "$T/qf.sh" > "$T/qf_pipe.sh"; then
+  big_report_case "$T/qf_pipe.sh"
+  if [ "$RC" -ne 0 ] && ! grep -q 'comment-posted' "$CASE/calls.log"; then
+    echo "✓ B3b CONTROL: the old printf | head -40 form aborts the step before the comment posts (rc=$RC)"
+  else
+    echo "✗ B3b CONTROL no longer reproduces the race (rc=$RC) — grow the fixture"
+    failed=1
+  fi
+else
+  echo "✗ B3b CONTROL could not be built: the step no longer has exactly one \`head -40 <<<\"\$report\"\`"
   failed=1
 fi
 

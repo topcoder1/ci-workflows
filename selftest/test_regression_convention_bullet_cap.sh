@@ -22,6 +22,10 @@
 #                                                    only control for those)
 #   * added bullet under the cap                  -> PASS
 #   * empty lessons_files                         -> PASS (opt-in by config)
+#   * unchanged over-cap bullet FIRST in a        -> PASS (topcoder1/dotclaude#458:
+#     256 KiB section                                a membership test that loses
+#                                                    a pipe race reads every line
+#                                                    as new; see the case below)
 #
 # Run from the repo root:
 #   bash selftest/test_regression_convention_bullet_cap.sh
@@ -94,13 +98,13 @@ make_repo() {  # $1 = base lessons body, $2 = head lessons body
   echo "$d $BASE $HEAD_S"
 }
 
-run_case() {  # $1 label, $2 expected rc, $3 base body, $4 head body, $5 cap, $6 files
-  local label="$1" want="$2" cap="$5" files="${6-CLAUDE.md}"
+run_case() {  # $1 label, $2 expected rc, $3 base body, $4 head body, $5 cap, $6 files, $7 step script
+  local label="$1" want="$2" cap="$5" files="${6-CLAUDE.md}" script="${7-$T/cap.sh}"
   read -r d base head <<<"$(make_repo "$3" "$4")"
   local rc=0
   ( cd "$d" && LESSONS_FILES_RAW="$files" LESSONS_HEADER='## Lessons' \
       MAX_CHARS="$cap" BASE_SHA="$base" HEAD_SHA="$head" \
-      bash "$T/cap.sh" ) >"$T/out" 2>&1 || rc=$?
+      bash "$script" ) >"$T/out" 2>&1 || rc=$?
   if [[ "$rc" == "$want" ]]; then
     echo "✓ $label (rc=$rc)"
   else
@@ -116,6 +120,57 @@ run_case "over-cap bullet with NO test citation is allowed"       0 "$SMALL_CITE
 run_case "added bullet under the cap is allowed"                  0 "$SMALL_CITED" "$SMALL_CITED
 $SMALL_CITED"                                                                                     300
 run_case "empty lessons_files skips"                              0 "$SMALL_CITED" "$BIG_CITED"   300 ""
+
+# ---------------------------------------------------------------------------
+# A large section must not turn an unchanged bullet into an edited one.
+#
+# INCIDENT (topcoder1/dotclaude#458, run 37744099588, 2026-10-08): this check
+# — REQUIRED on the fleet's rulesets — failed on a bullet the PR never
+# touched, and the log said "printf: write error: Broken pipe". The step
+# tested membership with `printf '%s\n' "$BASE_SECTION" | grep -Fxq` under
+# pipefail. grep -q exits at its first match and closes the pipe; when printf
+# needs more than one write() for the section, its next write gets EPIPE and
+# pipefail turns a FOUND line into a miss. It is a race: the same 8,868-byte
+# section passed on #455, #456 and #457.
+#
+# The size is load-bearing. Just over 64 KiB is NOT reliably enough. Measured
+# at 65,572 bytes, the pipe form misread 0/20 times on macOS bash 3.2 and
+# 159/200 on Linux bash 5.2; at 262,190 bytes with the matching bullet first,
+# 20/20 and 200/200, because printf is still writing when grep exits.
+#
+# The control keeps the case honest: it rebuilds the step with the old pipe
+# and must FAIL on the same fixture. If it ever passes, the fixture no longer
+# reproduces the race here and the case above it proves nothing.
+# ---------------------------------------------------------------------------
+LARGE_SECTION="$BIG_CITED
+$(awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "  continuation %05d of a long lessons section, not itself a bullet\n", i }')"
+if (( ${#LARGE_SECTION} < 262144 )); then
+  echo "✗ the large-section fixture is ${#LARGE_SECTION} bytes, under the 256 KiB the race needs"
+  failed=1
+fi
+run_case "unchanged over-cap bullet first in a 256 KiB section is allowed" \
+  0 "$LARGE_SECTION" "$LARGE_SECTION
+$SMALL_CITED" 300
+
+# shellcheck disable=SC2016  # the step's own text, matched literally
+SHIPPED_TEST='if grep -Fxq -- "$line" <<<"$BASE_SECTION"; then'
+PIPED_TEST="if printf '%s\n' \"\$BASE_SECTION\" | grep -Fxq -- \"\$line\"; then"
+if SHIPPED="$SHIPPED_TEST" PIPED="$PIPED_TEST" awk '
+     (i = index($0, ENVIRON["SHIPPED"])) > 0 {
+       $0 = substr($0, 1, i - 1) ENVIRON["PIPED"] substr($0, i + length(ENVIRON["SHIPPED"]))
+       n++
+     }
+     { print }
+     END { exit n != 1 }
+   ' "$T/cap.sh" > "$T/cap_piped.sh"; then
+  run_case "CONTROL: the old printf | grep -Fxq form fails that fixture" \
+    1 "$LARGE_SECTION" "$LARGE_SECTION
+$SMALL_CITED" 300 CLAUDE.md "$T/cap_piped.sh"
+else
+  echo "✗ could not build the pipe-form control: the step no longer contains exactly one"
+  echo "    $SHIPPED_TEST"
+  failed=1
+fi
 
 if (( failed )); then
   echo "FAIL"

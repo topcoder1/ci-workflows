@@ -137,6 +137,9 @@ fi
 # 0c. Stubs. `gh` dispatches on the requested URL and logs every call;
 #     `sleep` no-ops the retry backoffs. Knobs (env):
 #       STUB_LABELS              — newline-separated label names ('' = none)
+#       STUB_LABELS_FILE         — serve the labels from this file instead
+#                                  (a large list exceeds Linux's 128 KiB
+#                                  per-env-string limit)
 #       STUB_LABELS_FAIL_TIMES   — first N labels calls fail (HTTP-500 shape)
 #       STUB_TIMELINE_FILE       — raw bytes served for the timeline call
 #                                  (may be MULTIPLE concatenated JSON arrays,
@@ -157,7 +160,7 @@ case "$args" in
       echo "gh: Internal Server Error (HTTP 500)" >&2
       exit 1
     fi
-    printf '%s\n' "${STUB_LABELS:-}"
+    if [ -n "${STUB_LABELS_FILE:-}" ]; then cat "$STUB_LABELS_FILE"; else printf '%s\n' "${STUB_LABELS:-}"; fi
     ;;
   *issues/*/timeline*)
     n=$(bump "$STUB_DIR/timeline-attempts")
@@ -180,11 +183,11 @@ chmod +x "$T/bin/sleep"
 # ---------------------------------------------------------------------------
 # Runner + assertions.
 # ---------------------------------------------------------------------------
-STUB_LABELS=""; STUB_LABELS_FAIL_TIMES=0; STUB_TIMELINE_FAIL_TIMES=0
+STUB_LABELS=""; STUB_LABELS_FILE=""; STUB_LABELS_FAIL_TIMES=0; STUB_TIMELINE_FAIL_TIMES=0
 STUB_TIMELINE_FILE="$T/timeline.json"; CASE_HOLD_LABEL="manual-merge"
 
 reset_case() {
-  STUB_LABELS=""; STUB_LABELS_FAIL_TIMES=0; STUB_TIMELINE_FAIL_TIMES=0
+  STUB_LABELS=""; STUB_LABELS_FILE=""; STUB_LABELS_FAIL_TIMES=0; STUB_TIMELINE_FAIL_TIMES=0
   STUB_TIMELINE_FILE="$T/timeline.json"; CASE_HOLD_LABEL="manual-merge"
   echo '[]' > "$T/timeline.json"
 }
@@ -201,10 +204,11 @@ run_hold() {
     GITHUB_REPOSITORY="acme/fixture" PR=123 HOLD_LABEL="$CASE_HOLD_LABEL" \
     GITHUB_OUTPUT="$OUT_FILE" GH_TOKEN=stub \
     STUB_DIR="$T" CALLS_LOG="$CALLS_LOG" \
-    STUB_LABELS="$STUB_LABELS" STUB_LABELS_FAIL_TIMES="$STUB_LABELS_FAIL_TIMES" \
+    STUB_LABELS="$STUB_LABELS" STUB_LABELS_FILE="$STUB_LABELS_FILE" \
+    STUB_LABELS_FAIL_TIMES="$STUB_LABELS_FAIL_TIMES" \
     STUB_TIMELINE_FILE="$STUB_TIMELINE_FILE" \
     STUB_TIMELINE_FAIL_TIMES="$STUB_TIMELINE_FAIL_TIMES" \
-    bash hold.sh 2>&1)
+    bash "${HOLD_SH:-hold.sh}" 2>&1)
   HOLD_RC=$?
   set -e
 }
@@ -271,6 +275,38 @@ reset_case
 STUB_LABELS=$(printf '%s\n' 'manual-merge-now' 'not-manual-merge' 'Manual-Merge')
 run_hold
 expect_hold "near-miss label names (prefix/suffix/case) do not hold" 0 ""
+
+# 2b. The hold label FIRST in a ~285 KB label list ⇒ still hold. The check
+#     was `echo "$labels" | grep -qxF` under pipefail. bash writes a label
+#     list one line per write(), grep -q exits at its first match, the next
+#     write takes EPIPE, and pipefail read the hold as absent: a manual-merge
+#     PR could arm (the race of topcoder1/dotclaude#458). A real list loses
+#     that race rarely; this size makes it deterministic. The control
+#     rebuilds the step with the old pipe and must miss the hold, or the
+#     fixture no longer exercises the race.
+reset_case
+{ echo 'manual-merge'; awk 'BEGIN { for (i = 1; i <= 15000; i++) printf "filler-label-%05d\n", i }'; } > "$T/many-labels.txt"
+STUB_LABELS_FILE="$T/many-labels.txt"
+run_hold
+expect_hold "hold label first in a ~285 KB label list ⇒ still hold" 1 "label:manual-merge"
+# shellcheck disable=SC2016  # the step's own text, matched literally
+if SHIPPED='if grep -qxF "$HOLD_LABEL" <<<"$labels"; then' \
+   PIPED='if echo "$labels" | grep -qxF "$HOLD_LABEL"; then' awk '
+     (i = index($0, ENVIRON["SHIPPED"])) > 0 {
+       $0 = substr($0, 1, i - 1) ENVIRON["PIPED"] substr($0, i + length(ENVIRON["SHIPPED"]))
+       n++
+     }
+     { print }
+     END { exit n != 1 }
+   ' "$T/hold.sh" > "$T/hold_pipe.sh"; then
+  reset_case
+  STUB_LABELS_FILE="$T/many-labels.txt"
+  HOLD_SH=hold_pipe.sh run_hold
+  expect_hold "CONTROL: the old echo | grep -qxF form misses that hold" 0 ""
+else
+  echo "✗ CONTROL could not be built: the step no longer has exactly one here-string hold-label test"
+  failed=1
+fi
 
 # 3. newest timeline event a HUMAN disable ⇒ hold.
 reset_case

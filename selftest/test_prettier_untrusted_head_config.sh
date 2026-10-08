@@ -189,14 +189,15 @@ resolve_block=$(extract_run_block "Resolve base prettier config" "$AUTOFIX")
 if [ -z "$resolve_block" ]; then
   bad "no 'Resolve base prettier config' step in prettier-autofix.yml"
 else
-  run_resolve() { # sets $out to the GITHUB_OUTPUT path; fixture prepared by caller in $T/repo
+  run_resolve() { # $1 base sha [$2 block]; prints the GITHUB_OUTPUT path; fixture prepared by caller in $T/repo
     local out="$T/out.$RANDOM"; : > "$out"
     local rt; rt=$(mktemp -d "$T/rt.XXXXXX")
+    local block="${2-$resolve_block}"
     (
       cd "$T/repo" &&
         env GITHUB_OUTPUT="$out" BASE_SHA="$1" RUNNER_TEMP="$rt" \
           bash -c "set -uo pipefail
-$resolve_block" >"$T/r.log" 2>&1
+$block" >"$T/r.log" 2>&1
     ) || true
     printf '%s' "$out"
   }
@@ -236,11 +237,11 @@ $resolve_block" >"$T/r.log" 2>&1
   # must point at an existing empty {} outside the checkout (the write step
   # ALWAYS --configs a file; "empty" is the no-base default that still honors
   # editorconfig). Optionally require a warning substring in the log.
-  assert_empty() { # $1=label $2=out $3=cfile [$4=warn-grep]
+  assert_empty() { # $1=label $2=out [$3=warn-grep]
     local mode; mode=$(sed -n 's/^config_mode=//p' "$2")
     local cfile; cfile=$(sed -n 's/^config_file=//p' "$2")
     local warn_ok=1
-    [ -n "${4:-}" ] && { grep -qi "$4" "$T/r.log" || warn_ok=0; }
+    [ -n "${3:-}" ] && { grep -qi "$3" "$T/r.log" || warn_ok=0; }
     if [ "$mode" = "empty" ] && [ -n "$cfile" ] && [ "$(cat "$cfile" 2>/dev/null)" = "{}" ] \
          && [ "$warn_ok" -eq 1 ]; then
       case "$cfile" in "$T/repo"/*) bad "$1: empty config is inside the checkout";; *) ok "$1";; esac
@@ -273,6 +274,48 @@ $resolve_block" >"$T/r.log" 2>&1
     git add -A && git commit -qm base; git rev-parse HEAD > "$T/base_sha" )
   out=$(run_resolve "$(cat "$T/base_sha")")
   assert_empty "base config naming plugins → empty {} (no plugin load)" "$out" "plugin"
+
+  # 2d'. The same refusal on a LARGE config. `printf '%s' "$body" | grep -q
+  #      'plugins'` under pipefail lost a race when the body took more than
+  #      one write(): grep -q exits at its first match, printf's next write
+  #      takes EPIPE, and pipefail made "declares plugins" read as "does not"
+  #      — the race of topcoder1/dotclaude#458, failing OPEN here. ~280 KB with
+  #      `plugins` on line 2 makes it deterministic (measurements in
+  #      test_regression_convention_bullet_cap.sh); the control rebuilds the
+  #      resolver with the old pipe and must let the plugins through, or the
+  #      fixture no longer exercises the race.
+  setup_repo
+  ( cd "$T/repo"
+    { printf '{\n  "plugins": ["prettier-plugin-anything"],\n  "overrides": [\n'
+      awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "    {\"files\": \"docs/part-%05d.md\", \"options\": {\"proseWrap\": \"always\"}},\n", i }'
+      printf '    {"files": "*.md", "options": {"printWidth": 80}}\n  ]\n}\n'
+    } > .prettierrc.json
+    git add -A && git commit -qm base; git rev-parse HEAD > "$T/base_sha" )
+  if [ "$(wc -c < "$T/repo/.prettierrc.json")" -lt 262144 ]; then
+    bad "the large plugins config is under the 256 KiB the race needs"
+  fi
+  out=$(run_resolve "$(cat "$T/base_sha")")
+  assert_empty "a ~280 KB base config naming plugins on line 2 → empty {} (no plugin load)" "$out" "plugin"
+  # shellcheck disable=SC2016  # the resolver's own text, matched literally
+  if ! piped_block=$(printf '%s\n' "$resolve_block" \
+    | SHIPPED='if grep -q '"'plugins'"' <<<"$body"; then' \
+      PIPED='if printf '"'%s'"' "$body" | grep -q '"'plugins'"'; then' awk '
+        (i = index($0, ENVIRON["SHIPPED"])) > 0 {
+          $0 = substr($0, 1, i - 1) ENVIRON["PIPED"] substr($0, i + length(ENVIRON["SHIPPED"]))
+          n++
+        }
+        { print }
+        END { exit n != 1 }'); then
+    bad "could not build the pipe-form control: the resolver no longer has exactly one here-string plugins test"
+  else
+    out=$(run_resolve "$(cat "$T/base_sha")" "$piped_block")
+    mode=$(sed -n 's/^config_mode=//p' "$out")
+    if [ "$mode" = "base" ]; then
+      ok "CONTROL: the old printf | grep -q form lets that plugins config through (config_mode=base)"
+    else
+      bad "CONTROL no longer reproduces the race (mode='$mode') — grow the fixture"
+    fi
+  fi
 
   # 2e. Base config lives in package.json's "prettier" OBJECT key → honored
   #     (materialized from base). This path parses JSON via node.

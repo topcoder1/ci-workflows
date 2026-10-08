@@ -207,6 +207,9 @@ fi
 #     offline and fast while the shipped `npm install` line still executes.
 #     Knobs (env):
 #       STUB_LABELS            — newline-separated label names ('' = none)
+#       STUB_LABELS_FILE       — serve the labels from this file instead (a
+#                                large list exceeds Linux's 128 KiB
+#                                per-env-string limit)
 #       STUB_LABELS_RC         — nonzero: the labels call fails (API blip)
 #       STUB_RISK_FILE         — BASE-ref risk-paths.yml fixture; '' = 404
 #       STUB_RISK_DEFAULT_FILE — DEFAULT-branch fixture; '' = 404
@@ -237,7 +240,7 @@ args="$*"
 case "$args" in
   *issues/*/labels*)
     [ "${STUB_LABELS_RC:-0}" != "0" ] && { echo "gh: Internal Server Error (HTTP 500)" >&2; exit 1; }
-    printf '%s\n' "${STUB_LABELS:-}"
+    if [ -n "${STUB_LABELS_FILE:-}" ]; then cat "$STUB_LABELS_FILE"; else printf '%s\n' "${STUB_LABELS:-}"; fi
     ;;
   *"--jq .head.sha"*)
     if [ "${STUB_HEAD_RC:-0}" != "0" ]; then
@@ -318,13 +321,13 @@ REAL_DEPS="$PWD/$DEPS"
 # Runner + assertions.
 # ---------------------------------------------------------------------------
 STUB_HEAD_DEFAULT="c0ffee0000000000000000000000000000000001"
-STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
+STUB_LABELS=""; STUB_LABELS_FILE=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
 STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""; STUB_RENAMES=""; STUB_RENAMES_RC=0
 STUB_FILES="$T/files.txt"; CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
 STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0; STUB_CALLS="$T/calls.log"
 
 reset_case() {
-  STUB_LABELS=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
+  STUB_LABELS=""; STUB_LABELS_FILE=""; STUB_LABELS_RC=0; STUB_RISK_FILE=""; STUB_RISK_DEFAULT_FILE=""
   STUB_RISK_RC=0; STUB_CLASSIFY_FILE=""; STUB_RENAMES=""; STUB_RENAMES_RC=0
   CASE_BASE_REF="main"; CASE_DEFAULT_BRANCH="main"
   STUB_HEAD="$STUB_HEAD_DEFAULT"; STUB_HEAD_RC=0
@@ -341,14 +344,14 @@ run_gate() {
     GITHUB_REPOSITORY="acme/fixture" PR=123 BASE_REF="$CASE_BASE_REF" \
     DEFAULT_BRANCH="$CASE_DEFAULT_BRANCH" \
     GITHUB_OUTPUT="$OUT_FILE" GH_TOKEN=stub \
-    STUB_LABELS="$STUB_LABELS" STUB_LABELS_RC="$STUB_LABELS_RC" \
+    STUB_LABELS="$STUB_LABELS" STUB_LABELS_FILE="$STUB_LABELS_FILE" STUB_LABELS_RC="$STUB_LABELS_RC" \
     STUB_RISK_FILE="$STUB_RISK_FILE" STUB_RISK_DEFAULT_FILE="$STUB_RISK_DEFAULT_FILE" \
     STUB_RISK_RC="$STUB_RISK_RC" STUB_CLASSIFY_FILE="$STUB_CLASSIFY_FILE" \
     STUB_FILES="$STUB_FILES" REAL_CLASSIFY="$REAL_CLASSIFY" \
     STUB_RENAMES="$STUB_RENAMES" STUB_RENAMES_RC="$STUB_RENAMES_RC" \
     REAL_DEPS="$REAL_DEPS" STUB_HEAD="$STUB_HEAD" STUB_HEAD_RC="$STUB_HEAD_RC" \
     STUB_CALLS="$STUB_CALLS" \
-    bash gate.sh 2>&1)
+    bash "${GATE_SH:-gate.sh}" 2>&1)
   GATE_RC=$?
   set -e
 }
@@ -433,6 +436,46 @@ STUB_RISK_FILE="$T/risk-fixture.yml"
 printf '%s\n' "docs/notes.md" > "$STUB_FILES"
 run_gate
 expect_verdict "hand-applied risk:blocked label alone still gates" 1 "risk:blocked" "label"
+
+# 4b. A hand-applied risk label FIRST in a ~285 KB label list still gates.
+#     Both label checks were `echo "$labels" | grep -qx` under pipefail:
+#     bash writes the list one line per write(), grep -q exits at its first
+#     match, the next write takes EPIPE, and pipefail read the label as
+#     absent, so the verdict fell through to the file classification the
+#     label exists to override (the race of topcoder1/dotclaude#458; see
+#     test_automerge_hold_gate.sh case 2b). The control reverts both checks
+#     to the old pipe and must miss both labels.
+{ echo LABEL_SLOT; awk 'BEGIN { for (i = 1; i <= 15000; i++) printf "filler-label-%05d\n", i }'; } > "$T/many-labels.tmpl"
+large_label_case() {  # large_label_case <label> <desc> <want blocked> <want label> <want source>
+  reset_case
+  sed "1s/.*/$1/" "$T/many-labels.tmpl" > "$T/many-labels.txt"
+  STUB_LABELS_FILE="$T/many-labels.txt"
+  STUB_RISK_FILE="$T/risk-fixture.yml"
+  printf '%s\n' "docs/notes.md" > "$STUB_FILES"
+  run_gate
+  expect_verdict "$2" "$3" "$4" "$5"
+}
+large_label_case risk:blocked "risk:blocked first in a ~285 KB label list still gates" 1 risk:blocked label
+large_label_case risk:sensitive "risk:sensitive first in a ~285 KB label list still gates" 1 risk:sensitive label
+if B_SHIPPED="if grep -qx 'risk:blocked' <<<\"\$labels\"; then" \
+   B_PIPED="if echo \"\$labels\" | grep -qx 'risk:blocked'; then" \
+   S_SHIPPED="elif grep -qx 'risk:sensitive' <<<\"\$labels\"; then" \
+   S_PIPED="elif echo \"\$labels\" | grep -qx 'risk:sensitive'; then" awk '
+     function swap(from, to,   i) {
+       if ((i = index($0, ENVIRON[from])) > 0) {
+         $0 = substr($0, 1, i - 1) ENVIRON[to] substr($0, i + length(ENVIRON[from]))
+         n++
+       }
+     }
+     { swap("B_SHIPPED", "B_PIPED"); swap("S_SHIPPED", "S_PIPED"); print }
+     END { exit n != 2 }
+   ' "$T/gate.sh" > "$T/gate_pipe.sh"; then
+  GATE_SH=gate_pipe.sh large_label_case risk:blocked "CONTROL: the old echo | grep -qx form misses risk:blocked" 0 "" ""
+  GATE_SH=gate_pipe.sh large_label_case risk:sensitive "CONTROL: the old echo | grep -qx form misses risk:sensitive" 0 "" ""
+else
+  echo "✗ CONTROL could not be built: the step no longer has exactly the two here-string risk-label tests"
+  failed=1
+fi
 
 # 5. base-ref pinning on a non-default base (the stub exits 64 on any
 #    rules read that does not carry ref=<base>, so every case above also

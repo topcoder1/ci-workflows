@@ -290,7 +290,10 @@ jobs:
               # Unchanged by this PR? Not ours to police. `if` keeps the
               # non-match in condition context — `grep … && continue` would
               # return 1 as the statement's status and `set -e` would abort.
-              if printf '%s\n' "$BASE_SECTION" | grep -Fxq -- "$line"; then
+              # A here-string, never a pipe: grep -q exits at its first match,
+              # and under pipefail printf's EPIPE on its next write turned a
+              # FOUND line into a miss (topcoder1/dotclaude#458).
+              if grep -Fxq -- "$line" <<<"$BASE_SECTION"; then
                 continue
               fi
               [[ "$line" == *"Test: "* || "$line" == *"Tests: "* ]] || continue

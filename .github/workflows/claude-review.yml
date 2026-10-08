@@ -599,7 +599,10 @@ jobs:
           # asserted by the selftest, because guessing at prose is how a guard
           # starts reddening clean runs.
           CLAIMED=0
-          if printf '%s' "$SUMMARIES" | grep -qi 'inline'; then
+          # A here-string, never a pipe: grep -q exits at its first match, and
+          # under pipefail printf's EPIPE on its next write read a claim as no
+          # claim (the race of topcoder1/dotclaude#458).
+          if grep -qi 'inline' <<<"$SUMMARIES"; then
             # grep status 1 means no claim, not a failed review. Preserve
             # all other errors under the runner's errexit and pipefail.
             CLAIMED=$(printf '%s\n' "$SUMMARIES" \
@@ -691,6 +694,10 @@ jobs:
             exit 0
           fi
 
+          # Built in a file and capped from it, not piped through `head -c`:
+          # head exits at its byte cap, the group's next write takes EPIPE, and
+          # errexit + pipefail abort the step before this comment posts (the
+          # race of topcoder1/dotclaude#458; codex-review.yml caps the same way).
           {
             echo "<!-- claude-review:lost-findings run=${GITHUB_RUN_ID:-?} -->"
             if [ "$POSTED" -eq 0 ]; then
@@ -726,7 +733,8 @@ jobs:
             fi
             echo
             echo "_Posted by the lost-findings guard in topcoder1/ci-workflows claude-review.yml. Run: ${RUN_URL:-n/a}_"
-          } | head -c 60000 > "$T/comment.md"
+          } > "$T/comment.full.md"
+          head -c 60000 "$T/comment.full.md" > "$T/comment.md"
 
           COMMENT_POSTED=1
           if ! gh pr comment "$PR" -R "$REPO" --body-file "$T/comment.md" >/dev/null; then
