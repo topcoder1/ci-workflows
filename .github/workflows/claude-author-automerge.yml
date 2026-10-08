@@ -478,9 +478,13 @@ jobs:
             echo "::error::could not read PR labels after 3 attempts — refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
             exit 1
           }
-          if echo "$labels" | grep -qx 'risk:blocked'; then
+          # Here-strings, never pipes: bash writes a label list one line per
+          # write(), grep -q exits at its first match, and under pipefail the
+          # writer's EPIPE read a present label as absent (the race of
+          # topcoder1/dotclaude#458).
+          if grep -qx 'risk:blocked' <<<"$labels"; then
             blocked=1; verdict_label="risk:blocked"; verdict_source="label"
-          elif echo "$labels" | grep -qx 'risk:sensitive'; then
+          elif grep -qx 'risk:sensitive' <<<"$labels"; then
             blocked=1; verdict_label="risk:sensitive"; verdict_source="label"
           fi
 
@@ -770,7 +774,9 @@ jobs:
               echo "::error::could not read PR labels after 3 attempts — cannot rule out a '$HOLD_LABEL' hold; refusing to arm auto-merge (fail closed). Re-run when the API recovers, or merge manually."
               exit 1
             }
-            if echo "$labels" | grep -qxF "$HOLD_LABEL"; then
+            # A here-string, never a pipe: a lost EPIPE race under pipefail
+            # read the hold as absent (see the classifier-verdict label read).
+            if grep -qxF "$HOLD_LABEL" <<<"$labels"; then
               hold=1
               reason="label:$HOLD_LABEL"
             fi

@@ -133,10 +133,10 @@ run_case "empty lessons_files skips"                              0 "$SMALL_CITE
 # pipefail turns a FOUND line into a miss. It is a race: the same 8,868-byte
 # section passed on #455, #456 and #457.
 #
-# The size is load-bearing. Just over 64 KiB is NOT enough — the pipe buffer
-# plus grep's first read absorb it. Measured at 65,572 bytes, the pipe form
-# misread 0/20 times on macOS bash 3.2 and 159/200 on Linux bash 5.2; at
-# 262,190 bytes with the matching bullet first, 20/20 and 200/200.
+# The size is load-bearing. Just over 64 KiB is NOT reliably enough. Measured
+# at 65,572 bytes, the pipe form misread 0/20 times on macOS bash 3.2 and
+# 159/200 on Linux bash 5.2; at 262,190 bytes with the matching bullet first,
+# 20/20 and 200/200, because printf is still writing when grep exits.
 #
 # The control keeps the case honest: it rebuilds the step with the old pipe
 # and must FAIL on the same fixture. If it ever passes, the fixture no longer
