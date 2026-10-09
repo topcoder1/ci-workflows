@@ -179,6 +179,7 @@ jobs:
           done < "$tmp/gitmodules-ignore-names.sorted"
 
       - name: Adversarial pass
+        id: claude
         # Pinned by full SHA; claude-review.yml's action step says why this
         # version and how the pin moves.
         uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
@@ -225,8 +226,9 @@ jobs:
               "regression: <file:line> — <one sentence>"
               "regression: <file:line> — <one sentence>; regression: ..."
 
-            Post the result as a single PR comment via:
-              gh pr comment <PR_NUMBER> --body "..."
+            Make that result your final message, with nothing else in it. The
+            workflow posts your final message, verbatim, as a single PR
+            comment, so do not post it yourself.
 
             Do NOT post inline comments. Do NOT do general bug-hunting. The
             first pass already did that — your value is the regression axes.
@@ -234,7 +236,80 @@ jobs:
           # complete review (29 turns at most seen), and the action fails a
           # run that reports success past the cap, so the check went red on a
           # finished review. Most runs take 9-16.
+          #
+          # No `gh pr comment` in --allowedTools: the verdict is the model's
+          # final message, which the "Post adversarial verdict" step posts.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 40
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"
+
+      # THE VERDICT IS POSTED HERE, NOT BY THE MODEL, for the reason
+      # claude-review.yml's "Post review summary" step gives: posting through
+      # the shell ran the code spans in the model's prose. The model ends its
+      # run with the verdict as its final message; this step reads it from
+      # the action's transcript with jq and posts it with --body-file, so no
+      # shell parses it. Only a run that finished has a verdict (the last
+      # result entry, subtype success, not is_error). The verdict reaches the
+      # log only when the post fails, with the runner's workflow-command
+      # prefixes broken (`::` at a line start, `##[` anywhere in a line, a
+      # carriage return). Posted by github-actions[bot] with the job token:
+      # the action revokes its own token when it finishes.
+      #
+      # The comment is findings DELIVERY: it is the only place this lane's
+      # findings land, and claude-author-automerge's findings gate reads its
+      # `regression:` lines. So a post that still fails after 3 attempts
+      # fails the job, unless the verdict is the clean "no regressions found"
+      # (any case, quoted or not, a trailing period allowed): losing that
+      # costs provenance only and degrades to a warning. Anything else counts
+      # as findings, an off-format verdict included. Pinned by
+      # selftest/test_review_lanes_comment_no_shell.py and
+      # selftest/test_comment_nonfatal_reporting.sh (sec. 6).
+      - name: Post adversarial verdict
+        id: verdict
+        if: ${{ !cancelled() && steps.claude.outcome != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          verdict="${RUNNER_TEMP:?RUNNER_TEMP is not set}/claude-adversarial-verdict.md"
+          : > "$verdict"
+          if [ -n "${EXECUTION_FILE:-}" ] && [ -s "$EXECUTION_FILE" ]; then
+            jq -r 'if type == "array" then [.[] | objects | select(.type == "result")] | last else null end
+                   | objects | select(.subtype == "success" and .is_error != true) | .result | strings' \
+              "$EXECUTION_FILE" > "$verdict" 2>/dev/null || : > "$verdict"
+          fi
+          if ! grep -q '[^[:space:]]' "$verdict"; then
+            echo "::warning::the adversarial pass ended without a verdict (no final message in the transcript) - nothing to post on PR #${PR}"
+            exit 0
+          fi
+          comment="$verdict.comment"
+          {
+            cat "$verdict"
+            echo
+            echo "<sub>Claude Adversarial Review · [workflow run](${RUN_URL})</sub>"
+          } > "$comment"
+          for i in 1 2 3; do
+            if gh pr comment "$PR" -R "$REPO" --body-file "$comment" > /dev/null; then
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep "$((i * 5))"
+            fi
+          done
+          # The clean verdict, lowercased, with quotes and blanks trimmed from
+          # each end and a final period dropped, is exactly this one line.
+          clean=$(tr -d '\r' < "$verdict" | tr '[:upper:]' '[:lower:]' \
+                    | sed -e 's/^[[:space:]"]*//' -e 's/[[:space:]".]*$//')
+          if [ "$clean" = "no regressions found" ]; then
+            echo "::warning::could not post the adversarial verdict on PR #${PR} after 3 attempts (comments API failure); it is the clean verdict, so only its record is lost. It follows."
+            tr '\r' '\n' < "$verdict" | sed -e 's/##\[/#?[/g' -e 's/^/    | /'
+            exit 0
+          fi
+          echo "::error::claude-adversarial-review: the verdict could not be posted to PR #${PR} after 3 attempts and is not the clean \"no regressions found\" (it follows) - failing so the check cannot stay green over findings that are not on the PR"
+          tr '\r' '\n' < "$verdict" | sed -e 's/##\[/#?[/g' -e 's/^/    | /'
+          exit 1

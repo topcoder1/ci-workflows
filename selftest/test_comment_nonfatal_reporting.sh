@@ -33,7 +33,11 @@
 # CLEAN verdict costs provenance only and degrades to a ::warning::.
 # coverage-floor's sticky comment is an action step, not bash — its
 # continue-on-error pin lives in test_workflow_guards.py
-# (test_sticky_comment_action_steps_are_nonfatal).
+# (test_sticky_comment_action_steps_are_nonfatal). Sections 5 and 6 cover
+# the two Claude lanes' comments, which a workflow step posts now that the
+# model no longer posts through the shell: the review summary is reporting
+# (section 5); the adversarial verdict is findings delivery, like the Codex
+# verdict (section 6).
 #
 # This extracts each workflow's SHIPPED bash and executes it against a `gh`
 # stub whose comment/list/delete/merge calls can be told to fail the way
@@ -46,6 +50,7 @@
 set -euo pipefail
 
 REVIEW_WF=.github/workflows/claude-review.yml
+ADVERSARIAL_WF=.github/workflows/claude-adversarial-review.yml
 MERGE_WF=.github/workflows/dependabot-auto-merge.yml
 DRIFT_WF=.github/workflows/openapi-types-drift.yml
 CODEX_WF=.github/workflows/codex-review.yml
@@ -873,6 +878,111 @@ VERDICT: CLEAN" 1
       fail "codex/small verdict: rc=$rc — expected the full verdict (trailer included) and no notice"
       sed 's/^/    /' "$T/stdout" | tail -5
     fi
+  fi
+fi
+
+# Both Claude lanes' posting steps read the model's final message from the
+# action's transcript. lane_case LABEL SCRIPT FINAL_MESSAGE COMMENT_FAIL runs
+# the shipped step against a transcript ending in FINAL_MESSAGE.
+lane_case() {
+  local label="$1" script="$2" result="$3" comment_fail="$4"
+  echo "· scenario $label"
+  jq -nc --arg r "$result" '[{type: "system", subtype: "init"},
+    {type: "result", subtype: "success", is_error: false, num_turns: 4, result: $r, permission_denials: []}]' \
+    > "$T/transcript.json"
+  rm -rf "$T/runner_temp"
+  mkdir -p "$T/runner_temp"
+  : > "$T/out"
+  : > "$T/ghlog"
+  rc=0
+  (
+    PATH="$T/bin:$PATH" GH_LOG="$T/ghlog" GH_COMMENT_FAIL="$comment_fail" \
+    GITHUB_OUTPUT="$T/out" RUNNER_TEMP="$T/runner_temp" GH_TOKEN=stub \
+    REPO='whois-api-llc/wxa-jake-ai' PR=1054 EXECUTION_FILE="$T/transcript.json" \
+    RUN_URL='https://example.test/run/1' \
+    bash "$script"
+  ) > "$T/stdout" 2>&1 || rc=$?
+  posts=$(grep -c '^gh pr comment' "$T/ghlog" || true)
+}
+
+# ===========================================================================
+# 5. claude-review.yml — the review summary. Pure reporting: the findings
+#    are the inline comments, and the lost-findings guard reads the claim
+#    from the file this step writes whether or not the post lands. A lost
+#    summary degrades to a ::warning:: after its retries and never reds the
+#    required check — the 2026-08-17 class sections 1-3 pin.
+# ===========================================================================
+extract_run "$REVIEW_WF" "Post review summary" "$T/summary.sh" || true
+
+if [ -s "$T/summary.sh" ]; then
+  lane_case "review-summary/comment-api-down" "$T/summary.sh" "Flagged 2 issues inline — see comments." 1
+  if [ "$rc" -eq 0 ] && [ "$posts" -eq 3 ] && grep -q '::warning::' "$T/stdout"; then
+    pass "review-summary/comment API down: 3 attempts, then a ::warning::, exit 0 (required check stays green)"
+  else
+    fail "review-summary/comment API down: rc=$rc posts=$posts — a lost summary must degrade to a warning after its retries"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  summary_file=$(sed -n 's/^file=//p' "$T/out")
+  if [ -n "$summary_file" ] && grep -qF "Flagged 2 issues inline" "$summary_file"; then
+    pass "review-summary/comment API down: the summary still reaches the guard through the file= output"
+  else
+    fail "review-summary/comment API down: no file= output holding the summary — the guard would lose the claim"
+  fi
+
+  lane_case "review-summary/healthy" "$T/summary.sh" "No issues found. Diff is small and contained." 0
+  if [ "$rc" -eq 0 ] && [ "$posts" -eq 1 ] && ! grep -q '::warning::' "$T/stdout"; then
+    pass "review-summary/comment API healthy: posted once, no warning (control)"
+  else
+    fail "review-summary/comment API healthy: rc=$rc posts=$posts — expected one post and no warning"
+    sed 's/^/    /' "$T/stdout"
+  fi
+fi
+
+# ===========================================================================
+# 6. claude-adversarial-review.yml — the verdict comment. Findings DELIVERY,
+#    like section 4: the comment is the only place this lane's findings land,
+#    and the automerge findings gate reads `regression:` lines from it. A
+#    lost findings verdict stays fatal (green over undelivered findings is
+#    the #165 fail-open class); a lost CLEAN verdict — the prompt's "no
+#    regressions found", nothing else — costs provenance only and degrades
+#    to a ::warning::. Anything else counts as findings, an off-format
+#    verdict included: it is the one a human most needs to read.
+# ===========================================================================
+extract_run "$ADVERSARIAL_WF" "Post adversarial verdict" "$T/verdict.sh" || true
+
+if [ -s "$T/verdict.sh" ]; then
+  for clean in 'no regressions found' '"No regressions found."' '  NO REGRESSIONS FOUND  '; do
+    lane_case "adversarial/clean-api-down" "$T/verdict.sh" "$clean" 1
+    if [ "$rc" -eq 0 ] && [ "$posts" -eq 3 ] && grep -q '::warning::' "$T/stdout" \
+       && ! grep -q '::error::' "$T/stdout"; then
+      pass "adversarial/clean verdict ($clean) + comment API down: 3 attempts, ::warning::, exit 0"
+    else
+      fail "adversarial/clean verdict ($clean) + comment API down: rc=$rc posts=$posts — a lost clean verdict must not red the check"
+      sed 's/^/    /' "$T/stdout"
+    fi
+  done
+
+  for label in findings clean-line-beside-a-finding off-format; do
+    case "$label" in
+      findings) verdict='regression: src/policy.ts:78 — no test exercises the new error path' ;;
+      clean-line-beside-a-finding) verdict=$'no regressions found\nregression: src/policy.ts:78 — the new error path is untested' ;;
+      off-format) verdict='Looks fine overall, but the cron line is unguarded.' ;;
+    esac
+    lane_case "adversarial/$label-api-down" "$T/verdict.sh" "$verdict" 1
+    if [ "$rc" -ne 0 ] && [ "$posts" -eq 3 ] && grep -q '::error::' "$T/stdout"; then
+      pass "adversarial/$label verdict + comment API down: ::error::, the job FAILS (findings are not on the PR)"
+    else
+      fail "adversarial/$label verdict + comment API down: rc=$rc posts=$posts — undelivered findings must red the check"
+      sed 's/^/    /' "$T/stdout"
+    fi
+  done
+
+  lane_case "adversarial/findings-healthy" "$T/verdict.sh" 'regression: src/policy.ts:78 — no test exercises the new error path' 0
+  if [ "$rc" -eq 0 ] && [ "$posts" -eq 1 ] && ! grep -qE '::(warning|error)::' "$T/stdout"; then
+    pass "adversarial/findings verdict + comment API healthy: posted once, exit 0 (control)"
+  else
+    fail "adversarial/findings verdict + comment API healthy: rc=$rc posts=$posts — expected one post, exit 0"
+    sed 's/^/    /' "$T/stdout"
   fi
 fi
 

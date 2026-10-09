@@ -349,8 +349,10 @@ arbitrary helper scripts; that's a different kind of repo.
   its own finder/verifier fan-out that `--max-turns` never sees — the whole
   fleet went from 1-8 min to 20-134 min per review at the bump. Pins (1)
   `--disallowedTools Task,Agent,Skill,Workflow` in `claude_args`, and (2)
-  the guard: extracts the shipped bash and runs it against a stubbed `gh` —
-  the summary's "Flagged N issues inline" claim vs the inline comments the
+  the guard: extracts the shipped bash and runs it, after the shipped "Post
+  review summary" step, against a stubbed `gh` — the summary's "Flagged N
+  issues inline" claim (the model's final message, which that step posts
+  and writes to a file) vs the inline comments the
   bot actually created since the job's anchor; denials printed with tool
   names; denied/errored inline bodies and subagent reports recovered into
   one fallback comment phrased for bb-unaddressed-findings; job fails only
@@ -386,6 +388,26 @@ arbitrary helper scripts; that's a different kind of repo.
   that did not list it yet; npm skipped the optional dependency silently
   ("added 1 package") and the next step died on
   `Missing optional dependency @openai/codex-linux-x64`.
+- `test_review_lanes_comment_no_shell.py` — the Claude review lanes never
+  put the model's comment text through a shell. Both lanes used to have the
+  model post with `gh pr comment <N> --body "..."` through an allowed
+  `Bash(gh pr comment:*)` rule; inside the double quotes a markdown code
+  span in its prose ran as a command, and on 2026-10-09 a review summary
+  carried 1,162 lines of `find` output that way. Now the model ends with
+  the comment as its final message and a workflow step posts it from the
+  action's transcript with `--body-file`. Pins: a positive control (the old
+  command shape, run through bash, substitutes a harmless span); no
+  claude-code-action step allows a Bash rule that reaches a gh command that
+  writes to a PR or issue, and the two lanes' prompts do not ask the model
+  to post (the checker has hardcoded positive and negative cases); each
+  lane's posting step follows the model step, reads its `execution_file`,
+  takes no `${{ }}` into its script and uses `--body-file`; run as shipped
+  against a stub `gh`, it posts a final message full of shell syntax byte
+  for byte without running it, posts nothing for a run that did not finish,
+  and logs a message it could not post only with the runner's
+  workflow-command prefixes broken (`::` at a line start, `##[` anywhere, a
+  carriage return). Negative controls: an `eval` mutant runs the canary,
+  and dropping either log break is caught.
 - `test_review_lanes_base_attributes.py` — every review lane whose model
   runs git in the PR checkout (the verifier, the adversarial pass, Codex)
   must give that model `GIT_ATTR_SOURCE=<base sha>`, so `.gitattributes`
