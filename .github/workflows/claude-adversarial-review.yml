@@ -182,7 +182,7 @@ jobs:
         id: claude
         # Pinned by full SHA; claude-review.yml's action step says why this
         # version and how the pin moves.
-        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
+        uses: anthropics/claude-code-action@58985842b834ed26087302ba27d07bc24ca8697a # v1.0.244
         # Attributes come from the base commit, never from the PR. `gh pr diff`
         # is GitHub's server-side diff, which ignores .gitattributes, but the
         # allowlisted `git log` prints patches too (-p), and git takes

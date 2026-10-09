@@ -513,7 +513,7 @@ jobs:
         # CLI install and well under 1 more on real runs) and the reporting
         # after it. Real runs take about 2 minutes in all.
         timeout-minutes: 10
-        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
+        uses: anthropics/claude-code-action@58985842b834ed26087302ba27d07bc24ca8697a # v1.0.244
         # Attributes come from the base commit, never from the PR. The model
         # reads each file with `git diff` in the PR checkout, and git takes
         # .gitattributes from that checkout: a path the PR itself marks
