@@ -112,7 +112,7 @@ on:
         type: boolean
         default: false
       postgres_image:
-        description: "Docker image for the postgres service. Default 'postgres:16'. Use e.g. 'pgvector/pgvector:pg16' when tests need the vector extension."
+        description: "Docker image for the postgres service. Default 'postgres:16'. Use e.g. 'pgvector/pgvector:pg16' when tests need the vector extension. Pulled only when services_postgres is true."
         required: false
         type: string
         default: "postgres:16"
@@ -122,7 +122,7 @@ on:
         type: boolean
         default: false
       redis_image:
-        description: "Docker image for the redis service. Default 'redis:7'."
+        description: "Docker image for the redis service. Default 'redis:7'. Pulled only when services_redis is true."
         required: false
         type: string
         default: "redis:7"
@@ -216,9 +216,14 @@ jobs:
   measure:
     name: Measure coverage and enforce floor
     runs-on: ubuntu-latest
+    # A service starts only when its services_* input asks: GitHub skips a
+    # service whose image is an empty string. Unconditional images made every
+    # caller pull postgres:16 and redis:7 from Docker Hub on every run, and its
+    # unauthenticated pull limit failed the job before it measured anything
+    # (dotclaude#485). Pinned by selftest/test_coverage_floor_services.py.
     services:
       postgres:
-        image: ${{ inputs.postgres_image || 'postgres:16' }}
+        image: ${{ inputs.services_postgres && (inputs.postgres_image || 'postgres:16') || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -231,7 +236,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: ${{ inputs.redis_image || 'redis:7' }}
+        image: ${{ inputs.services_redis && (inputs.redis_image || 'redis:7') || '' }}
         ports:
           - 6379:6379
         options: >-
