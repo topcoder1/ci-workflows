@@ -4,9 +4,9 @@
 postgres:16 and redis:7 from Docker Hub on every run, although
 services_postgres / services_redis gated only what the tests saw (the
 DATABASE_URL / REDIS_URL exports). Docker Hub's unauthenticated pull limit
-then failed the job before it measured anything (dotclaude#485, twice), and
-coverage-floor is a required check in nine repos. One caller of seventeen
-(inbox_superpilot) opts in; the other sixteen pulled two images they never
+then failed the job before it measured anything (topcoder1/dotclaude#485's
+coverage-floor runs, among others), and many callers require this check.
+Only inbox_superpilot opts in; every other caller pulled two images it never
 used.
 
 GitHub skips a service whose image is an empty string, so each image is gated
@@ -43,7 +43,7 @@ def _images(caller):
 @pytest.mark.parametrize(
     "caller, expected",
     [
-        # Sixteen of the seventeen callers set neither input: nothing is pulled.
+        # A caller that sets neither input (all but inbox_superpilot) pulls nothing.
         ({}, {"postgres": "", "redis": ""}),
         # An image alone does not start its service.
         (

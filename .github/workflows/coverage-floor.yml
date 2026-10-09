@@ -220,7 +220,8 @@ jobs:
     # service whose image is an empty string. Unconditional images made every
     # caller pull postgres:16 and redis:7 from Docker Hub on every run, and its
     # unauthenticated pull limit failed the job before it measured anything
-    # (dotclaude#485). Pinned by selftest/test_coverage_floor_services.py.
+    # (topcoder1/dotclaude#485's runs, 2026-10-09). Pinned by
+    # selftest/test_coverage_floor_services.py.
     services:
       postgres:
         image: ${{ inputs.services_postgres && (inputs.postgres_image || 'postgres:16') || '' }}
