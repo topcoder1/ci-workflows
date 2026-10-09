@@ -383,9 +383,10 @@ jobs:
             (mcp__github_inline_comment__create_inline_comment) only for issues
             you're 80%+ sure are real bugs.
 
-            ALWAYS finish by posting a top-level summary comment via:
-              gh pr comment <PR_NUMBER> --body "..."
-            One short line. Examples:
+            ALWAYS end with a one-line summary as your final message. The
+            workflow posts your final message, verbatim, as the PR's summary
+            comment, so do not post it yourself and put nothing else in it.
+            Examples:
               - "No issues found. Diff is small and contained."
               - "Flagged 2 issues inline — see comments."
               - "Skipped: changes are docs-only / out of review scope."
@@ -435,15 +436,89 @@ jobs:
           # is `subtype: error_max_budget_usd`, `is_error: true`, which the
           # action fails on and the guard below names explicitly. Guarded by
           # selftest/test_claude_review_cost_guardrails.sh.
+          #
+          # No `gh pr comment` in --allowedTools: the summary is the model's
+          # final message, which the "Post review summary" step posts. When
+          # the model posted it through the shell, a code span in it ran as a
+          # command (see that step).
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns ${{ inputs.max_turns }}
             --max-budget-usd ${{ inputs.max_budget_usd }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Task,Agent,Skill,Workflow"
 
-      # LOST-FINDINGS GUARD. The summary comment is the model's CLAIM about
-      # what it posted; the inline review comments on the PR are the FACT.
+      # THE SUMMARY IS POSTED HERE, NOT BY THE MODEL. The prompt used to have
+      # the model post it itself, `gh pr comment <N> --body "..."` through an
+      # allowed `Bash(gh pr comment:*)` rule. Inside double quotes the shell
+      # still runs backtick spans and $( ), and a markdown code span in the
+      # model's prose is a backtick span: on 2026-10-09 a fleet PR's summary
+      # came out as the output of the bare `find` its code span held, 1,162
+      # paths from this job's checkout. A prefix rule matches a command's
+      # first words; it cannot constrain what the shell does inside the
+      # quoted body. So the model has no tool that posts a top-level comment.
+      # It ends its run with the summary as its final message; this step
+      # reads that message from the action's transcript with jq, writes it to
+      # a file and posts the file with --body-file. The text is data from end
+      # to end, and no shell parses it. Only a run that finished has a
+      # summary (the last result entry, subtype success, not is_error); a run
+      # stopped by a cap or an error has none, and the guard below says so.
+      #
+      # The comment is reporting, not the gate: the findings are the inline
+      # comments, and the guard reads the claim from the file this step
+      # writes whether or not the post lands. A failed post retries, then
+      # degrades to a warning (the 2026-08-17 comments-API 503 class). Only
+      # that path prints the summary to the log, with the runner's
+      # workflow-command prefixes broken: `::` at a line start, `##[`
+      # anywhere in a line, and a carriage return, which the runner reads as
+      # a line break. So the model's text cannot set this step's `file`
+      # output, or anything else. The comment is posted by
+      # github-actions[bot] with the job token, like the bot-skip comment
+      # above: the action revokes its own token when it finishes. Pinned by
+      # selftest/test_review_lanes_comment_no_shell.py and
+      # selftest/test_comment_nonfatal_reporting.sh (sec. 5).
+      - name: Post review summary
+        id: summary
+        if: ${{ !cancelled() && steps.bot_check.outputs.skipped != 'true' && steps.claude.outcome != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          summary="${RUNNER_TEMP:?RUNNER_TEMP is not set}/claude-review-summary.md"
+          : > "$summary"
+          echo "file=$summary" >> "$GITHUB_OUTPUT"
+          if [ -n "${EXECUTION_FILE:-}" ] && [ -s "$EXECUTION_FILE" ]; then
+            jq -r 'if type == "array" then [.[] | objects | select(.type == "result")] | last else null end
+                   | objects | select(.subtype == "success" and .is_error != true) | .result | strings' \
+              "$EXECUTION_FILE" > "$summary" 2>/dev/null || : > "$summary"
+          fi
+          if ! grep -q '[^[:space:]]' "$summary"; then
+            echo "::warning::the review ended without a summary (no final message in the transcript) - nothing to post on PR #${PR}"
+            exit 0
+          fi
+          comment="$summary.comment"
+          {
+            cat "$summary"
+            echo
+            echo "<sub>Claude Review · [workflow run](${RUN_URL})</sub>"
+          } > "$comment"
+          for i in 1 2 3; do
+            if gh pr comment "$PR" -R "$REPO" --body-file "$comment" > /dev/null; then
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep "$((i * 5))"
+            fi
+          done
+          echo "::warning::could not post the review summary on PR #${PR} after 3 attempts (comments API failure; non-fatal - the inline comments carry the findings, and the guard reads the summary from ${summary}). The summary follows."
+          tr '\r' '\n' < "$summary" | sed -e 's/##\[/#?[/g' -e 's/^/    | /'
+
+      # LOST-FINDINGS GUARD. The summary is the model's CLAIM about what it
+      # posted; the inline review comments on the PR are the FACT.
       # When the two disagree in the losing direction the check used to stay
       # green and the findings were gone: the action hides the SDK stream
       # (`show_full_output: false`), so the run log holds only a
@@ -461,8 +536,9 @@ jobs:
       #      created since the anchor above (the buffered
       #      classify_inline_comments path posts inside the action's own
       #      post-step, which has already run, so both paths are visible);
-      #   3. reads the CLAIM from the bot's summary ("Flagged N issues
-      #      inline", the exact shape the prompt mandates);
+      #   3. reads the CLAIM from the summary ("Flagged N issues inline", the
+      #      exact shape the prompt mandates): the model's final message,
+      #      which the step above posted and wrote to SUMMARY_FILE;
       #   4. if N >= 1 and nothing was posted: recovers what it can from the
       #      transcript — the bodies of denied, errored, and buffered-but-
       #      never-posted inline-comment calls, any subagent/skill report,
@@ -475,17 +551,22 @@ jobs:
       #      posts whatever was recovered and never fails.
       #
       # FAIL-SAFE on the reads that decide the verdict: an API error listing
-      # either comment set, or a summary phrased outside "Flagged N issue(s)",
+      # the inline comments, or a summary phrased outside "Flagged N issue(s)",
       # ends in a warning and exit 0 — a guard that reddens a REQUIRED check
-      # on its own flakiness is worse than the gap it closes. The transcript
-      # is different in kind: it is evidence for RECOVERY, not for the
-      # verdict. Claim > posted is established from GitHub alone, so a
-      # missing or malformed transcript cannot make a real loss spurious — it
-      # only makes it unrecoverable, and unrecoverable loss is the red case
-      # by design (the incident had no transcript either). Malformed entries
-      # are skipped, never fatal. Every branch above is pinned by
+      # on its own flakiness is worse than the gap it closes. The claim now
+      # comes from SUMMARY_FILE (the model's final message, which the summary
+      # step wrote), so the transcript carries BOTH the claim and the material
+      # for RECOVERY. When no summary could be read — the summary step reported
+      # the review ended without one — the claim is 0 and the guard cannot see
+      # a claim>posted loss; that is the fail-safe direction (the review's
+      # findings are its inline comments, posted through the MCP tool on a
+      # path this guard does not depend on, and a successful run with no final
+      # message at all is the summary step's warning to surface, not a red the
+      # guard manufactures). Malformed entries are skipped, never fatal. Every
+      # branch above is pinned by
       # selftest/test_claude_review_lost_findings_guard.sh, which extracts
-      # and executes this shipped bash against a stubbed `gh`.
+      # and executes this shipped bash, after the shipped summary step,
+      # against a stubbed `gh`.
       #
       # OVERLAP NOTE: the anchor is time-based, so two live runs on ONE PR
       # would see each other's comments. They do not overlap: every caller
@@ -510,6 +591,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           STARTED_AT: ${{ steps.clock.outputs.started_at }}
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          SUMMARY_FILE: ${{ steps.summary.outputs.file }}
           REVIEW_BOT: claude[bot]
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
@@ -587,12 +669,13 @@ jobs:
           fi
           POSTED=$(jq 'length' "$T/posted.json")
 
-          # ---- 3. CLAIM: the bot's summary comment(s) this run ---------------
-          if ! SUMMARIES=$(gh api "repos/${REPO}/issues/${PR}/comments?per_page=100" --paginate \
-                 | jq -rn --arg since "$STARTED_AT" --arg bot "$REVIEW_BOT" \
-                     '[inputs[] | select(.user.login == $bot and .created_at >= $since)] | .[] | .body'); then
-            warn "could not list issue comments on PR #${PR}; cannot read the review summary - skipping"
-            exit 0
+          # ---- 3. CLAIM: the review's summary ---------------------------------
+          # The model's final message, which the "Post review summary" step
+          # posted and wrote to SUMMARY_FILE. Read from the file, not from the
+          # PR: the claim stands whether or not that post landed.
+          SUMMARIES=""
+          if [ -n "${SUMMARY_FILE:-}" ] && [ -f "$SUMMARY_FILE" ]; then
+            SUMMARIES=$(cat "$SUMMARY_FILE") || { warn "could not read the summary at ${SUMMARY_FILE}"; SUMMARIES=""; }
           fi
           # The prompt mandates "Flagged N issues inline - see comments." Any
           # other phrasing reads as 0 and the guard stays silent: accepted, and
@@ -611,8 +694,8 @@ jobs:
                       | sort -n | tail -1)
             CLAIMED=${CLAIMED:-0}
           fi
-          if [ -z "$SUMMARIES" ]; then
-            warn "no summary comment by ${REVIEW_BOT} since ${STARTED_AT} - the review protocol requires one"
+          if ! grep -q '[^[:space:]]' <<<"$SUMMARIES"; then
+            warn "the review ended without a summary (no final message) - the review protocol requires one"
           fi
           note "PR #${PR}: summary claims ${CLAIMED} inline finding(s); ${POSTED} inline review comment(s) by ${REVIEW_BOT} since ${STARTED_AT}"
 
@@ -670,14 +753,15 @@ jobs:
           fi
           # What counts as RECOVERED: denied/errored inline bodies (exact),
           # a subagent/skill report of any substance, or a final message that
-          # is clearly more than the one-line summary echoed back (>= 600
-          # chars and >= 2x the summary text). A bare "Flagged N issues
-          # inline" restated in the final message is NOT recovery - counting
-          # it would be the original bug with extra steps.
+          # is clearly more than the one-line summary (>= 600 chars and >= 2x
+          # the summary line). The final message IS the summary, so the
+          # summary line is its first line, the claim the prompt asks for. A
+          # bare "Flagged N issues inline", however long its one line, is NOT
+          # recovery - counting it would be the original bug with extra steps.
           RECOVERED=0
           SUB_CHARS=$(wc -c < "$T/subagents.md" | tr -d ' ')
           FINAL_CHARS=$(wc -c < "$T/final.md" | tr -d ' ')
-          SUMMARY_CHARS=$(printf '%s' "$SUMMARIES" | wc -c | tr -d ' ')
+          SUMMARY_CHARS=$(printf '%s' "${SUMMARIES%%$'\n'*}" | wc -c | tr -d ' ')
           if [ -s "$T/denied.md" ] || [ -s "$T/errored.md" ] || [ -s "$T/unlanded.md" ] || [ "$SUB_CHARS" -ge 200 ]; then
             RECOVERED=1
           elif [ "$FINAL_CHARS" -ge 600 ] && [ "$FINAL_CHARS" -ge $((SUMMARY_CHARS * 2)) ]; then
@@ -740,7 +824,14 @@ jobs:
           if ! gh pr comment "$PR" -R "$REPO" --body-file "$T/comment.md" >/dev/null; then
             COMMENT_POSTED=0
             warn "could not post the lost-findings comment on PR #${PR}; its body follows"
-            sed 's/^/    | /' "$T/comment.md"
+            # comment.md carries model-authored text (recovered inline bodies,
+            # the subagent report, the final message). Break the runner's
+            # workflow-command prefixes before it reaches the log, as the
+            # summary step does: `::` at a line start (the runner trims leading
+            # whitespace first, so the `| ` prefix alone is not enough), `##[`
+            # anywhere in a line, and a carriage return, which it reads as a
+            # line break.
+            tr '\r' '\n' < "$T/comment.md" | sed -e 's/##\[/#?[/g' -e 's/^/    | /'
           fi
 
           if [ "$RECOVERED" -eq 0 ]; then
