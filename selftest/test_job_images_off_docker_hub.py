@@ -16,6 +16,11 @@ needs no credential. A reference with a `/` (a registry, or a Docker Hub
 namespace such as pgvector/pgvector) is pulled exactly as given: GitHub's
 expression language cannot split a string to tell the two apart.
 
+Each service also starts only when its services_* input is true: switched off,
+its image is '' and nothing is pulled at all (test_coverage_floor_services.py
+pins that). So the guard and REQUIRED switch a service on before asking where
+its image comes from.
+
 Two layers:
 
 1. The guard (`docker_hub_pulls`) resolves every image a job pulls (each
@@ -239,13 +244,24 @@ def _declared_inputs(workflow: dict) -> dict:
 
 def _scenarios(template: str, declared: dict):
     defaults = {name: spec.get("default") for name, spec in declared.items()}
+    names = sorted(set(re.findall(r"inputs\.([A-Za-z_][\w-]*)", template, re.I)))
+    # A boolean input an image reads switches its service on or off. A caller
+    # that passes an image uses that service, so those scenarios switch it on;
+    # left off, the image is '' and nothing is pulled.
+    on = {
+        name: True
+        for name in names
+        if (declared.get(name) or {}).get("type") == "boolean"
+    }
     yield "inputs empty (this repo's own runs)", {}
     yield "caller passes nothing (declared defaults)", defaults
-    for name in sorted(set(re.findall(r"inputs\.([A-Za-z_][\w-]*)", template, re.I))):
+    if on:
+        yield f"caller switches on {', '.join(on)}", {**defaults, **on}
+    for name in names:
         if (declared.get(name) or {}).get("type", "string") != "string":
             continue
         for sample in BARE_SAMPLES:
-            yield f"caller passes {name}: {sample}", {**defaults, name: sample}
+            yield f"caller passes {name}: {sample}", {**defaults, **on, name: sample}
 
 
 def docker_hub_pulls(text: str) -> list:
@@ -261,11 +277,13 @@ def docker_hub_pulls(text: str) -> list:
     return found
 
 
-# The image slots known to exist, the input that feeds each, and what a caller
-# value resolves to (None = `inputs` empty). Hardcoded, never read from the
+# The image slots known to exist, the input that switches each service on, the
+# input that feeds its image, and what a caller value resolves to once the
+# service is on (None = no image input). Hardcoded, never read from the
 # workflow: derived expectations cannot fail when the workflow narrows.
 REQUIRED = {
     ("coverage-floor.yml", "measure", "services.postgres"): (
+        "services_postgres",
         "postgres_image",
         {
             None: MIRROR + "postgres:16",
@@ -279,6 +297,7 @@ REQUIRED = {
         },
     ),
     ("coverage-floor.yml", "measure", "services.redis"): (
+        "services_redis",
         "redis_image",
         {
             None: MIRROR + "redis:7",
@@ -296,7 +315,7 @@ def _check_required(workflow_name: str, text: str) -> None:
         (job_id, slot): template
         for job_id, slot, template in image_slots(yaml.safe_load(text))
     }
-    for (name, job_id, slot), (input_name, cases) in REQUIRED.items():
+    for (name, job_id, slot), (switch, input_name, cases) in REQUIRED.items():
         if name != workflow_name:
             continue
         assert (job_id, slot) in slots, (
@@ -304,7 +323,9 @@ def _check_required(workflow_name: str, text: str) -> None:
             "images it is known to check"
         )
         for value, want in cases.items():
-            inputs = {} if value is None else {input_name: value}
+            inputs = (
+                {switch: True} if value is None else {switch: True, input_name: value}
+            )
             got = resolve(slots[(job_id, slot)], inputs)
             assert got == want, (
                 f"{name} jobs.{job_id}.{slot}: {input_name}={value!r} -> {got!r}, want {want!r}"
