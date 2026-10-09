@@ -216,15 +216,17 @@ jobs:
   measure:
     name: Measure coverage and enforce floor
     runs-on: ubuntu-latest
-    # Both service images come from Google's Docker Hub mirror, not Docker Hub,
-    # which rate-limits anonymous pulls per IP; GitHub-hosted runners share
-    # egress IPs. On 2026-10-09 dotclaude#479 (run 37991904725) and #485 failed
-    # before their first step: `docker pull postgres:16` -> toomanyrequests.
-    # A bare name (no `/`, so a Docker Official Image), the default or one a
-    # caller passes, is pulled as mirror.gcr.io/library/<name>, which needs no
-    # credential. A reference with a `/` is pulled exactly as given: the
+    # Docker Hub rate-limits anonymous pulls per IP, and GitHub-hosted runners
+    # share egress IPs: on 2026-10-09 dotclaude#479 (run 37991904725) and #485
+    # failed before their first step on `docker pull postgres:16` ->
+    # toomanyrequests. So a bare service image name (no `/`, so a Docker
+    # Official Image), the default or one a caller passes, is pulled from
+    # Google's Docker Hub mirror as mirror.gcr.io/library/<name>, which needs
+    # no credential. A reference with a `/` is pulled exactly as given: the
     # expression language cannot split it to tell a registry from a Docker Hub
-    # namespace. Pinned by selftest/test_job_images_off_docker_hub.py.
+    # namespace, so a caller using a Docker Hub `<namespace>/<name>` image
+    # passes its mirror form (mirror.gcr.io/<namespace>/<name>) itself.
+    # Pinned by selftest/test_job_images_off_docker_hub.py.
     services:
       postgres:
         image: ${{ contains(inputs.postgres_image || 'postgres:16', '/') && inputs.postgres_image || format('mirror.gcr.io/library/{0}', inputs.postgres_image || 'postgres:16') }}

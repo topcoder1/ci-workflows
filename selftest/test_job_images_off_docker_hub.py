@@ -1,13 +1,14 @@
-"""Guard: no job in this repo's workflows pulls its images from Docker Hub.
+"""Guard: no job in this repo's workflows sends a default or bare image name to
+Docker Hub.
 
 2026-10-09: dotclaude#479 (run 37991904725) and #485 failed "coverage-floor /
-Measure coverage and enforce floor" before its first step. `docker pull
+Measure coverage and enforce floor" before the job's first step. `docker pull
 postgres:16` got `toomanyrequests: You have reached your unauthenticated pull
 rate limit` on every try, then `Docker pull failed with exit code 1`. Docker
-Hub rate-limits anonymous pulls per IP
-and GitHub-hosted runners share egress IPs, so a bare Docker Hub name can
-fail any run, and coverage-floor.yml starts its postgres and redis services
-on every run of every caller (that run had services_postgres: false).
+Hub rate-limits anonymous pulls per IP and GitHub-hosted runners share egress
+IPs, so a bare Docker Hub name can fail any run, and coverage-floor.yml starts
+its postgres and redis services on every run of every caller (that run had
+services_postgres: false).
 
 coverage-floor.yml now pulls a bare name, its own default or one a caller
 passes, from Google's Docker Hub mirror (mirror.gcr.io/library/...), which
@@ -183,11 +184,13 @@ class _Expr:
         self._expect(".")
         prop = self.tok
         self._advance()
-        return self.inputs.get(prop)
+        return self.inputs.get(prop.lower())
 
 
 def resolve(template: str, inputs: dict) -> str:
     """The string GitHub hands to `docker pull` for this field."""
+    # GitHub looks up context properties case-insensitively.
+    inputs = {name.lower(): value for name, value in inputs.items()}
     out, i = [], 0
     while (start := template.find("${{", i)) != -1:
         out.append(template[i:start])
@@ -214,7 +217,9 @@ def image_slots(workflow: dict):
     """(job, slot, template) for every image a job pulls."""
     for job_id, job in (workflow.get("jobs") or {}).items():
         for service_id, service in (job.get("services") or {}).items():
-            yield job_id, f"services.{service_id}", str(service.get("image", ""))
+            if isinstance(service, dict):
+                service = service.get("image", "")
+            yield job_id, f"services.{service_id}", str(service)
         container = job.get("container")
         if isinstance(container, dict):
             container = container.get("image", "")
@@ -236,7 +241,7 @@ def _scenarios(template: str, declared: dict):
     defaults = {name: spec.get("default") for name, spec in declared.items()}
     yield "inputs empty (this repo's own runs)", {}
     yield "caller passes nothing (declared defaults)", defaults
-    for name in sorted(set(re.findall(r"inputs\.([A-Za-z_][\w-]*)", template))):
+    for name in sorted(set(re.findall(r"inputs\.([A-Za-z_][\w-]*)", template, re.I))):
         if (declared.get(name) or {}).get("type", "string") != "string":
             continue
         for sample in BARE_SAMPLES:
@@ -312,7 +317,7 @@ def _check(workflow_name: str, text: str) -> None:
     _check_required(workflow_name, text)
 
 
-_WORKFLOWS = sorted(WORKFLOWS_DIR.glob("*.yml"))
+_WORKFLOWS = sorted([*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")])
 
 
 def test_the_scan_covers_the_workflows_it_must():
@@ -341,6 +346,11 @@ def _back_to_docker_hub(t):
 
 
 def _mirror_only_the_default(t):
+    # The declared default is mirrored too, so only a name a caller passes
+    # still reaches Docker Hub.
+    t = t.replace(
+        'default: "postgres:16"', 'default: "mirror.gcr.io/library/postgres:16"'
+    )
     return _set_postgres_image(
         t, "${{ inputs.postgres_image || 'mirror.gcr.io/library/postgres:16' }}"
     )
@@ -364,13 +374,16 @@ def _service_renamed_out_of_view(t):
 
 
 @pytest.mark.parametrize(
-    "mutate",
+    "mutate, why",
     [
-        _back_to_docker_hub,
-        _mirror_only_the_default,
-        _prefix_every_reference,
-        _typo_in_mirror,
-        _service_renamed_out_of_view,
+        (_back_to_docker_hub, r"inputs empty \(this repo's own runs\) -> postgres:16"),
+        (
+            _mirror_only_the_default,
+            r"caller passes postgres_image: postgres:16 -> postgres:16",
+        ),
+        (_prefix_every_reference, r"-> 'mirror\.gcr\.io/library/pgvector/pgvector"),
+        (_typo_in_mirror, r"-> 'mirror\.gcr\.io/libary/postgres:16'"),
+        (_service_renamed_out_of_view, r"services\.postgres not found"),
     ],
     ids=[
         "bare-default-again",
@@ -380,13 +393,13 @@ def _service_renamed_out_of_view(t):
         "required-slot-missing",
     ],
 )
-def test_guard_catches_each_regression(mutate):
+def test_guard_catches_each_regression(mutate, why):
     """A guard that reads the artifact it checks must be shown to fail when
-    that artifact narrows."""
+    that artifact narrows, and for the reason the mutation names."""
     text = COVERAGE_FLOOR.read_text()
     mutated = mutate(text)
     assert mutated != text, "mutation did not apply; the anchor drifted"
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match=why):
         _check(COVERAGE_FLOOR.name, mutated)
 
 
@@ -406,6 +419,7 @@ jobs:
       db: {image: postgres:16}
       cache: {image: bitnami/redis:7}
       hub: {image: docker.io/library/redis:7}
+      short: "postgres:16"
   passthrough:
     runs-on: ubuntu-latest
     services:
@@ -445,6 +459,7 @@ def test_every_slot_kind_is_flagged():
         "jobs.literal.services.db",
         "jobs.literal.services.cache",
         "jobs.literal.services.hub",
+        "jobs.literal.services.short",
         "jobs.passthrough.services.db",
         "jobs.container-string.container",
         "jobs.container-mapping.container",
@@ -455,6 +470,11 @@ def test_every_slot_kind_is_flagged():
     assert sum(line.startswith("jobs.passthrough.") for line in found) == 1 + len(
         BARE_SAMPLES
     ), found
+    # Input names match case-insensitively, as in GitHub.
+    recased = _FIXTURE.replace("inputs.db_image", "inputs.DB_Image")
+    assert sum(
+        line.startswith("jobs.passthrough.") for line in docker_hub_pulls(recased)
+    ) == 1 + len(BARE_SAMPLES)
 
 
 def test_clean_fixture_passes():
