@@ -885,7 +885,7 @@ fi
 # action's transcript. lane_case LABEL SCRIPT FINAL_MESSAGE COMMENT_FAIL runs
 # the shipped step against a transcript ending in FINAL_MESSAGE.
 lane_case() {
-  local label="$1" script="$2" result="$3" comment_fail="$4"
+  local label="$1" script="$2" result="$3" comment_fail="$4" outcome="${5:-success}"
   echo "· scenario $label"
   jq -nc --arg r "$result" '[{type: "system", subtype: "init"},
     {type: "result", subtype: "success", is_error: false, num_turns: 4, result: $r, permission_denials: []}]' \
@@ -899,7 +899,7 @@ lane_case() {
     PATH="$T/bin:$PATH" GH_LOG="$T/ghlog" GH_COMMENT_FAIL="$comment_fail" \
     GITHUB_OUTPUT="$T/out" RUNNER_TEMP="$T/runner_temp" GH_TOKEN=stub \
     REPO='whois-api-llc/wxa-jake-ai' PR=1054 EXECUTION_FILE="$T/transcript.json" \
-    RUN_URL='https://example.test/run/1' \
+    CLAUDE_OUTCOME="$outcome" RUN_URL='https://example.test/run/1' \
     bash "$script"
   ) > "$T/stdout" 2>&1 || rc=$?
   posts=$(grep -c '^gh pr comment' "$T/ghlog" || true)
@@ -982,6 +982,39 @@ if [ -s "$T/verdict.sh" ]; then
     pass "adversarial/findings verdict + comment API healthy: posted once, exit 0 (control)"
   else
     fail "adversarial/findings verdict + comment API healthy: rc=$rc posts=$posts — expected one post, exit 0"
+    sed 's/^/    /' "$T/stdout"
+  fi
+
+  # An empty verdict after a SUCCEEDED model step is fail-closed: findings
+  # delivery cannot read "nothing" as "no regressions", and a transcript
+  # shape the step can no longer parse (a bad claude-code-action bump) must
+  # go red on its first run, not silently green.
+  lane_case "adversarial/empty-verdict-success" "$T/verdict.sh" '' 0 success
+  if [ "$rc" -ne 0 ] && [ "$posts" -eq 0 ] && grep -q '::error::' "$T/stdout"; then
+    pass "adversarial/empty verdict + step success: ::error::, job FAILS (fail-closed on a findings-delivery lane)"
+  else
+    fail "adversarial/empty verdict + step success: rc=$rc posts=$posts — a successful run with no verdict must red the check"
+    sed 's/^/    /' "$T/stdout"
+  fi
+  # The same empty verdict when the step did NOT succeed: the job is already
+  # red from the action, so this step warns and stays exit 0 (no duplicate error).
+  lane_case "adversarial/empty-verdict-failure" "$T/verdict.sh" '' 0 failure
+  if [ "$rc" -eq 0 ] && [ "$posts" -eq 0 ] && grep -q '::warning::' "$T/stdout" \
+     && ! grep -q '::error::' "$T/stdout"; then
+    pass "adversarial/empty verdict + step failure: warning only, exit 0 (the action already failed the job)"
+  else
+    fail "adversarial/empty verdict + step failure: rc=$rc posts=$posts — expected a warning and exit 0"
+    sed 's/^/    /' "$T/stdout"
+  fi
+
+  # Reporting counterpart: the review summary is empty after success → warning,
+  # green (the findings are the inline comments; the guard reads the file).
+  lane_case "review-summary/empty-success" "$T/summary.sh" '' 0 success
+  if [ "$rc" -eq 0 ] && [ "$posts" -eq 0 ] && grep -q '::warning::' "$T/stdout" \
+     && ! grep -q '::error::' "$T/stdout"; then
+    pass "review-summary/empty summary + step success: warning only, exit 0 (reporting)"
+  else
+    fail "review-summary/empty summary + step success: rc=$rc posts=$posts — reporting must stay green"
     sed 's/^/    /' "$T/stdout"
   fi
 fi

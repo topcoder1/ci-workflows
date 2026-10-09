@@ -553,13 +553,17 @@ jobs:
       # FAIL-SAFE on the reads that decide the verdict: an API error listing
       # the inline comments, or a summary phrased outside "Flagged N issue(s)",
       # ends in a warning and exit 0 — a guard that reddens a REQUIRED check
-      # on its own flakiness is worse than the gap it closes. The transcript
-      # is different in kind: it is evidence for RECOVERY, not for the
-      # verdict. Claim > posted is established from GitHub alone, so a
-      # missing or malformed transcript cannot make a real loss spurious — it
-      # only makes it unrecoverable, and unrecoverable loss is the red case
-      # by design (the incident had no transcript either). Malformed entries
-      # are skipped, never fatal. Every branch above is pinned by
+      # on its own flakiness is worse than the gap it closes. The claim now
+      # comes from SUMMARY_FILE (the model's final message, which the summary
+      # step wrote), so the transcript carries BOTH the claim and the material
+      # for RECOVERY. When no summary could be read — the summary step reported
+      # the review ended without one — the claim is 0 and the guard cannot see
+      # a claim>posted loss; that is the fail-safe direction (the review's
+      # findings are its inline comments, posted through the MCP tool on a
+      # path this guard does not depend on, and a successful run with no final
+      # message at all is the summary step's warning to surface, not a red the
+      # guard manufactures). Malformed entries are skipped, never fatal. Every
+      # branch above is pinned by
       # selftest/test_claude_review_lost_findings_guard.sh, which extracts
       # and executes this shipped bash, after the shipped summary step,
       # against a stubbed `gh`.
@@ -820,7 +824,14 @@ jobs:
           if ! gh pr comment "$PR" -R "$REPO" --body-file "$T/comment.md" >/dev/null; then
             COMMENT_POSTED=0
             warn "could not post the lost-findings comment on PR #${PR}; its body follows"
-            sed 's/^/    | /' "$T/comment.md"
+            # comment.md carries model-authored text (recovered inline bodies,
+            # the subagent report, the final message). Break the runner's
+            # workflow-command prefixes before it reaches the log, as the
+            # summary step does: `::` at a line start (the runner trims leading
+            # whitespace first, so the `| ` prefix alone is not enough), `##[`
+            # anywhere in a line, and a carriage return, which it reads as a
+            # line break.
+            tr '\r' '\n' < "$T/comment.md" | sed -e 's/##\[/#?[/g' -e 's/^/    | /'
           fi
 
           if [ "$RECOVERED" -eq 0 ]; then

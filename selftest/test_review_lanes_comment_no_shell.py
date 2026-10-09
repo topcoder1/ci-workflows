@@ -72,6 +72,18 @@ POSTING_INSTRUCTION = re.compile(
     r"|\bgh\s+api\b[^\n]*\s(?:-f|-F|--field|--raw-field|--input)\b"
     r"|--body\b"
 )
+# Commands that, allowed as a `Bash(<cmd>:*)` prefix rule, run an arbitrary
+# OTHER program — so a prefix rule naming only them still reaches any command,
+# `gh pr comment` included. A prefix match cannot exclude the flag or argument
+# that does it. rg runs `--pre <cmd>`; sed runs the `e`/`s///e` command; awk
+# runs `system()`; the shells and the wrapper tools run their argument. (Not
+# grep, git, gh, cat, head, tail, wc, ls, file: none runs another program. find
+# is excluded here because Claude Code always-prompts `find -exec`/`-delete`,
+# which a `Bash(find:*)` rule never auto-approves — see the verifier lane.)
+EXEC_GADGETS = frozenset(
+    "rg sed awk env xargs sh bash zsh ksh dash timeout nice stdbuf "
+    "watch parallel nohup setsid".split()
+)
 
 
 def load(workflow):
@@ -147,6 +159,22 @@ def can_post(rule):
     )
 
 
+def reaches_shell(rule):
+    """Whether an allow rule lets the model run an arbitrary other program
+    (an exec gadget, or a bare `Bash`/`Bash(*)`)."""
+    if rule == "Bash":
+        return True
+    match = re.fullmatch(r"Bash\((.*)\)", rule, re.DOTALL)
+    if not match:
+        return False
+    words = re.sub(r"(?::\*|\s\*|\*)$", "", match.group(1).strip()).split()
+    if not words:  # Bash(*) / Bash(:*)
+        return True
+    # The gadget is the command word, however the rule is scoped after it
+    # (`rg`, `rg -n`, `/usr/bin/rg` all reach ripgrep's --pre).
+    return words[0].rsplit("/", 1)[-1] in EXEC_GADGETS
+
+
 def lane_steps(workflow):
     job, _ = LANES[workflow]
     return load(workflow)["jobs"][job]["steps"]
@@ -207,7 +235,9 @@ class Run:
         ]
 
 
-def run_post_step(workflow, tmp_path, execution_file="", fail_post=False, run=None):
+def run_post_step(
+    workflow, tmp_path, execution_file="", fail_post=False, run=None, outcome="success"
+):
     """Run the lane's posting step the way the runner does, against stubs."""
     step = post_step(workflow)
     script = run if run is not None else shipped_run(step)
@@ -224,6 +254,7 @@ def run_post_step(workflow, tmp_path, execution_file="", fail_post=False, run=No
         "github.repository": "o/r",
         "github.event.pull_request.number": "478",
         "steps.claude.outputs.execution_file": str(execution_file),
+        "steps.claude.outcome": outcome,
         "github.server_url": "https://github.example",
         "github.run_id": "1",
     }
@@ -355,6 +386,25 @@ def test_no_model_step_can_post_through_the_shell(workflow, job, step):
 
 
 @pytest.mark.parametrize(
+    "workflow, job, step",
+    model_steps(),
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_no_model_step_allows_a_code_execution_gadget(workflow, job, step):
+    # A no-posting-through-the-shell boundary also has to keep the model off
+    # any command that runs ANOTHER command: `Bash(rg:*)` reaches `rg --pre
+    # sh`, which runs an arbitrary program, `gh pr comment` included. A prefix
+    # rule cannot exclude the flag that does it.
+    gadgets = [rule for rule in allowed_rules(step) if reaches_shell(rule)]
+    assert not gadgets, (
+        f"{workflow} ({job}): allow rule(s) {gadgets} name a command that runs "
+        "another program (rg --pre, sed e, awk system, a shell, a wrapper), so "
+        "the model can still reach any command through it. Drop it; grep covers "
+        "the searching."
+    )
+
+
+@pytest.mark.parametrize(
     "rule",
     [
         "Bash(gh pr comment:*)",
@@ -386,6 +436,44 @@ def test_the_check_flags_rules_that_reach_a_posting_command(rule):
 )
 def test_the_check_passes_rules_that_cannot_post(rule):
     assert not can_post(rule)
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "Bash(rg:*)",
+        "Bash(rg --pre sh:*)",
+        "Bash(/usr/bin/rg:*)",
+        "Bash(sed:*)",
+        "Bash(awk:*)",
+        "Bash(env:*)",
+        "Bash(xargs:*)",
+        "Bash(sh:*)",
+        "Bash(bash -c:*)",
+        "Bash(timeout 5 rg:*)",
+        "Bash(*)",
+        "Bash",
+    ],
+)
+def test_the_gadget_check_flags_exec_capable_rules(rule):
+    assert reaches_shell(rule)
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "Bash(grep:*)",
+        "Bash(git log:*)",
+        "Bash(gh pr diff:*)",
+        "Bash(gh pr view:*)",
+        "Bash(cat:*)",
+        "Bash(find:*)",
+        "Read",
+        "mcp__github_inline_comment__create_inline_comment",
+    ],
+)
+def test_the_gadget_check_passes_read_only_rules(rule):
+    assert not reaches_shell(rule)
 
 
 def test_the_check_reads_the_allowlist_however_it_is_written():
@@ -493,8 +581,13 @@ def test_a_failed_post_logs_the_message_with_workflow_commands_broken(
 
 def assert_no_workflow_commands(workflow, log):
     # The runner splits its log on \n and \r (and \r\n); so does splitlines.
+    # It TrimStart()s a line before matching `::` (actions/runner
+    # ActionCommand.TryParseV2), so a leading-whitespace prefix does not
+    # protect the `::` form — lstrip before the check to see what it sees.
     lines = log.splitlines()
-    assert not [line for line in lines if line.startswith("::error::injected")], (
+    assert not [
+        line for line in lines if line.lstrip().startswith("::error::injected")
+    ], (
         f"{workflow}: the runner would read the model's `::error::` line as a "
         "workflow command"
     )
@@ -512,6 +605,9 @@ LOG_MUTANTS = {
     ),
     # Print it without breaking `##[`.
     "keeps-legacy-prefix": (r"-e 's/##\\\[/#\?\[/g' ", ""),
+    # Indent with spaces but no `| `, so a `::` line sits at the start after
+    # the runner's TrimStart() and is parsed.
+    "leaves-colon-at-line-start": (r"-e 's/\^/    \| /'", r"-e 's/^/    /'"),
 }
 
 
@@ -536,45 +632,72 @@ def test_a_post_step_that_logs_the_message_raw_is_caught(workflow, mutant, tmp_p
         assert_no_workflow_commands(workflow, result.stdout + result.stderr)
 
 
-@pytest.mark.parametrize("workflow", sorted(LANES))
-@pytest.mark.parametrize(
-    "shape",
-    [
-        "no-file",
-        "missing-file",
-        "not-json",
-        "not-an-array",
-        "max-turns",
-        "is-error",
-        "empty-result",
-        "blank-result",
-    ],
-)
-def test_a_run_that_did_not_finish_posts_nothing(workflow, shape, tmp_path):
+def _no_message_transcript(shape, tmp_path):
     if shape == "no-file":
-        path = ""
-    elif shape == "missing-file":
-        path = tmp_path / "absent.json"
-    elif shape == "not-json":
+        return ""
+    if shape == "missing-file":
+        return tmp_path / "absent.json"
+    if shape == "not-json":
         path = tmp_path / "x.json"
         path.write_text("Flagged 3 issues inline — not JSON")
-    elif shape == "not-an-array":
+        return path
+    if shape == "not-an-array":
         path = tmp_path / "x.json"
-        path.write_text(json.dumps({"type": "result", "result": "Flagged 3 issues inline."}))
-    elif shape == "max-turns":
-        path = transcript(tmp_path, None, subtype="error_max_turns", is_error=True)
-    elif shape == "is-error":
-        path = transcript(tmp_path, "API Error: 529 overloaded", is_error=True)
-    elif shape == "empty-result":
-        path = transcript(tmp_path, "")
-    else:
-        path = transcript(tmp_path, " \n\t\n")
-    result = run_post_step(workflow, tmp_path, path)
+        path.write_text(json.dumps({"type": "result", "result": "Flagged 3 inline."}))
+        return path
+    if shape == "max-turns":
+        return transcript(tmp_path, None, subtype="error_max_turns", is_error=True)
+    if shape == "is-error":
+        return transcript(tmp_path, "API Error: 529 overloaded", is_error=True)
+    if shape == "empty-result":
+        return transcript(tmp_path, "")
+    return transcript(tmp_path, " \n\t\n")  # blank-result
+
+
+# Shapes where the model step did NOT succeed (the action fails the job
+# itself). The post step runs under !cancelled() but the job is already red,
+# so both lanes post nothing and exit 0.
+_FAILED_RUN_SHAPES = ["no-file", "missing-file", "not-json", "max-turns", "is-error"]
+# Shapes where the step SUCCEEDED but produced no readable final message (a
+# broken transcript shape, or a genuinely blank result).
+_SUCCESS_NO_MESSAGE_SHAPES = ["not-an-array", "empty-result", "blank-result"]
+
+
+@pytest.mark.parametrize("workflow", sorted(LANES))
+@pytest.mark.parametrize("shape", _FAILED_RUN_SHAPES)
+def test_a_failed_run_posts_nothing_and_stays_green(workflow, shape, tmp_path):
+    result = run_post_step(
+        workflow, tmp_path, _no_message_transcript(shape, tmp_path), outcome="failure"
+    )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.calls == [], f"{workflow}: posted for a run with no final message"
+    assert result.calls == [], f"{workflow}: posted for a run that did not finish"
     assert "::warning::" in result.stdout, (
         f"{workflow}: a run with nothing to post must say so in the log"
     )
+
+
+@pytest.mark.parametrize("workflow", sorted(LANES))
+@pytest.mark.parametrize("shape", _SUCCESS_NO_MESSAGE_SHAPES)
+def test_a_successful_run_with_no_message_branches_by_lane(workflow, shape, tmp_path):
+    # The review summary is reporting, so an empty summary after a successful
+    # run is a warning (green). The adversarial verdict is findings delivery,
+    # so an empty verdict after success is fail-closed (red): the run
+    # completed and produced nothing, which cannot be read as "no regressions"
+    # — and a transcript shape the step can no longer parse (a bad pin bump)
+    # goes red on its first run rather than silently green.
+    result = run_post_step(
+        workflow, tmp_path, _no_message_transcript(shape, tmp_path), outcome="success"
+    )
+    assert result.calls == [], f"{workflow}: posted for a run with no final message"
+    if workflow == "claude-review.yml":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "::warning::" in result.stdout
+    else:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "::error::" in result.stdout, (
+            "the adversarial lane must fail closed on an empty verdict after a "
+            "successful run"
+        )
 
 
 EVAL_BODY = r'''--body "$(eval "printf '%s' \"$(cat "\1")\"")"'''

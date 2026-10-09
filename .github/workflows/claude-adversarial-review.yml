@@ -239,10 +239,16 @@ jobs:
           #
           # No `gh pr comment` in --allowedTools: the verdict is the model's
           # final message, which the "Post adversarial verdict" step posts.
+          # No `rg` either: `rg --pre <cmd>` runs an external preprocessor, so
+          # `Bash(rg:*)` is a shell-command gadget — PR content could steer the
+          # model to `rg --pre sh` and reach any command, including a gh that
+          # posts. `grep` covers the searching. verifier-on-high-risk.yml's
+          # allowlist comment lists the same gadgets (rg, sed, awk). Pinned by
+          # selftest/test_review_lanes_comment_no_shell.py.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 40
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(rg:*),Bash(git log:*)"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(git log:*)"
 
       # THE VERDICT IS POSTED HERE, NOT BY THE MODEL, for the reason
       # claude-review.yml's "Post review summary" step gives: posting through
@@ -273,6 +279,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -284,7 +291,18 @@ jobs:
               "$EXECUTION_FILE" > "$verdict" 2>/dev/null || : > "$verdict"
           fi
           if ! grep -q '[^[:space:]]' "$verdict"; then
-            echo "::warning::the adversarial pass ended without a verdict (no final message in the transcript) - nothing to post on PR #${PR}"
+            # No verdict to post. This lane is findings delivery, so when the
+            # model step SUCCEEDED the empty verdict cannot be read as "no
+            # regressions" — the run completed and produced nothing, which is
+            # as likely a broken transcript shape (a claude-code-action bump)
+            # as a genuine blank. Fail closed. When the step did not succeed
+            # the job is already red from the action itself, so a warning is
+            # enough and avoids a duplicate error.
+            if [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
+              echo "::error::claude-adversarial-review: the model step succeeded but produced no verdict (no final message in the transcript) on PR #${PR} - failing closed, since an empty verdict on a findings-delivery lane cannot be read as 'no regressions'. Check the claude-code-action pin and the transcript shape."
+              exit 1
+            fi
+            echo "::warning::the adversarial pass ended without a verdict (step outcome '${CLAUDE_OUTCOME:-unknown}'); the job already reflects that - nothing to post on PR #${PR}"
             exit 0
           fi
           comment="$verdict.comment"
