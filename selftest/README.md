@@ -423,6 +423,32 @@ arbitrary helper scripts; that's a different kind of repo.
   `claude-review.yml`'s context step. GitHub's own diff (`gh pr diff`, the
   files API) ignores `.gitattributes`, so a lane reading only that diff
   needs nothing.
+- `test_job_images_off_docker_hub.py` — no job in `.github/workflows/`
+  sends a default or bare image name to Docker Hub. Every image a job pulls
+  (each service's image, the job container, each `docker://` step) is
+  resolved by evaluating its expression with `inputs` empty (this repo's own
+  runs), with the declared defaults, and with bare names a caller might
+  pass; any result Docker would fetch from Docker Hub fails. Literals alone
+  prove nothing: `inputs.postgres_image || 'mirror.gcr.io/library/postgres:16'`
+  holds only mirrored literals and still sends a caller's `postgres:16` to
+  Docker Hub. The evaluator models only the expression subset image fields
+  use and raises on anything else, so an expression it cannot read fails
+  rather than passing unread. Hardcoded expectations pin
+  `coverage-floor.yml`'s two services: a bare name, the default or a
+  caller's, goes to `mirror.gcr.io/library/`; a reference with a `/` is
+  pulled as given, so a caller passing a Docker Hub `<namespace>/<name>`
+  image is still exposed until it passes the mirror form. Negative controls,
+  each asserting the failure it should cause: the pre-fix bare default; a
+  mirrored default (declared and fallback) that still lets a caller's bare
+  name through; every reference prefixed (a pgvector ref mangled); a typo in
+  the mirror path; the postgres service renamed out of the scan. Fixtures
+  cover every slot kind (literal, string-form service, pass-through,
+  container string and mapping, `docker://` step), a re-cased input name,
+  and a clean set.
+  Background: on 2026-10-09 dotclaude#479 (run 37991904725) and #485 failed
+  before their first step on `docker pull postgres:16` -> `toomanyrequests`:
+  Docker Hub rate-limits anonymous pulls per IP, and GitHub-hosted runners
+  share egress IPs.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

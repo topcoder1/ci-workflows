@@ -10,10 +10,11 @@ Only inbox_superpilot opts in; every other caller pulled two images it never
 used.
 
 GitHub skips a service whose image is an empty string, so each image is gated
-on its input. The image expressions are rendered here the way Actions renders
-them (the evaluator in test_automerge_standing_arm_revoke.py), with the inputs
-a caller gets: the workflow's declared defaults, the caller's values on top.
-The expected images are hardcoded.
+on its input. Switched on, a service pulls from Google's Docker Hub mirror
+(test_job_images_off_docker_hub.py pins where each image comes from). The
+image expressions are rendered here the way Actions renders them (`resolve` in
+that file), with the inputs a caller gets: the workflow's declared defaults,
+the caller's values on top. The expected images are hardcoded.
 """
 
 import pathlib
@@ -21,10 +22,14 @@ import pathlib
 import pytest
 import yaml
 
-from selftest.test_automerge_standing_arm_revoke import substitute
+from selftest.test_job_images_off_docker_hub import resolve
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "coverage-floor.yml"
+
+# What each service's default image resolves to once it is switched on.
+PG = "mirror.gcr.io/library/postgres:16"
+REDIS = "mirror.gcr.io/library/redis:7"
 
 
 def _images(caller):
@@ -35,8 +40,7 @@ def _images(caller):
     inputs.update(caller)
     services = workflow["jobs"]["measure"]["services"]
     return {
-        name: substitute(service["image"], {"inputs": inputs})
-        for name, service in services.items()
+        name: resolve(service["image"], inputs) for name, service in services.items()
     }
 
 
@@ -50,16 +54,16 @@ def _images(caller):
             {"postgres_image": "pgvector/pgvector:pg16", "redis_image": "redis:7"},
             {"postgres": "", "redis": ""},
         ),
-        ({"services_postgres": True}, {"postgres": "postgres:16", "redis": ""}),
-        ({"services_redis": True}, {"postgres": "", "redis": "redis:7"}),
-        # inbox_superpilot's caller.
+        ({"services_postgres": True}, {"postgres": PG, "redis": ""}),
+        ({"services_redis": True}, {"postgres": "", "redis": REDIS}),
+        # inbox_superpilot's caller (an image with a '/' is pulled as given).
         (
             {
                 "services_postgres": True,
                 "services_redis": True,
                 "postgres_image": "pgvector/pgvector:pg16",
             },
-            {"postgres": "pgvector/pgvector:pg16", "redis": "redis:7"},
+            {"postgres": "pgvector/pgvector:pg16", "redis": REDIS},
         ),
         # An empty image input still falls back to the default image.
         (
@@ -69,7 +73,7 @@ def _images(caller):
                 "services_redis": True,
                 "redis_image": "",
             },
-            {"postgres": "postgres:16", "redis": "redis:7"},
+            {"postgres": PG, "redis": REDIS},
         ),
     ],
 )

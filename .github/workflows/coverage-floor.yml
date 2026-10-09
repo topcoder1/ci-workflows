@@ -112,7 +112,7 @@ on:
         type: boolean
         default: false
       postgres_image:
-        description: "Docker image for the postgres service. Default 'postgres:16'. Use e.g. 'pgvector/pgvector:pg16' when tests need the vector extension. Pulled only when services_postgres is true."
+        description: "Docker image for the postgres service. Default 'postgres:16'. A bare Docker Official Image name like that one (no '/') is pulled from Google's Docker Hub mirror as mirror.gcr.io/library/<name>, because Docker Hub rate-limits the anonymous pulls GitHub-hosted runners make. A reference with a '/' is pulled exactly as given, so pass a Docker Hub image outside library/ in its mirror form, e.g. 'mirror.gcr.io/pgvector/pgvector:pg16' when tests need the vector extension. Pulled only when services_postgres is true."
         required: false
         type: string
         default: "postgres:16"
@@ -122,7 +122,7 @@ on:
         type: boolean
         default: false
       redis_image:
-        description: "Docker image for the redis service. Default 'redis:7'. Pulled only when services_redis is true."
+        description: "Docker image for the redis service. Default 'redis:7'. Pulled like postgres_image: a bare name from mirror.gcr.io/library/, a reference with a '/' exactly as given, and only when services_redis is true."
         required: false
         type: string
         default: "redis:7"
@@ -217,14 +217,24 @@ jobs:
     name: Measure coverage and enforce floor
     runs-on: ubuntu-latest
     # A service starts only when its services_* input asks: GitHub skips a
-    # service whose image is an empty string. Unconditional images made every
-    # caller pull postgres:16 and redis:7 from Docker Hub on every run, and its
-    # unauthenticated pull limit failed the job before it measured anything
-    # (topcoder1/dotclaude#485's runs, 2026-10-09). Pinned by
+    # service whose image is an empty string, so a caller that never uses a
+    # service pulls nothing at all. Pinned by
     # selftest/test_coverage_floor_services.py.
+    #
+    # Docker Hub rate-limits anonymous pulls per IP, and GitHub-hosted runners
+    # share egress IPs: on 2026-10-09 dotclaude#479 (run 37991904725) and #485
+    # failed before their first step on `docker pull postgres:16` ->
+    # toomanyrequests. So a bare service image name (no `/`, so a Docker
+    # Official Image), the default or one a caller passes, is pulled from
+    # Google's Docker Hub mirror as mirror.gcr.io/library/<name>, which needs
+    # no credential. A reference with a `/` is pulled exactly as given: the
+    # expression language cannot split it to tell a registry from a Docker Hub
+    # namespace, so a caller using a Docker Hub `<namespace>/<name>` image
+    # passes its mirror form (mirror.gcr.io/<namespace>/<name>) itself.
+    # Pinned by selftest/test_job_images_off_docker_hub.py.
     services:
       postgres:
-        image: ${{ inputs.services_postgres && (inputs.postgres_image || 'postgres:16') || '' }}
+        image: ${{ inputs.services_postgres && (contains(inputs.postgres_image || 'postgres:16', '/') && inputs.postgres_image || format('mirror.gcr.io/library/{0}', inputs.postgres_image || 'postgres:16')) || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -237,7 +247,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: ${{ inputs.services_redis && (inputs.redis_image || 'redis:7') || '' }}
+        image: ${{ inputs.services_redis && (contains(inputs.redis_image || 'redis:7', '/') && inputs.redis_image || format('mirror.gcr.io/library/{0}', inputs.redis_image || 'redis:7')) || '' }}
         ports:
           - 6379:6379
         options: >-
