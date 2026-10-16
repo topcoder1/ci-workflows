@@ -491,15 +491,18 @@ arbitrary helper scripts; that's a different kind of repo.
   the pinned string for draft and live payloads and compares the names
   case-insensitively, as GitHub does: split, per PR, and never a group its
   callers hold (`-reusable-` keeps it apart from their
-  `safe-paths-automerge-<N>-<draft|live>`). Sweeps every draft-gated
-  workflow, gated directly or through a reusable it calls, for an unsplit
-  group. Negative controls: the pre-fix unsplit group, the callers' own
-  group, cancel-in-progress off, a group shared across PRs, the callers'
-  group re-spaced or re-cased, unmodeled expressions (`github.run_id`, the
-  head SHA), a
-  draft gate added to `verifier-on-high-risk.yml` (whose per-PR group stays
-  unsplit only because no job there gates on draft), and `pr-review.yml`
-  reverted to one group.
+  `safe-paths-automerge-<N>-<draft|live>`). Sweeps every workflow the
+  draft-gate lint counts as gated (a job `if:` containing `draft == false`,
+  or a job calling a reusable that has one): each group, workflow- or
+  job-level, must render split and stay out of its callers' groups. Other
+  spellings of a draft gate go undetected, as in the lint. Negative
+  controls: the pre-fix unsplit group, the callers' own group,
+  cancel-in-progress off, a group shared across PRs, the callers' group
+  re-spaced or re-cased, unmodeled expressions (`github.run_id`, the head
+  SHA), a `draft == false` gate added to `verifier-on-high-risk.yml` (whose
+  per-PR group stays unsplit only because no job there gates on draft),
+  `pr-review.yml` reverted to one group, and a job-level group, unsplit or
+  the callers' own.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

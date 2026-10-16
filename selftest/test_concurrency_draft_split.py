@@ -3,14 +3,15 @@
 A job gated on `github.event.pull_request.draft == false` makes every
 draft-payload run a no-op, but in a group it shares with live runs of the same
 PR that no-op run can still cancel the live run, or replace it while it waits,
-and then skip. The callers split their groups by the payload's draft flag for
-this (attaxion_dev#303, ci-workflows#110 and #116). safe-paths-automerge.yml
-then declared its own unsplit group, which put both runs back into one queue
-one level down. On 2026-10-16 a push to a draft PR and `gh pr ready` about a
-second later delivered the draft-payload `synchronize` AFTER
-`ready_for_review`: the ready run was cancelled ("higher priority waiting
-request for safe-paths-automerge-<N>"), the synchronize run skipped, and
-auto-merge was never armed (whois-api-llc/wxa_vpn#2258).
+and then skip. The callers split their groups by the payload's draft flag
+after that race hit attaxion_dev#303 (ci-workflows#110 and #116 did the same
+for the review lanes). safe-paths-automerge.yml then declared its own unsplit
+group, which put both runs back into one queue one level down. On 2026-10-16
+a push to a draft PR and `gh pr ready` about a second later delivered the
+draft-payload `synchronize` AFTER `ready_for_review`: the ready run was
+cancelled ("higher priority waiting request for safe-paths-automerge-<N>"),
+the synchronize run skipped, and neither run armed auto-merge
+(whois-api-llc/wxa_vpn#2258).
 
 Three layers:
 
@@ -24,11 +25,15 @@ Three layers:
    draft and a live run of one PR land in different groups, two PRs never
    share one, and the reusable never lands in a group its caller runs hold
    (CALLER_GROUPS).
-3. A sweep. Every draft-gated workflow here, gated directly or through a
-   reusable it calls, that declares a group must render split groups, and a
-   draft-gated reusable's group must be pinned in layer 1.
+3. A sweep over every workflow the fleet's draft-gate lint counts as gated
+   (check_draft_gate_triggers.draft_gate_reason: a job `if:` containing
+   `draft == false`, or a job calling a reusable that has one). Each group it
+   declares, workflow- or job-level, must render split and stay out of its
+   callers' groups, and a gated reusable's group must be pinned in layer 1.
    verifier-on-high-risk.yml keeps an unsplit per-PR group because no job
-   there gates on draft; a control adds such a gate and must be caught.
+   there gates on draft; a control adds a `draft == false` gate and must be
+   caught. Other spellings of a draft gate (`!...draft`, a step's `if:`) go
+   undetected here, as they do in the lint.
 
 Negative controls run each layer against a mutated copy and must fail.
 """
@@ -191,6 +196,13 @@ def sweep(workflows_dir: pathlib.Path) -> list[str]:
         reusable = "workflow_call" in triggers(load_workflow(workflows_dir / name))
         for where, group in blocks:
             problems += [f"{name} ({where}): {p}" for p in split_problems(group)]
+            if name in CALLER_GROUPS:
+                hits = caller_collisions(group, CALLER_GROUPS[name])
+                if hits:
+                    problems.append(
+                        f"{name} ({where}): renders as {', '.join(hits)}, a "
+                        "group its callers hold"
+                    )
             if reusable and name not in EXPECTED_GROUPS:
                 problems.append(
                     f"{name} ({where}): a draft-gated reusable's group must be "
@@ -328,7 +340,8 @@ def _copy(tmp_path: pathlib.Path, name: str, text: str) -> pathlib.Path:
 def test_sweep_catches_a_draft_gate_added_to_the_verifier(tmp_path):
     """verifier-on-high-risk.yml's unsplit per-PR group is safe only because no
     job there gates on draft: a draft-payload run classifies and posts the same
-    check on the same head SHA as a live run would."""
+    check on the same head SHA as a live run would. Gate it with
+    `draft == false` and the sweep must object."""
     shipped = (WORKFLOWS_DIR / "verifier-on-high-risk.yml").read_text()
     assert sweep(_copy(tmp_path, "verifier-on-high-risk.yml", shipped)) == []
     anchor = "  verify:\n    name: verifier-evidence-bound-runner\n"
@@ -354,5 +367,33 @@ def test_sweep_catches_a_caller_reverted_to_one_group(tmp_path):
     assert reverted != shipped, "mutation did not apply; the anchor drifted"
     problems = sweep(_copy(tmp_path, "pr-review.yml", reverted))
     assert len(problems) == 1 and "draft-payload run and a live run" in problems[0], (
+        problems
+    )
+
+
+@pytest.mark.parametrize(
+    "group, problem",
+    [
+        (CALLER_GROUPS["safe-paths-automerge.yml"], "a group its callers hold"),
+        (
+            "safe-paths-automerge-job-${{ github.event.pull_request.number }}",
+            "draft-payload run and a live run",
+        ),
+    ],
+    ids=["callers-own-group", "unsplit"],
+)
+def test_sweep_checks_job_level_groups_too(tmp_path, group, problem):
+    """The pin reads only the workflow-level group; a job can declare its own."""
+    shipped = (WORKFLOWS_DIR / "safe-paths-automerge.yml").read_text()
+    assert sweep(_copy(tmp_path, "safe-paths-automerge.yml", shipped)) == []
+    anchor = "  safe_paths_automerge:\n    runs-on: ubuntu-latest\n"
+    job_group = (
+        f"    concurrency:\n      group: {group}\n      cancel-in-progress: true\n"
+    )
+    mutated = shipped.replace(anchor, anchor + job_group, 1)
+    assert mutated != shipped, "mutation did not apply; the anchor drifted"
+    problems = sweep(_copy(tmp_path, "safe-paths-automerge.yml", mutated))
+    assert len(problems) == 1, problems
+    assert "job `safe_paths_automerge`" in problems[0] and problem in problems[0], (
         problems
     )

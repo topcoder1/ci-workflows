@@ -85,8 +85,13 @@ on:
 # then skip. A push to a draft PR followed about a second later by `gh pr
 # ready` delivered the draft-payload `synchronize` after `ready_for_review`:
 # the ready run was cancelled, the synchronize run skipped, and nothing
-# armed (whois-api-llc/wxa_vpn#2258). Live runs still share one group, so a
-# newer push still cancels a stale live run, as above. `-reusable-` keeps
+# armed (whois-api-llc/wxa_vpn#2258). A newer push to a live PR still
+# cancels a stale live run, as above. A push made while the PR is a draft no
+# longer does; the head checks in the enable and revoke steps stand that
+# stale run down instead. Residual, which no grouping fixes: `gh pr ready`
+# and then a push, delivered in reverse, are two live runs; the ready run
+# cancels the push run, then stands down because the head it listed is the
+# newer one, and nothing arms until the PR's next event. `-reusable-` keeps
 # this group apart from the callers': they declare
 # `safe-paths-automerge-<N>-<draft|live>`, groups are repo-scoped, and a run
 # must not contend for the group its own caller run holds. Pinned, with
