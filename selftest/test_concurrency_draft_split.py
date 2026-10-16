@@ -20,9 +20,10 @@ Three layers:
    pre-push state. Hardcoded on purpose: read from the workflow, the
    expectation would follow the workflow when it regresses.
 2. What the pinned strings mean, by rendering them for draft and live
-   payloads: a draft and a live run of one PR land in different groups, two
-   PRs never share one, and the reusable never lands in a group its caller
-   runs hold (CALLER_GROUPS).
+   payloads and comparing the names case-insensitively, as GitHub does: a
+   draft and a live run of one PR land in different groups, two PRs never
+   share one, and the reusable never lands in a group its caller runs hold
+   (CALLER_GROUPS).
 3. A sweep. Every draft-gated workflow here, gated directly or through a
    reusable it calls, that declares a group must render split groups, and a
    draft-gated reusable's group must be pinned in layer 1.
@@ -59,8 +60,9 @@ EXPECTED_GROUPS = {
 # The group the callers of each pinned reusable declare for themselves. For
 # safe-paths, every fleet caller (41 of 41, read 2026-10-16) declares this one,
 # from dotclaude's templates/ci-workflows/callers/safe-paths-automerge.yml.
-# Concurrency groups are repo-scoped, so a reusable group that renders the same
-# would make the run contend for the group its own caller run holds.
+# Concurrency groups are repo-scoped and their names case-insensitive, so a
+# reusable group that renders the same, ignoring case, would make the run
+# contend for the group its own caller run holds.
 CALLER_GROUPS = {
     "safe-paths-automerge.yml": (
         "safe-paths-automerge-${{ github.event.pull_request.number }}"
@@ -84,7 +86,11 @@ _MODELED = {
 
 
 def render(group: str, pr: int, draft: bool) -> str:
-    """The group a run for PR `pr` with this payload draft flag would join."""
+    """The group a run for PR `pr` with this payload draft flag would join.
+
+    Lower-cased: GitHub compares group names case-insensitively, so two names
+    that differ only in case are one group.
+    """
 
     def expand(match: re.Match) -> str:
         expr = " ".join(match.group(1).split())
@@ -95,7 +101,7 @@ def render(group: str, pr: int, draft: bool) -> str:
     rendered = re.sub(r"\$\{\{(.*?)\}\}", expand, group)
     if "${{" in rendered:
         raise ValueError(f"unterminated expression in {group!r}")
-    return rendered
+    return rendered.lower()
 
 
 def split_problems(group: str) -> list[str]:
@@ -264,11 +270,21 @@ def test_split_check_catches_a_group_shared_across_prs():
     assert len(problems) == 1 and "two PRs" in problems[0]
 
 
-def test_collision_check_reads_the_rendered_group_not_the_text():
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda group: group.replace("${{ ", "${{").replace(" }}", "}}"),
+        lambda group: group.replace("safe-paths-automerge-", "Safe-Paths-Automerge-"),
+    ],
+    ids=["respaced", "recased"],
+)
+def test_collision_check_reads_the_rendered_group_not_the_text(variant):
+    """Different text, same group: GitHub ignores the spacing inside an
+    expression, and compares group names case-insensitively."""
     caller = CALLER_GROUPS["safe-paths-automerge.yml"]
-    respaced = caller.replace("${{ ", "${{").replace(" }}", "}}")
-    assert respaced != caller
-    assert caller_collisions(respaced, caller) == [
+    other = variant(caller)
+    assert other != caller
+    assert caller_collisions(other, caller) == [
         "safe-paths-automerge-1-draft",
         "safe-paths-automerge-1-live",
     ]
