@@ -915,7 +915,11 @@ jobs:
           # path and line as given (it rewrites the body), and a comment a
           # later push outdated keeps that line as `original_line`. A
           # transcript that cannot be read for them leaves the count as it
-          # was (fail safe).
+          # was (fail safe). Accepted residual: another workflow commenting
+          # on the very same path and line in the same minutes still counts.
+          # Matching bodies would misfire whenever the action's sanitizer
+          # rewrites one (HTML comments, entities), and buffered comments
+          # post after the session, so their IDs never reach the transcript.
           if [ "$REVIEW_BOT" = "github-actions[bot]" ] && [ "$HAVE_TRANSCRIPT" -eq 1 ]; then
             if jq -c --arg t "$INLINE_TOOL" '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
                    | select(.type == "tool_use" and .name == $t) | .input | objects
