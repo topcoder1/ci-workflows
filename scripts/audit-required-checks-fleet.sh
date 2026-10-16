@@ -9,9 +9,13 @@
 #
 # Each repo is filed by the validator's exit code (see its header):
 #   0      clean: no digest block, counted in the "clean" total
-#   1      FINDING: a required check will never report on PRs
+#   1      FINDING: a required check will never report on PRs, but only with
+#          the validator's `==> FAIL` verdict line. Without it, exit 1 is an
+#          ERROR: bash exits 1 on an unbound variable under set -u, and Python
+#          on a SyntaxError, before any verdict exists.
 #   other  ERROR: the audit could not check the repo (3 = GitHub API error,
-#          4 = validator crashed, 2 = usage / missing tool)
+#          4 = validator crashed, 2 = usage / missing tool, anything else =
+#          unexpected exit code)
 # Findings and errors get differently worded digest headings and stderr
 # lines, so "the audit found something" never reads like "the audit broke".
 #
@@ -104,22 +108,33 @@ for repo in $REPOS; do
   # header, so only its exit code says how the repo is filed.
   rc=0
   out=$("$VALIDATOR" "$repo" 2>&1) || rc=$?
+  # ERROR unless proven otherwise: a code with no arm below stays an error,
+  # and exit 1 is a finding only beside the validator's own FAIL verdict.
+  kind=error
+  why="unexpected exit code"
   case "$rc" in
-    0)
+    0) kind=clean ;;
+    1)
+      if grep -q '^==> FAIL' <<< "$out"; then
+        kind=finding
+      else
+        why="no FAIL verdict in the output"
+      fi
+      ;;
+    2) why="usage error or missing tool" ;;
+    3) why="GitHub API error" ;;
+    4) why="validator crashed" ;;
+  esac
+  case "$kind" in
+    clean)
       CLEAN=$((CLEAN + 1))
       ;;
-    1)
+    finding)
       FINDINGS=$((FINDINGS + 1))
       FINDING_REPOS="${FINDING_REPOS:+$FINDING_REPOS, }$repo"
       DIGEST="$DIGEST"$'\n'"### $repo — FINDING: a required check will never report on PRs"$'\n\n```'$'\n'"$out"$'\n''```'$'\n'
       ;;
     *)
-      case "$rc" in
-        2) why="usage error or missing tool" ;;
-        3) why="GitHub API error" ;;
-        4) why="validator crashed" ;;
-        *) why="unexpected exit code" ;;
-      esac
       ERRORS=$((ERRORS + 1))
       ERROR_REPOS="${ERROR_REPOS:+$ERROR_REPOS, }$repo (exit $rc: $why)"
       DIGEST="$DIGEST"$'\n'"### $repo — ERROR: not audited (exit $rc: $why)"$'\n\n```'$'\n'"$out"$'\n''```'$'\n'

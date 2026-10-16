@@ -18,11 +18,15 @@
 #      answers 200 `[]` for a branch no rule applies to, and that is the only
 #      "no rules" it gives.
 #   1  FINDING: a required context will never report on PRs (with --strict,
-#      an unverified one too). Nothing else exits 1.
+#      an unverified one too), always with a `==> FAIL` line. No handled path
+#      exits 1 otherwise; a bug that does (bash on an unbound variable, Python
+#      on a SyntaxError) prints no FAIL line, so the fleet wrapper also
+#      requires that line before it files a finding.
 #   2  usage error, or gh / jq / python3 missing.
 #   3  GitHub API error: a call failed (401, 403, 404, 5xx, no response) or
 #      answered something that is not the JSON it should be. stderr names the
-#      endpoint, the HTTP status and gh's message. A 404 is not "no rules":
+#      endpoint, the HTTP status and gh's message, and never the response:
+#      the fleet digest is posted in a public repo. A 404 is not "no rules":
 #      a private repo answers 404 to a token that cannot see it. The one 404
 #      that is not an error: .github/workflows itself, when the repo's root
 #      listing is readable. The directory is then absent, and the repo is
@@ -106,6 +110,12 @@ trap 'rm -rf "$TMP"' EXIT
 # status and gh's message go to stderr and the script exits 3; with
 # --allow-404 a 404 returns 1 instead, for the caller to settle. Call it as a
 # plain command, never inside $(...): its exit would end only that subshell.
+#
+# Error output names the endpoint and the status, never the response, which
+# can hold a private repo's content and would land in the public digest. So
+# no call here passes --jq: when gh's filter fails, gh's own error quotes part
+# of the response (gh 2.97.0, a directory read with --jq .content:
+# `expected an object but got: array ([{"_links":{"git":"https: ...])`).
 API_BODY=""
 api_get() { # [--allow-404] <endpoint> [extra gh api args...]
   local allow_404="" endpoint status
@@ -138,7 +148,7 @@ RULESET_DATA="$API_BODY"
 # An array of rule objects, or exit 3: the filter below must never run on
 # anything else. `[]` (no rule applies) passes and exits 0 further down.
 if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$RULESET_DATA"; then
-  echo "  API error: GET /repos/$REPO/rules/branches/$BRANCH did not answer an array of rules: ${RULESET_DATA:0:200}" >&2
+  echo "  API error: GET /repos/$REPO/rules/branches/$BRANCH did not answer an array of rules" >&2
   exit 3
 fi
 CONTEXTS=$(echo "$RULESET_DATA" | jq -r \
@@ -167,7 +177,7 @@ dump_workflows() {
   local repo="$1"
   local out_dir="$2"
   mkdir -p "$out_dir"
-  local names f
+  local names f content
   if ! api_get --allow-404 "/repos/$repo/contents/.github/workflows"; then
     # 404: no workflows directory, which is a state to audit (its required
     # checks have no producer here). But a private repo also answers 404 to a
@@ -182,16 +192,21 @@ dump_workflows() {
   # would read as an empty directory and so as a missing producer.
   if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$API_BODY" ||
     ! names=$(jq -r '.[] | select(.name | endswith(".yml") or endswith(".yaml")) | .name' 2>/dev/null <<< "$API_BODY"); then
-    echo "  API error: GET /repos/$repo/contents/.github/workflows did not answer a directory listing: ${API_BODY:0:200}" >&2
+    echo "  API error: GET /repos/$repo/contents/.github/workflows did not answer a directory listing" >&2
     exit 3
   fi
   # A here-string, not a pipe: the loop runs in this shell, so exit 3 ends
   # the script.
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    api_get "/repos/$repo/contents/.github/workflows/$f" --jq '.content'
-    if ! printf '%s\n' "$API_BODY" | base64 -d > "$out_dir/$f" 2>/dev/null; then
-      echo "  API error: GET /repos/$repo/contents/.github/workflows/$f did not answer base64 content" >&2
+    api_get "/repos/$repo/contents/.github/workflows/$f"
+    # Base64 file content, or exit 3. A directory under that name, a file
+    # over 1 MB (`encoding: none`, no inline content) and a decoder lenient
+    # with stray characters (macOS base64 -d) would otherwise leave an empty
+    # or garbled workflow, which reads as a missing producer.
+    if ! content=$(jq -er 'select(type == "object" and .encoding == "base64" and (.content | type) == "string" and (.content | test("^[A-Za-z0-9+/=\\s]*$"))) | .content' 2>/dev/null <<< "$API_BODY") ||
+      ! printf '%s\n' "$content" | base64 -d > "$out_dir/$f" 2>/dev/null; then
+      echo "  API error: GET /repos/$repo/contents/.github/workflows/$f did not answer base64 file content" >&2
       exit 3
     fi
   done <<< "$names"

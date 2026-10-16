@@ -259,13 +259,21 @@ arbitrary helper scripts; that's a different kind of repo.
   200 `[]` exits 0; a failed or malformed contents call exits 3 with no
   verdict, except that a repo with no `.github/workflows` is audited (its
   checks have no producer) once its root listing proves the token can read
-  it; a missing producer exits 1 and is filed as FINDING; a Python crash, an
-  unexpected command failure and a flag missing its value never exit 1;
-  Attaxion repos are skipped by dotclaude's `^(asm-|attaxion)` rule and named
-  in the log and digest; the workflow's digest step opens the issue for a
-  finding and not for a clean run. Negative controls run the old fetches
-  verbatim against the same answers: jq exit 5, a silent "no branch rules
-  found" exit 0, an empty listing, an empty workflow file.
+  it; a workflow file answer must be base64 file content (invalid base64, a
+  directory, `encoding: none` all exit 3); a missing producer exits 1 and is
+  filed as FINDING; a Python crash, an unexpected command failure and a flag
+  missing its value never exit 1; the fleet wrapper files exits 4 and 5 as
+  ERRORs worded "validator crashed" / "unexpected exit code", and an exit 1
+  as a FINDING only beside the `==> FAIL` verdict (an unbound variable or a
+  SyntaxError also exits 1); Attaxion repos are skipped by dotclaude's
+  `^(asm-|attaxion)` rule and named in the log and digest; the workflow's
+  digest step opens the issue for a finding and not for a clean run. The
+  digest is a PUBLIC issue, so every malformed answer carries a canary that
+  must reach neither the validator's output nor the digest, and no gh call
+  may use `--jq` (gh's own filter error quotes the response; the shim
+  reproduces that). Negative controls run the old fetches verbatim against
+  the same answers: jq exit 5, a silent "no branch rules found" exit 0, an
+  empty listing, an empty workflow file.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
