@@ -201,10 +201,12 @@ dump_workflows() {
     [[ -z "$f" ]] && continue
     api_get "/repos/$repo/contents/.github/workflows/$f"
     # Base64 file content, or exit 3. A directory under that name, a file
-    # over 1 MB (`encoding: none`, no inline content) and a decoder lenient
-    # with stray characters (macOS base64 -d) would otherwise leave an empty
-    # or garbled workflow, which reads as a missing producer.
-    if ! content=$(jq -er 'select(type == "object" and .encoding == "base64" and (.content | type) == "string" and (.content | test("^[A-Za-z0-9+/=\\s]*$"))) | .content' 2>/dev/null <<< "$API_BODY") ||
+    # over 1 MB (`encoding: none`, no inline content) and malformed base64
+    # would otherwise leave an empty or garbled workflow, which reads as a
+    # missing producer: macOS base64 -d exits 0 and writes nothing for `A` or
+    # `====`. So the content must be whole 4-character groups, padded only at
+    # the end, once GitHub's line breaks are dropped.
+    if ! content=$(jq -er 'select(type == "object" and .encoding == "base64" and (.content | type) == "string" and (.content | gsub("\\s"; "") | test("^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))) | .content' 2>/dev/null <<< "$API_BODY") ||
       ! printf '%s\n' "$content" | base64 -d > "$out_dir/$f" 2>/dev/null; then
       echo "  API error: GET /repos/$repo/contents/.github/workflows/$f did not answer base64 file content" >&2
       exit 3

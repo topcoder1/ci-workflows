@@ -238,6 +238,12 @@ fake_repo topcoder1/notafile "$(rules_json test)" ci.yml
 answer topcoder1/notafile ci.yml '[{"name":"PRIVATE-BODY-CANARY-dir","type":"file"}]'
 fake_repo topcoder1/bigfile "$(rules_json test)" ci.yml
 answer topcoder1/bigfile ci.yml '{"type":"file","name":"ci.yml","encoding":"none","content":""}'
+# Base64-alphabet characters in no valid shape: macOS base64 -d exits 0 on
+# both and writes nothing (measured 2026-10-16), an empty workflow.
+fake_repo topcoder1/badpadding "$(rules_json test)" ci.yml
+answer topcoder1/badpadding ci.yml '{"type":"file","name":"ci.yml","encoding":"base64","content":"===="}'
+fake_repo topcoder1/shortb64 "$(rules_json test)" ci.yml
+answer topcoder1/shortb64 ci.yml '{"type":"file","name":"ci.yml","encoding":"base64","content":"A"}'
 
 run_validator() { # repo [flags...] -> $VRC, $T/v.out, $T/v.err
   VRC=0
@@ -364,10 +370,11 @@ for r in oddlisting emptylisting; do
   fi
 done
 
-# A workflow file's answer must be base64 file content: invalid base64, an
-# array (a directory under that name) and `encoding: none` (a file over 1 MB
-# has no inline content) exit 3, and echo none of the answer.
-for r in notbase64 notafile bigfile; do
+# A workflow file's answer must be base64 file content: invalid base64 (stray
+# characters, or alphabet characters in no valid shape), an array (a
+# directory under that name) and `encoding: none` (a file over 1 MB has no
+# inline content) exit 3, and echo none of the answer.
+for r in notbase64 badpadding shortb64 notafile bigfile; do
   run_validator "topcoder1/$r"
   if [[ $VRC -eq 3 ]] &&
     has "$T/v.err" "API error: GET /repos/topcoder1/$r/contents/.github/workflows/ci.yml did not answer base64 file content" &&
