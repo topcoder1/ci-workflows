@@ -390,6 +390,29 @@ arbitrary helper scripts; that's a different kind of repo.
   when nothing was recoverable or the fallback could not be posted; every
   guard-side read error (API failure, missing/malformed transcript,
   unrecognized phrasing) is a warning and exit 0.
+- `test_claude_review_ran_check.sh` — `review / Claude Review` must never
+  pass with nothing reviewed. claude-code-action's App-token exchange
+  refuses a run whose calling workflow differs from the default branch's
+  copy, and the action then exits 0 without reviewing, so every install PR
+  and caller edit went green unreviewed. Pins (1) the caller check: run as
+  shipped against a real git checkout and a stubbed contents API, it writes
+  `changed=false` only when the caller's HEAD blob matches the default
+  branch's (a shallow checkout too); a 404 "Not Found" is an install, and
+  every read failure, odd `workflow_ref` or missing default branch is
+  `changed=true`; (2) the review step's `github_token` and the guard's
+  `REVIEW_BOT`, EVALUATED by a small GitHub-expression evaluator for
+  `changed` = true/false/empty/unset (the job token and github-actions[bot]
+  unless a match is proven; the `&& '' ||` falsy-middle mutant is a
+  control), plus the step `if:`s on the bot-skip, failed-review and
+  cancelled paths; (3) the review-ran check: success with no `conclusion`
+  writes `reviewed=false` before any API call (a control moves it later and
+  must be caught), posts or PATCHes ONE sticky comment marked
+  `<!-- claude-review:not-reviewed -->` (only github-actions[bot]'s own,
+  never one a human or another bot quotes), names the cause, and fails the
+  job; a failed post retries 3x and logs the body with `::` and `##[`
+  broken, and an unlistable comment thread posts nothing rather than a
+  duplicate; (4) the shipped guard counts job-token inline comments under
+  the evaluated `REVIEW_BOT`, with the old fixed `claude[bot]` as a control.
 - `test_codex_model_pin.py` — pins `codex-review.yml`'s Codex model
   (`CODEX_MODEL`: hardcoded expectation plus typo/drop-flag/drop-anchor/
   defang negative controls), and executes the step's shipped provenance +

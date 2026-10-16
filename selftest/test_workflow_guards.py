@@ -55,6 +55,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_claude_review_cost_guardrails.sh",
     "selftest/test_claude_review_lost_findings_guard.sh",
     "selftest/test_claude_review_max_turns_type.sh",
+    "selftest/test_claude_review_ran_check.sh",
     "selftest/test_codex_gate_priority.sh",
     "selftest/test_codex_review_rename_sources.sh",
     "selftest/test_codex_verdict_gate.sh",
