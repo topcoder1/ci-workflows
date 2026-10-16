@@ -6,8 +6,12 @@ name: Audit required checks
 # incident — proactively rather than at the moment a PR is blocked.
 #
 # Output: a single weekly digest issue, opened only when at least one repo
-# emitted a warning or error. If every repo is clean, the workflow exits
-# silently (no issue created/updated; no notification noise).
+# has a FINDING (a required check that will never report on PRs) or an ERROR
+# (the audit could not check it, e.g. a GitHub API error). Either one also
+# fails that org's job, so the run goes red; the digest words the two
+# differently. If every repo is clean, the workflow exits silently (no issue
+# created/updated; no notification noise). Attaxion repos are skipped by name
+# (scripts/audit-required-checks-fleet.sh).
 #
 # DEVIATION FROM PLAN: the plan spec described a single FLEET_AUDIT_PAT
 # secret with cross-org access. In practice the operator ships per-org

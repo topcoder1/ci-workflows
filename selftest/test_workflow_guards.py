@@ -27,6 +27,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # manually on a workstation. (Its absence is a named exemption in
 # _UNLISTED_OK below, which is what keeps this list honest.)
 _SHELL_SELFTESTS = [
+    "selftest/test_audit_required_checks.sh",
     "selftest/test_automerge_base_gate.sh",
     "selftest/test_automerge_blocked_notice.sh",
     "selftest/test_automerge_body_gate.sh",

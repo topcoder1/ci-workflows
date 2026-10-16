@@ -7,19 +7,35 @@
 # by the weekly audit-required-checks.yml cron GHA to decide whether to
 # open / update a digest issue.
 #
-# Exits 0 if all repos cleanly validated (whether or not warnings were
-# emitted); exits non-zero if any per-repo invocation FAILED (script error,
-# not policy warning). Cleanly distinguishing these two means the cron job
-# can detect "the audit itself broke" separately from "the audit found
-# something."
+# Each repo is filed by the validator's exit code (see its header):
+#   0      clean: no digest block, counted in the "clean" total
+#   1      FINDING: a required check will never report on PRs
+#   other  ERROR: the audit could not check the repo (3 = GitHub API error,
+#          4 = validator crashed, 2 = usage / missing tool)
+# Findings and errors get differently worded digest headings and stderr
+# lines, so "the audit found something" never reads like "the audit broke".
+#
+# Attaxion repos are skipped by name, the same rule as the fleet red-workflow
+# digest (topcoder1/dotclaude templates/ci-workflows/scripts/
+# fleet-red-workflow-sweep.sh): the ERE '^(asm-|attaxion)' against the
+# lowercased repo name, owner excluded. Skipped names go to stderr and the
+# digest.
+#
+# Exit codes (audit-required-checks.yml fails the org's job on any non-zero):
+#   0  every audited repo clean
+#   1  at least one finding, and every repo was audited
+#   2  usage error, validator not found, or no repo left after the skip
+#   3  at least one repo could not be audited (findings may exist as well)
 #
 # Usage:
 #   audit-required-checks-fleet.sh --repos "owner/repo1 owner/repo2 ..."
 #                                  [--out FILE]   # default stdout
 #
 # Stdout / --out content (digest body):
-#   - One block per repo with non-empty output from validate-required-checks.sh
-#   - "All N repos clean. Last run: <ISO date>" if zero blocks
+#   - One block per repo with a finding or an error, holding the validator's
+#     output
+#   - "All N repos clean. Last run: <ISO date>" if zero blocks (the workflow's
+#     digest job opens no issue when every org's first line reads so)
 #
 # Designed to be safely runnable from a GHA scheduled job AND from a
 # local shell (the validate-required-checks.sh stub-substitution in
@@ -65,46 +81,88 @@ if [[ -z "$VALIDATOR" || ! -x "$VALIDATOR" ]]; then
   exit 2
 fi
 
+# Attaxion repos are out of scope for this fleet tooling (see the header).
+EXCLUDE='^(asm-|attaxion)'
+
 DIGEST=""
 TOTAL=0
 CLEAN=0
-ERRORS=()
+FINDINGS=0
+ERRORS=0
+FINDING_REPOS=""
+ERROR_REPOS=""
+SKIPPED=""
 
 for repo in $REPOS; do
-  TOTAL=$((TOTAL + 1))
-  out=""
-  err_rc=0
-  # Capture both stdout + stderr; let the script's exit code distinguish
-  # validator-error vs policy-warning. Tee into a string for the digest.
-  if out=$("$VALIDATOR" "$repo" 2>&1); then
-    if [[ -z "$out" ]]; then
-      CLEAN=$((CLEAN + 1))
-    else
-      DIGEST="$DIGEST"$'\n'"### $repo"$'\n\n```'$'\n'"$out"$'\n''```'$'\n'
-    fi
-  else
-    err_rc=$?
-    ERRORS+=("$repo (exit $err_rc)")
-    DIGEST="$DIGEST"$'\n'"### $repo (script error, exit $err_rc)"$'\n\n```'$'\n'"$out"$'\n''```'$'\n'
+  lname=$(printf '%s' "${repo#*/}" | tr '[:upper:]' '[:lower:]')
+  if [[ "$lname" =~ $EXCLUDE ]]; then
+    SKIPPED="${SKIPPED:+$SKIPPED, }$repo"
+    continue
   fi
+  TOTAL=$((TOTAL + 1))
+  # Capture stdout + stderr for the digest. The validator always prints a
+  # header, so only its exit code says how the repo is filed.
+  rc=0
+  out=$("$VALIDATOR" "$repo" 2>&1) || rc=$?
+  case "$rc" in
+    0)
+      CLEAN=$((CLEAN + 1))
+      ;;
+    1)
+      FINDINGS=$((FINDINGS + 1))
+      FINDING_REPOS="${FINDING_REPOS:+$FINDING_REPOS, }$repo"
+      DIGEST="$DIGEST"$'\n'"### $repo — FINDING: a required check will never report on PRs"$'\n\n```'$'\n'"$out"$'\n''```'$'\n'
+      ;;
+    *)
+      case "$rc" in
+        2) why="usage error or missing tool" ;;
+        3) why="GitHub API error" ;;
+        4) why="validator crashed" ;;
+        *) why="unexpected exit code" ;;
+      esac
+      ERRORS=$((ERRORS + 1))
+      ERROR_REPOS="${ERROR_REPOS:+$ERROR_REPOS, }$repo (exit $rc: $why)"
+      DIGEST="$DIGEST"$'\n'"### $repo — ERROR: not audited (exit $rc: $why)"$'\n\n```'$'\n'"$out"$'\n''```'$'\n'
+      ;;
+  esac
 done
+
+SKIP_NOTE=""
+if [[ -n "$SKIPPED" ]]; then
+  SKIP_NOTE="Skipped by name ($EXCLUDE): $SKIPPED."
+  echo "audit-required-checks-fleet: $SKIP_NOTE" >&2
+fi
+if [[ $TOTAL -eq 0 ]]; then
+  echo "audit-required-checks-fleet: no repo left to audit" >&2
+  exit 2
+fi
 
 ISO_DATE="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 if [[ -z "$DIGEST" ]]; then
-  echo "All $TOTAL repos clean. Last run: $ISO_DATE" > "$OUT"
+  {
+    echo "All $TOTAL repos clean. Last run: $ISO_DATE"
+    if [[ -n "$SKIP_NOTE" ]]; then echo "$SKIP_NOTE"; fi
+  } > "$OUT"
 else
   {
     echo "# Required-checks audit digest"
     echo
     echo "Run: $ISO_DATE"
-    echo "Fleet: $TOTAL repos ($CLEAN clean, $((TOTAL - CLEAN)) with output)"
+    echo "Fleet: $TOTAL repos audited ($CLEAN clean, $FINDINGS with findings, $ERRORS could not be audited)"
+    if [[ -n "$SKIP_NOTE" ]]; then echo "$SKIP_NOTE"; fi
     echo
     echo "$DIGEST"
   } > "$OUT"
 fi
 
-if [[ ${#ERRORS[@]} -gt 0 ]]; then
-  echo "audit-required-checks-fleet: ${#ERRORS[@]} repo(s) errored: ${ERRORS[*]}" >&2
+if [[ $FINDINGS -gt 0 ]]; then
+  echo "audit-required-checks-fleet: FINDINGS in $FINDINGS repo(s), a required check that will never report on PRs: $FINDING_REPOS" >&2
+fi
+if [[ $ERRORS -gt 0 ]]; then
+  echo "audit-required-checks-fleet: ERRORS: $ERRORS repo(s) could not be audited: $ERROR_REPOS" >&2
+  exit 3
+fi
+if [[ $FINDINGS -gt 0 ]]; then
   exit 1
 fi
 exit 0

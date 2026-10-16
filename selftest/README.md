@@ -243,6 +243,27 @@ arbitrary helper scripts; that's a different kind of repo.
   which stands down when the base changed, is held to the same cases. A
   negative control plants the old read back and shows the error-body case
   catching it.
+- `test_audit_required_checks.sh` — the required-checks audit's exit codes:
+  `validate-required-checks.sh` exits 1 for a finding and for nothing else
+  (3 = GitHub API error, 4 = internal error, 2 = usage), and
+  `audit-required-checks-fleet.sh` files 1 as FINDING and every other
+  non-zero code as ERROR. On 2026-10-12 (run 38234284948) a dead token's 401
+  body reached the rules filter on stdout and jq died with exit 5 on every
+  topcoder1 repo; the contents calls' `|| echo '[]'` / `|| true` would have
+  read the same failure as "no workflows", a false phantom-check finding;
+  and the wrapper headed every real finding "script error". Runs both scripts
+  against a PATH-shim `gh` that answers in gh's measured error shape (JSON
+  body on stdout, `gh: … (HTTP n)` on stderr, rc=1). Pins: a 401, a 404 or
+  no response on the rules call exits 3 naming the status (a 404 is not "no
+  rules": a private repo answers 404 to a token that cannot see it), while
+  200 `[]` exits 0; a failed or malformed contents call exits 3 with no verdict; a
+  missing producer exits 1 and is filed as FINDING; a Python crash, an
+  unexpected command failure and a flag missing its value never exit 1;
+  Attaxion repos are skipped by dotclaude's `^(asm-|attaxion)` rule and named
+  in the log and digest; the workflow's digest step opens the issue for a
+  finding and not for a clean run. Negative controls run the old fetches
+  verbatim against the same answers: jq exit 5, a silent "no branch rules
+  found" exit 0, an empty listing, an empty workflow file.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
