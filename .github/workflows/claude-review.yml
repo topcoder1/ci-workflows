@@ -359,7 +359,11 @@ jobs:
       # workflow runs. Its inline comments come from github-actions[bot], not
       # claude[bot], so the lost-findings guard's REVIEW_BOT follows the same
       # predicate. If the action skips anyway, the review-ran check after it
-      # fails the job. Pinned by selftest/test_claude_review_ran_check.sh.
+      # fails the job. One race stays open, closed that way: a caller change
+      # landing on the default branch in the seconds between this read and
+      # the action's token exchange. A re-run then reviews with the job
+      # token, because the PR's merge commit no longer matches. Pinned by
+      # selftest/test_claude_review_ran_check.sh.
       - name: Caller check (review with the job token when this PR changes its calling workflow)
         id: caller
         if: ${{ steps.bot_check.outputs.skipped != 'true' }}
@@ -567,13 +571,14 @@ jobs:
       # Decision first, reporting second, as in the bot-skip step:
       # `reviewed=false` is written before any API call, and the exit 1 stands
       # whether or not the comment lands. The comment is ONE sticky per PR:
-      # later runs find the github-actions[bot] comment that starts with its
-      # marker and PATCH it, so it never duplicates and never edits anyone
-      # else's comment. If the comments cannot be listed, nothing is posted
-      # rather than risk a duplicate. A failed post retries 3x, then degrades
-      # to a warning with the body in the log, the runner's workflow-command
-      # prefixes broken as in the summary step. A reviewed run makes no API
-      # call. Pinned by selftest/test_claude_review_ran_check.sh.
+      # later runs find the github-actions[bot] comment that starts and ends
+      # with its markers and PATCH it, so it never duplicates and never edits
+      # anyone else's comment. If the comments cannot be listed, nothing is
+      # posted rather than risk a duplicate. A failed post retries 3x, then
+      # degrades to a warning with the body in the log, the runner's
+      # workflow-command prefixes broken as in the summary step. A reviewed
+      # run makes no API call. Pinned by
+      # selftest/test_claude_review_ran_check.sh.
       - name: Review-ran check (claude-code-action can exit 0 without reviewing)
         id: ran
         if: ${{ !cancelled() && steps.bot_check.outputs.skipped != 'true' && steps.claude.outcome == 'success' }}
@@ -604,7 +609,7 @@ jobs:
             file=" \`${CALLER_PATH}\`"
           fi
           if [ "${CALLER_CHANGED:-}" = false ]; then
-            cause="This PR's calling workflow${file} matches the default branch's copy, so this run asked for the Claude App token as usual: this is not the action's workflow-validation skip."
+            cause="This PR's calling workflow${file} matched the default branch's copy when this run checked, so the run asked for the Claude App token as usual. Unless the default branch's copy changed during the run, this is not the action's workflow-validation skip."
             short="caller unchanged, App token requested"
           else
             case "${CALLER_CAUSE:-}" in
@@ -623,6 +628,7 @@ jobs:
             esac
           fi
           marker="<!-- claude-review:not-reviewed -->"
+          end_marker="<!-- claude-review:not-reviewed:end -->"
           comment="${RUNNER_TEMP:?RUNNER_TEMP is not set}/claude-review-not-reviewed.md"
           {
             echo "$marker"
@@ -635,17 +641,21 @@ jobs:
             echo "Re-run the check. If it fails the same way again, read the whole diff yourself before merging."
             echo
             echo "<sub>Claude Review · [workflow run](${RUN_URL}) · Every run of this check that ends without a review updates this comment; a later green run did review the PR.</sub>"
+            echo "$end_marker"
           } > "$comment"
 
           # This step's own sticky: the oldest github-actions[bot] comment
-          # that STARTS with the marker, "" when there is none. Never another
-          # author's comment, and never one that only quotes the marker: the
-          # review summary is a github-actions[bot] comment too, and a summary
-          # that mentions this step must not be overwritten by it.
+          # that starts with the marker AND ends with the end marker, "" when
+          # there is none. Never another author's comment. The review summary
+          # is a github-actions[bot] comment too, and the model writes its
+          # beginning, but the summary step appends its own footer after the
+          # model's text, so no summary can end with the end marker.
           sticky_id() {
             gh api "repos/${REPO}/issues/${PR}/comments?per_page=100" --paginate \
-              | jq -r -n --arg m "$marker" '[inputs[] | objects
-                  | select(.user.login == "github-actions[bot]" and ((.body // "") | tostring | startswith($m)))
+              | jq -r -n --arg m "$marker" --arg e "$end_marker" '[inputs[] | objects
+                  | ((.body // "") | tostring) as $b
+                  | select(.user.login == "github-actions[bot]" and ($b | startswith($m))
+                           and ($b | sub("\\s+$"; "") | endswith($e)))
                   | .id] | first // empty'
           }
           id_re='^[0-9]+$'
@@ -818,8 +828,9 @@ jobs:
           # Who posts the review's inline comments: github-actions[bot] when
           # the caller check gave the review the job token, the Claude App's
           # claude[bot] otherwise. Same predicate as the review step's
-          # `github_token`. Another workflow's job-token inline comments in
-          # the window count too, which can only hide a loss, never fake one.
+          # `github_token`. Every workflow's job token is github-actions[bot],
+          # so on those runs step 2 counts only the comments this review's
+          # own inline-comment calls placed.
           REVIEW_BOT: ${{ steps.caller.outputs.changed != 'false' && 'github-actions[bot]' || 'claude[bot]' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
@@ -890,10 +901,32 @@ jobs:
           # '[inputs[] ...]'` flattens one page or many the same way.
           if ! gh api "repos/${REPO}/pulls/${PR}/comments?per_page=100" --paginate \
                  | jq -c -n --arg since "$STARTED_AT" --arg bot "$REVIEW_BOT" \
-                     '[inputs[] | objects | select(.user.login == $bot and .created_at >= $since) | {body: (.body // "")}]' \
+                     '[inputs[] | objects | select(.user.login == $bot and .created_at >= $since)
+                       | {body: (.body // ""), spot: "\(.path // "")#\(.line // .original_line // "")"}]' \
                  > "$T/posted.json"; then
             warn "could not list review comments on PR #${PR}; cannot verify inline findings - skipping"
             exit 0
+          fi
+          # JOB-TOKEN RUNS (the caller check gave the review github.token):
+          # github-actions[bot] is every workflow's job-token identity, so
+          # another workflow's inline comments in the window could stand in
+          # for this review's lost ones. Count only comments at a path#line
+          # this review's own inline-comment calls named; the action posts
+          # path and line as given (it rewrites the body), and a comment a
+          # later push outdated keeps that line as `original_line`. A
+          # transcript that cannot be read for them leaves the count as it
+          # was (fail safe).
+          if [ "$REVIEW_BOT" = "github-actions[bot]" ] && [ "$HAVE_TRANSCRIPT" -eq 1 ]; then
+            if jq -c --arg t "$INLINE_TOOL" '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                   | select(.type == "tool_use" and .name == $t) | .input | objects
+                   | "\(.path // "")#\(.line // "")"] | unique' "$EXECUTION_FILE" > "$T/spots.json" 2>/dev/null \
+               && jq -c --slurpfile s "$T/spots.json" '[.[] | select(.spot as $k | any($s[0][]; . == $k))]' \
+                    "$T/posted.json" > "$T/posted.mine.json" 2>/dev/null; then
+              note "job-token run: $(jq 'length' "$T/posted.mine.json") of $(jq 'length' "$T/posted.json") github-actions[bot] inline comment(s) sit where this review's inline-comment calls pointed"
+              mv "$T/posted.mine.json" "$T/posted.json"
+            else
+              warn "job-token run: could not match inline comments to this review's calls - counting every github-actions[bot] inline comment since ${STARTED_AT}"
+            fi
           fi
           POSTED=$(jq 'length' "$T/posted.json")
 

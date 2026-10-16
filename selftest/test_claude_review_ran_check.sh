@@ -13,9 +13,9 @@
 # included, and a ruleset that requires the check accepted that green.
 # Fleet evidence: topcoder1/dotclaude#519.
 #
-# TWO STEPS, pinned by extracting the workflow's SHIPPED bash and running it
-# against a stubbed `gh` (the caller check also against a real git checkout),
-# never a mirrored copy:
+# THREE PROPERTIES, pinned by extracting the workflow's SHIPPED bash and
+# running it against a stubbed `gh` (the caller check also against a real git
+# checkout), never a mirrored copy:
 #
 #   1. Caller check. Compares the caller's blob at HEAD with the default
 #      branch's (contents API) and writes changed=false only on a proven
@@ -29,6 +29,12 @@
 #      `conclusion` output reviewed nothing. The check writes reviewed=false
 #      first, posts or PATCHes ONE sticky comment, and fails the job. A
 #      failed post degrades to a warning and never changes the verdict.
+#
+#   3. The lost-findings guard on a job-token run. github-actions[bot] is
+#      every workflow's job-token identity, so the guard counts only inline
+#      comments at a path#line the review's own calls named; another
+#      workflow's comments cannot stand in for lost findings (a control with
+#      that filter off shows them doing exactly that).
 #
 # The steps' `if:` conditions and the `github_token` / `REVIEW_BOT`
 # expressions are EVALUATED, by a small evaluator for the GitHub expression
@@ -47,6 +53,7 @@ RAN_STEP="Review-ran check (claude-code-action can exit 0 without reviewing)"
 GUARD_STEP="Lost-findings guard (summary claim vs inline comments posted)"
 CALLER_FILE=".github/workflows/pr-review.yml"
 MARKER="<!-- claude-review:not-reviewed -->"
+END_MARKER="<!-- claude-review:not-reviewed:end -->"
 
 failed=0
 T=$(mktemp -d)
@@ -680,17 +687,18 @@ done
 # R2: the gap itself, on a caller edit the job token did not cure.
 CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=edit CALLER_PATH_IN="$CALLER_FILE" run_ran r2
 if [ "$RC" -eq 1 ] && [ "$REVIEWED" = false ] && [ "$(posts)" -eq 1 ] && [ "$(patches)" -eq 0 ] \
-   && [ "$(head -1 "$BODY")" = "$MARKER" ] \
+   && [ "$(head -1 "$BODY")" = "$MARKER" ] && [ "$(tail -1 "$BODY")" = "$END_MARKER" ] \
    && grep -qF -- "$HEADING" "$BODY" \
    && grep -qF -- "$JOB_TOKEN_EDIT" "$BODY" \
    && grep -qF "No file in this PR was reviewed." "$BODY" \
    && grep -qF "[workflow run](https://github.example/o/r/actions/runs/42)" "$BODY" \
    && grep -q "^::error::claude-code-action exited without reviewing PR #7 (step success, conclusion ''; caller changed, job token used)" "$T/ran.r2.txt" \
    && ! grep -qx undecided "$T/gh.log.decision"; then
-  pass "R2 skip, caller changed: reviewed=false recorded before any API call, ONE sticky posted (marker first), ::error::, exit 1"
+  pass "R2 skip, caller changed: reviewed=false recorded before any API call, ONE sticky posted (marker first, end marker last), ::error::, exit 1"
 else
   show_ran "R2" r2
 fi
+[ -f "$BODY" ] && cp "$BODY" "$T/r2_body.md"
 
 CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=install CALLER_PATH_IN="$CALLER_FILE" run_ran r3
 if [ "$RC" -eq 1 ] && [ "$REVIEWED" = false ] && [ "$(posts)" -eq 1 ] \
@@ -703,7 +711,7 @@ fi
 
 CONCLUSION="" CALLER_CHANGED=false CALLER_CAUSE=same CALLER_PATH_IN="$CALLER_FILE" run_ran r4
 if [ "$RC" -eq 1 ] && [ "$REVIEWED" = false ] && [ "$(posts)" -eq 1 ] \
-   && grep -qF "This PR's calling workflow \`$CALLER_FILE\` matches the default branch's copy, so this run asked for the Claude App token as usual: this is not the action's workflow-validation skip." "$BODY" \
+   && grep -qF "This PR's calling workflow \`$CALLER_FILE\` matched the default branch's copy when this run checked, so the run asked for the Claude App token as usual. Unless the default branch's copy changed during the run, this is not the action's workflow-validation skip." "$BODY" \
    && grep -qF "why is not known: see the run log" "$BODY" \
    && ! grep -qF "job token" "$BODY"; then
   pass "R4 skip, caller unchanged: cause unknown, not the validation skip, exit 1"
@@ -753,10 +761,11 @@ else
   show_ran "R5b" r5b
 fi
 
-# R6: a second run PATCHes its own sticky and posts nothing new.
-jq -nc --arg m "$MARKER" '[
+# R6: a second run PATCHes its own sticky and posts nothing new. GitHub may
+# hand the body back with CRLF line ends and a trailing newline.
+jq -nc --arg m "$MARKER" --arg e "$END_MARKER" '[
   {id: 101, user: {login: "github-actions[bot]"}, body: "No issues found. Diff is small and contained.\n\n<sub>Claude Review</sub>"},
-  {id: 555, user: {login: "github-actions[bot]"}, body: ($m + "\n### ⚠️ Not reviewed: an earlier run")}
+  {id: 555, user: {login: "github-actions[bot]"}, body: ($m + "\r\n### ⚠️ Not reviewed: an earlier run\r\n" + $e + "\r\n")}
 ]' > "$T/sticky.json"
 CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=edit CALLER_PATH_IN="$CALLER_FILE" \
   GH_ISSUE_COMMENTS="$T/sticky.json" run_ran r6
@@ -769,20 +778,41 @@ else
   show_ran "R6" r6
 fi
 
-# Only a github-actions[bot] comment that STARTS with the marker is the
-# sticky. The review summary is a github-actions[bot] comment too, and one
-# that mentions the marker must survive; so must a human quoting it, another
-# bot carrying it, and a deleted account's comment.
-jq -nc --arg m "$MARKER" '[
+# Round trip: the exact body R2 posted, read back as GitHub serves it (CRLF,
+# no trailing newline), is found as the sticky on the next run.
+if [ -s "$T/r2_body.md" ]; then
+  jq -nc --rawfile b "$T/r2_body.md" '[{id: 777, user: {login: "github-actions[bot]"},
+                                         body: ($b | rtrimstr("\n") | gsub("\n"; "\r\n"))}]' > "$T/roundtrip.json"
+  CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=install CALLER_PATH_IN="$CALLER_FILE" \
+    GH_ISSUE_COMMENTS="$T/roundtrip.json" run_ran r6d
+  if [ "$RC" -eq 1 ] && [ "$(posts)" -eq 0 ] && [ "$(patches)" -eq 1 ] && [ "${BODY##*.}" = 777 ] \
+     && grep -qF "This PR adds its calling workflow" "$BODY"; then
+    pass "R6d round trip: the sticky R2 posted, served back with CRLF line ends, is found and PATCHed with the new cause"
+  else
+    show_ran "R6d" r6d
+  fi
+else
+  fail "R6d: R2 left no posted body to read back"
+fi
+
+# Only a github-actions[bot] comment that starts with the marker AND ends
+# with the end marker is the sticky. The review summary is a github-actions[bot]
+# comment too, and the model writes its start, even both markers: but the
+# summary step appends its own footer after the model's text, so a summary
+# never ends with the end marker. A human, another bot and a deleted account
+# carrying the markers are never edited either.
+jq -nc --arg m "$MARKER" --arg e "$END_MARKER" '[
   {id: 110, user: {login: "github-actions[bot]"}, body: ("No issues found. The new step posts a sticky that starts with " + $m + " when the action skips.\n\n<sub>Claude Review</sub>")},
-  {id: 111, user: {login: "a-maintainer"}, body: ("> " + $m + "\n> quoted from an earlier run")},
-  {id: 112, user: {login: "claude[bot]"}, body: ($m + "\nnot this step'"'"'s comment")},
-  {id: 113, user: null, body: $m}
+  {id: 114, user: {login: "github-actions[bot]"}, body: ($m + "\nA summary whose model text starts with the marker and ends with\n" + $e + "\n\n<sub>Claude Review · [workflow run](https://github.example/o/r/actions/runs/41)</sub>")},
+  {id: 115, user: {login: "github-actions[bot]"}, body: ("Another workflow quoting the sticky:\n" + $m + "\n...\n" + $e)},
+  {id: 111, user: {login: "a-maintainer"}, body: ("> " + $m + "\n> quoted from an earlier run\n" + $e)},
+  {id: 112, user: {login: "claude[bot]"}, body: ($m + "\nnot this step'"'"'s comment\n" + $e)},
+  {id: 113, user: null, body: ($m + "\n" + $e)}
 ]' > "$T/others.json"
 CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=edit CALLER_PATH_IN="$CALLER_FILE" \
   GH_ISSUE_COMMENTS="$T/others.json" run_ran r6b
 if [ "$RC" -eq 1 ] && [ "$(posts)" -eq 1 ] && [ "$(patches)" -eq 0 ]; then
-  pass "R6b the marker quoted mid-body by a github-actions[bot] summary, or carried by a human, another bot or a deleted account: never PATCHed, a new sticky is posted"
+  pass "R6b github-actions[bot] comments quoting the markers (a summary, mid-body or at its start with the footer after; another workflow's quote ending with the end marker), a human, another bot, a deleted account: never PATCHed, a new sticky is posted"
 else
   show_ran "R6b" r6b
 fi
@@ -791,8 +821,8 @@ fi
 # oldest is the one kept.
 {
   jq -nc '[{id: 101, user: {login: "github-actions[bot]"}, body: "No issues found."}]'
-  jq -nc --arg m "$MARKER" '[{id: 555, user: {login: "github-actions[bot]"}, body: ($m + "\nolder")},
-                             {id: 556, user: {login: "github-actions[bot]"}, body: ($m + "\nnewer")}]'
+  jq -nc --arg m "$MARKER" --arg e "$END_MARKER" '[{id: 555, user: {login: "github-actions[bot]"}, body: ($m + "\nolder\n" + $e)},
+                                                  {id: 556, user: {login: "github-actions[bot]"}, body: ($m + "\nnewer\n" + $e)}]'
 } > "$T/paged.json"
 CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=edit CALLER_PATH_IN="$CALLER_FILE" \
   GH_ISSUE_COMMENTS="$T/paged.json" run_ran r6c
@@ -853,42 +883,99 @@ echo "== lost-findings guard: REVIEW_BOT follows the review's token =="
 # The values section 1 evaluated from the shipped REVIEW_BOT expression.
 REVIEW_BOT_CHANGED=$(sed -n 's/^REVIEW_BOT_CHANGED=//p' "$T/expr.env" 2>/dev/null || true)
 REVIEW_BOT_SAME=$(sed -n 's/^REVIEW_BOT_SAME=//p' "$T/expr.env" 2>/dev/null || true)
-jq -nc '[
+INLINE_TOOL="mcp__github_inline_comment__create_inline_comment"
+F1="the retry loop sleeps after its last attempt"
+F2="an unset step output is read as 'false'"
+# The review made two inline-comment calls, x.go:3 and x.go:4, and claims 2.
+jq -nc --arg t "$INLINE_TOOL" --arg f1 "$F1" --arg f2 "$F2" '[
   {type: "system", subtype: "init"},
+  {type: "assistant", message: {content: [
+     {type: "tool_use", id: "tu_1", name: $t, input: {path: "x.go", line: 3, body: $f1, confirmed: true}},
+     {type: "tool_use", id: "tu_2", name: $t, input: {path: "x.go", line: 4, body: $f2, confirmed: true}}]}},
+  {type: "user", message: {content: [
+     {type: "tool_result", tool_use_id: "tu_1", is_error: false, content: "{\"success\":true}"},
+     {type: "tool_result", tool_use_id: "tu_2", is_error: false, content: "{\"success\":true}"}]}},
   {type: "result", subtype: "success", is_error: false, num_turns: 6, total_cost_usd: 0.4,
    result: "Flagged 2 issues inline — see comments.", permission_denials: []}
 ]' > "$T/guard_x.json"
 printf 'Flagged 2 issues inline — see comments.\n' > "$T/guard_summary.md"
-# Two inline comments posted with the job token, after the anchor.
-jq -nc '[range(2) | {id: (900 + .), user: {login: "github-actions[bot]"}, created_at: "2026-10-16T08:05:00Z",
-                     path: "x.go", line: (3 + .), body: ("**Bug** #" + (. | tostring))}]' > "$T/guard_pulls.json"
+# Another workflow's inline comments, posted with ITS job token in the window.
+jq -nc '[range(2) | {id: (950 + .), user: {login: "github-actions[bot]"}, created_at: "2026-10-16T08:06:00Z",
+                     path: "lint/other.go", line: (10 + .), body: ("lint: unused variable #" + (. | tostring))}]' > "$T/guard_others.json"
+# The review's own two, plus the other workflow's two. The second was outdated
+# by a later push: GitHub then reports `line: null` and keeps `original_line`.
+jq -nc --arg f1 "$F1" --arg f2 "$F2" '[
+  {id: 900, user: {login: "github-actions[bot]"}, created_at: "2026-10-16T08:05:00Z", path: "x.go", line: 3, body: $f1},
+  {id: 901, user: {login: "github-actions[bot]"}, created_at: "2026-10-16T08:05:01Z", path: "x.go", line: null, original_line: 4, body: $f2}
+]' > "$T/guard_own.json"
+jq -c -s 'add' "$T/guard_own.json" "$T/guard_others.json" > "$T/guard_pulls.json"
 
-run_guard() {  # run_guard NAME REVIEW_BOT
-  local name="$1"
+run_guard() {  # run_guard NAME REVIEW_BOT PULLS_JSON
+  local name="$1" script="${GUARD_SH:-$T/guard.sh}"
   reset_calls
   set +e
   GH_LOG="$T/gh.log" GH_CALLS="$T/calls" PATH="$T/bin:$PATH" GH_TOKEN=stub \
     REPO=o/r PR=7 STARTED_AT="2026-10-16T08:00:00Z" REVIEW_BOT="$2" \
     RUN_URL="https://github.example/o/r/actions/runs/42" GITHUB_RUN_ID=42 MAX_BUDGET_USD=3 \
-    EXECUTION_FILE="$T/guard_x.json" SUMMARY_FILE="$T/guard_summary.md" GH_PULLS_JSON="$T/guard_pulls.json" \
-    /bin/bash -e -o pipefail "$T/guard.sh" > "$T/guard.$name.txt" 2>&1
+    EXECUTION_FILE="$T/guard_x.json" SUMMARY_FILE="$T/guard_summary.md" GH_PULLS_JSON="$3" \
+    /bin/bash -e -o pipefail "$script" > "$T/guard.$name.txt" 2>&1
   RC=$?
   set -e
 }
+guard_posted() {  # the fallback comment the guard posted, if any
+  find "$T/calls" -type f -name '*.post' | head -1
+}
 
-run_guard g1 "$REVIEW_BOT_CHANGED"
+run_guard g1 "$REVIEW_BOT_CHANGED" "$T/guard_pulls.json"
 if [ "$REVIEW_BOT_CHANGED" = "github-actions[bot]" ] && [ "$RC" -eq 0 ] && [ "$(posts)" -eq 0 ] \
+   && grep -qF "job-token run: 2 of 4 github-actions[bot] inline comment(s) sit where this review's inline-comment calls pointed" "$T/guard.g1.txt" \
    && grep -qF "summary claims 2 inline finding(s); 2 inline review comment(s) by github-actions[bot]" "$T/guard.g1.txt"; then
-  pass "G1 job-token review: REVIEW_BOT evaluates to github-actions[bot], its 2 inline comments count, exit 0"
+  pass "G1 job-token review: REVIEW_BOT is github-actions[bot]; its own 2 inline comments count, the other workflow's 2 do not; exit 0"
 else
   fail "G1 (REVIEW_BOT='$REVIEW_BOT_CHANGED' rc=$RC):"; sed 's/^/    /' "$T/guard.g1.txt"
 fi
-# CONTROL: the identity the guard used to hardcode reads the same PR as a
-# loss and fails the job over findings that are on it.
-run_guard g2 "$REVIEW_BOT_SAME"
-if [ "$REVIEW_BOT_SAME" = "claude[bot]" ] && [ "$RC" -eq 1 ] && [ "$(posts)" -eq 1 ] \
-   && grep -qF "summary claims 2 inline finding(s); 0 inline review comment(s) by claude[bot]" "$T/guard.g2.txt"; then
-  pass "G2 CONTROL: with claude[bot] (the App-token value) the same job-token comments count 0 and the guard fails"
+
+# G3: the review's comments were lost, and another workflow posted as many
+# with its own job token in the window. They must not stand in for the lost
+# findings: the guard recovers them from the transcript and reports.
+run_guard g3 "$REVIEW_BOT_CHANGED" "$T/guard_others.json"
+G3_POST=$(guard_posted)
+if [ "$RC" -eq 0 ] && [ "$(posts)" -eq 1 ] \
+   && grep -qF "job-token run: 0 of 2 github-actions[bot] inline comment(s) sit where this review's inline-comment calls pointed" "$T/guard.g3.txt" \
+   && grep -qF "flagged 2 issue(s) inline, but 0 inline comments were posted" "$G3_POST" \
+   && grep -qF "$F1" "$G3_POST" && grep -qF "$F2" "$G3_POST" \
+   && grep -qF "recovered findings were posted as a fallback comment" "$T/guard.g3.txt"; then
+  pass "G3 job-token review lost its 2 comments while another workflow posted 2: counted 0, both findings recovered from the transcript and posted"
+else
+  fail "G3 (rc=$RC posts=$(posts)):"; sed 's/^/    /' "$T/guard.g3.txt"
+fi
+# CONTROL: without the job-token filter the other workflow's two comments
+# satisfy the claim and the guard goes silent over the lost findings.
+python3 - "$T/guard.sh" "$T/guard_unfiltered.sh" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+text = open(src).read()
+old = 'if [ "$REVIEW_BOT" = "github-actions[bot]" ] && [ "$HAVE_TRANSCRIPT" -eq 1 ]; then'
+if text.count(old) != 1:
+    sys.exit("control: the job-token filter's condition is not in the shipped guard exactly once")
+open(dst, "w").write(text.replace(old, "if false; then"))
+PY
+GUARD_SH="$T/guard_unfiltered.sh" run_guard g3c "$REVIEW_BOT_CHANGED" "$T/guard_others.json"
+if [ "$RC" -eq 0 ] && [ "$(posts)" -eq 0 ] \
+   && grep -qF "summary claims 2 inline finding(s); 2 inline review comment(s) by github-actions[bot]" "$T/guard.g3c.txt"; then
+  pass "G3 CONTROL: with the filter off, the other workflow's comments hide the loss (silent green): G3 exercises the filter"
+else
+  fail "G3 CONTROL no longer reproduces the masked loss (rc=$RC posts=$(posts)):"; sed 's/^/    /' "$T/guard.g3c.txt"
+fi
+
+# CONTROL: the identity the guard used to hardcode counts none of the job
+# token's comments and reports findings that are on the PR as lost.
+run_guard g2 "$REVIEW_BOT_SAME" "$T/guard_pulls.json"
+G2_POST=$(guard_posted)
+if [ "$REVIEW_BOT_SAME" = "claude[bot]" ] && [ "$(posts)" -eq 1 ] \
+   && grep -qF "summary claims 2 inline finding(s); 0 inline review comment(s) by claude[bot]" "$T/guard.g2.txt" \
+   && grep -qF "flagged 2 issue(s) inline, but 0 inline comments were posted" "$G2_POST"; then
+  pass "G2 CONTROL: with claude[bot] (the App-token value) the job token's comments count 0 and a false lost-findings comment goes out"
 else
   fail "G2 CONTROL (REVIEW_BOT='$REVIEW_BOT_SAME' rc=$RC):"; sed 's/^/    /' "$T/guard.g2.txt"
 fi

@@ -407,15 +407,20 @@ arbitrary helper scripts; that's a different kind of repo.
   cancelled paths; (3) the review-ran check: success with no `conclusion`
   writes `reviewed=false` before any API call (a control moves it later and
   must be caught), posts or PATCHes ONE sticky comment that starts with
-  `<!-- claude-review:not-reviewed -->` (only a github-actions[bot] comment
-  that starts with it, never a review summary, a human or another bot
-  quoting it), names the cause, and fails the job; a failed post retries 3x
-  and logs the body with `::` and `##[` broken, and an unlistable comment
-  thread posts nothing rather than a duplicate; (4) the shipped guard counts
-  job-token inline comments under the evaluated `REVIEW_BOT`, with the old
-  fixed `claude[bot]` as a control. Also pinned: the default merge-ref
-  checkout the caller check reads HEAD from, and the claude-code-action SHA
-  whose token and skip behaviour both checks rely on, so a bump re-reads it.
+  `<!-- claude-review:not-reviewed -->` and ends with
+  `<!-- claude-review:not-reviewed:end -->` (only a github-actions[bot]
+  comment with both; never a review summary, whose footer always comes
+  last, nor a human or another bot quoting them), names the cause, and
+  fails the job; a failed post retries 3x and logs the body with `::` and
+  `##[` broken, and an unlistable comment thread posts nothing rather than
+  a duplicate; (4) the shipped guard on a job-token run counts only
+  github-actions[bot] inline comments at a path#line the review's own
+  calls named, so another workflow's job-token comments cannot hide lost
+  findings (a control with the filter off shows them hiding it), with the
+  old fixed `claude[bot]` as a second control. Also pinned: the default
+  merge-ref checkout the caller check reads HEAD from, and the
+  claude-code-action SHA whose token and skip behaviour both checks rely
+  on, so a bump re-reads it.
 - `test_codex_model_pin.py` — pins `codex-review.yml`'s Codex model
   (`CODEX_MODEL`: hardcoded expectation plus typo/drop-flag/drop-anchor/
   defang negative controls), and executes the step's shipped provenance +
