@@ -243,6 +243,37 @@ arbitrary helper scripts; that's a different kind of repo.
   which stands down when the base changed, is held to the same cases. A
   negative control plants the old read back and shows the error-body case
   catching it.
+- `test_audit_required_checks.sh` — the required-checks audit's exit codes:
+  `validate-required-checks.sh` exits 1 for a finding and for nothing else
+  (3 = GitHub API error, 4 = internal error, 2 = usage), and
+  `audit-required-checks-fleet.sh` files 1 as FINDING and every other
+  non-zero code as ERROR. On 2026-10-12 (run 38234284948) a dead token's 401
+  body reached the rules filter on stdout and jq died with exit 5 on every
+  topcoder1 repo; the contents calls' `|| echo '[]'` / `|| true` would have
+  read the same failure as "no workflows", a false phantom-check finding;
+  and the wrapper headed every real finding "script error". Runs both scripts
+  against a PATH-shim `gh` that answers in gh's measured error shape (JSON
+  body on stdout, `gh: … (HTTP n)` on stderr, rc=1). Pins: a 401, a 404 or
+  no response on the rules call exits 3 naming the status (a 404 is not "no
+  rules": a private repo answers 404 to a token that cannot see it), while
+  200 `[]` exits 0; a failed or malformed contents call exits 3 with no
+  verdict, except that a repo with no `.github/workflows` is audited (its
+  checks have no producer) once its root listing proves the token can read
+  it; a workflow file answer must be base64 file content (invalid base64, a
+  directory, `encoding: none` all exit 3); a missing producer exits 1 and is
+  filed as FINDING; a Python crash, an unexpected command failure and a flag
+  missing its value never exit 1; the fleet wrapper files exits 4 and 5 as
+  ERRORs worded "validator crashed" / "unexpected exit code", and an exit 1
+  as a FINDING only beside the `==> FAIL` verdict (an unbound variable or a
+  SyntaxError also exits 1); Attaxion repos are skipped by dotclaude's
+  `^(asm-|attaxion)` rule and named in the log and digest; the workflow's
+  digest step opens the issue for a finding and not for a clean run. The
+  digest is a PUBLIC issue, so every malformed answer carries a canary that
+  must reach neither the validator's output nor the digest, and no gh call
+  may use `--jq` (gh's own filter error quotes the response; the shim
+  reproduces that). Negative controls run the old fetches verbatim against
+  the same answers: jq exit 5, a silent "no branch rules found" exit 0, an
+  empty listing, an empty workflow file.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

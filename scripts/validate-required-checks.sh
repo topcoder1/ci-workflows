@@ -11,8 +11,28 @@
 #                                            [--branch main]
 #                                            [--strict]   # exit 1 on warnings too
 #
-# Exits 0 if every required context has a pull_request-triggered job that
-# produces it, non-zero with a clear report otherwise.
+# Exit codes (audit-required-checks-fleet.sh files 1 as a finding and every
+# other non-zero code as an error, so keep each one meaning one thing):
+#   0  clean: every required context has a pull_request-triggered producer, or
+#      no required_status_checks rule applies to the branch. The rules API
+#      answers 200 `[]` for a branch no rule applies to, and that is the only
+#      "no rules" it gives.
+#   1  FINDING: a required context will never report on PRs (with --strict,
+#      an unverified one too), always with a `==> FAIL` line. No handled path
+#      exits 1 otherwise; a bug that does (bash on an unbound variable, Python
+#      on a SyntaxError) prints no FAIL line, so the fleet wrapper also
+#      requires that line before it files a finding.
+#   2  usage error, or gh / jq / python3 missing.
+#   3  GitHub API error: a call failed (401, 403, 404, 5xx, no response) or
+#      answered something that is not the JSON it should be. stderr names the
+#      endpoint, the HTTP status and gh's message, and never the response:
+#      the fleet digest is posted in a public repo. A 404 is not "no rules":
+#      a private repo answers 404 to a token that cannot see it. The one 404
+#      that is not an error: .github/workflows itself, when the repo's root
+#      listing is readable. The directory is then absent, and the repo is
+#      audited with no workflows of its own.
+#   4  internal error: the validator itself failed (an uncaught Python
+#      exception, or a command that failed unexpectedly).
 #
 # What it checks for each context:
 #   - finds the workflow whose top-level `name:` matches the prefix before " / "
@@ -28,7 +48,21 @@
 #   - Caller workflows (`uses: org/repo/.github/workflows/foo.yml@ref`) are
 #     resolved via gh API into the central ci-workflows repo when possible.
 
-set -euo pipefail
+set -Eeuo pipefail
+# A command that fails unexpectedly would otherwise end the script with its own
+# status, and that is often 1: the code that means FINDING. Report it as an
+# internal error instead. -E carries the trap into functions and $(...); inside
+# a subshell it only passes the status up, because bash 3.2 (macOS /bin/bash)
+# also fires it for a failure an `if` around the $(...) already handles.
+# (Invoked by the trap, which shellcheck does not count as a call.)
+# shellcheck disable=SC2329
+on_err() {
+  local rc=$?
+  (( BASH_SUBSHELL == 0 )) || exit "$rc"
+  [[ $rc -eq 4 ]] || echo "  internal error: a command failed unexpectedly (exit $rc, line ${BASH_LINENO[0]})" >&2
+  exit 4
+}
+trap on_err ERR
 
 REPO="${1:-}"
 RULESET_NAME_GLOB="main-protection*"
@@ -41,6 +75,11 @@ if [[ -z "$REPO" ]]; then
 fi
 shift || true
 while [[ $# -gt 0 ]]; do
+  # A value flag given last would trip `set -u` on "$2", and bash exits 1 there.
+  if [[ "$1" == --ruleset-name || "$1" == --branch ]] && [[ $# -lt 2 ]]; then
+    echo "$1 needs a value" >&2
+    exit 2
+  fi
   case "$1" in
     --ruleset-name) RULESET_NAME_GLOB="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
@@ -55,13 +94,62 @@ command -v python3 >/dev/null || { echo "python3 required" >&2; exit 2; }
 
 echo "==> Validating required status checks for $REPO (branch: $BRANCH)"
 
+# Scratch space: workflow contents, and gh's stderr from the last API call.
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# Every GitHub read goes through api_get, which fails CLOSED. `gh api` prints
+# an HTTP error's JSON body to STDOUT and exits 1, even with --jq (gh 2.97.0:
+# a 401 prints the 5-line {"message": "Bad credentials", ...} body). The old
+# `2>/dev/null || true` fed that body to the rules filter, and jq died with
+# its runtime-error code 5 on every topcoder1 repo in run 38234284948. The
+# old `|| echo '[]'` on the contents calls turned the same failure into "no
+# workflows", which reads as a missing producer: a false finding.
+#
+# On success the body is in $API_BODY. On failure the endpoint, the HTTP
+# status and gh's message go to stderr and the script exits 3; with
+# --allow-404 a 404 returns 1 instead, for the caller to settle. Call it as a
+# plain command, never inside $(...): its exit would end only that subshell.
+#
+# Error output names the endpoint and the status, never the response, which
+# can hold a private repo's content and would land in the public digest. So
+# no call here passes --jq: when gh's filter fails, gh's own error quotes part
+# of the response (gh 2.97.0, a directory read with --jq .content:
+# `expected an object but got: array ([{"_links":{"git":"https: ...])`).
+API_BODY=""
+api_get() { # [--allow-404] <endpoint> [extra gh api args...]
+  local allow_404="" endpoint status
+  if [[ "$1" == --allow-404 ]]; then
+    allow_404=1
+    shift
+  fi
+  endpoint="$1"
+  shift
+  if API_BODY=$(gh api "$endpoint" "$@" 2> "$TMP/gh.err"); then
+    return 0
+  fi
+  status=$(grep -oE 'HTTP [0-9]{3}' "$TMP/gh.err" | tail -n 1 || true)
+  if [[ -n "$allow_404" && "$status" == "HTTP 404" ]]; then
+    return 1
+  fi
+  echo "  API error: GET $endpoint failed (${status:-no HTTP status})" >&2
+  sed 's/^/    /' "$TMP/gh.err" >&2
+  if [[ "$status" == "HTTP 404" ]]; then
+    echo "    (a 404 is also what a private repo answers to a token that cannot see it)" >&2
+  fi
+  exit 3
+}
+
 # 1. Fetch ruleset for the branch and pull required contexts.
 #    Use the branch-rules endpoint (lists rulesets that apply to a branch),
 #    then filter to the matching ruleset name.
-RULESET_DATA=$(gh api "/repos/$REPO/rules/branches/$BRANCH" 2>/dev/null || true)
-if [[ -z "$RULESET_DATA" || "$RULESET_DATA" == "null" ]]; then
-  echo "  no branch rules found for $BRANCH" >&2
-  exit 0
+api_get "/repos/$REPO/rules/branches/$BRANCH"
+RULESET_DATA="$API_BODY"
+# An array of rule objects, or exit 3: the filter below must never run on
+# anything else. `[]` (no rule applies) passes and exits 0 further down.
+if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$RULESET_DATA"; then
+  echo "  API error: GET /repos/$REPO/rules/branches/$BRANCH did not answer an array of rules" >&2
+  exit 3
 fi
 CONTEXTS=$(echo "$RULESET_DATA" | jq -r \
   --arg glob "$RULESET_NAME_GLOB" \
@@ -83,20 +171,47 @@ echo
 
 # 2. List workflow files in target repo + the central ci-workflows reusable
 #    workflows. Cache contents in a temp dir so we don't hammer the API.
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-
+#    Any failure exits 3: a workflow the audit could not read must never
+#    count as a workflow that does not exist.
 dump_workflows() {
   local repo="$1"
   local out_dir="$2"
   mkdir -p "$out_dir"
-  local listing
-  listing=$(gh api "/repos/$repo/contents/.github/workflows" 2>/dev/null || echo '[]')
-  echo "$listing" | jq -r '.[]? | select(.name | endswith(".yml") or endswith(".yaml")) | .name' | while read -r f; do
+  local names f content
+  if ! api_get --allow-404 "/repos/$repo/contents/.github/workflows"; then
+    # 404: no workflows directory, which is a state to audit (its required
+    # checks have no producer here). But a private repo also answers 404 to a
+    # token that cannot read its contents, and the rules call above proves
+    # only that the token sees the repo. So the directory counts as absent
+    # only if the root listing is readable; api_get exits 3 if it is not.
+    api_get "/repos/$repo/contents"
+    echo "  $repo has no .github/workflows directory"
+    return 0
+  fi
+  # An array of entries, or exit 3: `.[]` over `{}` yields nothing, which
+  # would read as an empty directory and so as a missing producer.
+  if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$API_BODY" ||
+    ! names=$(jq -r '.[] | select(.name | endswith(".yml") or endswith(".yaml")) | .name' 2>/dev/null <<< "$API_BODY"); then
+    echo "  API error: GET /repos/$repo/contents/.github/workflows did not answer a directory listing" >&2
+    exit 3
+  fi
+  # A here-string, not a pipe: the loop runs in this shell, so exit 3 ends
+  # the script.
+  while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    gh api "/repos/$repo/contents/.github/workflows/$f" --jq '.content' 2>/dev/null \
-      | base64 -d > "$out_dir/$f" || true
-  done
+    api_get "/repos/$repo/contents/.github/workflows/$f"
+    # Base64 file content, or exit 3. A directory under that name, a file
+    # over 1 MB (`encoding: none`, no inline content) and malformed base64
+    # would otherwise leave an empty or garbled workflow, which reads as a
+    # missing producer: macOS base64 -d exits 0 and writes nothing for `A` or
+    # `====`. So the content must be whole 4-character groups, padded only at
+    # the end, once GitHub's line breaks are dropped.
+    if ! content=$(jq -er 'select(type == "object" and .encoding == "base64" and (.content | type) == "string" and (.content | gsub("\\s"; "") | test("^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))) | .content' 2>/dev/null <<< "$API_BODY") ||
+      ! printf '%s\n' "$content" | base64 -d > "$out_dir/$f" 2>/dev/null; then
+      echo "  API error: GET /repos/$repo/contents/.github/workflows/$f did not answer base64 file content" >&2
+      exit 3
+    fi
+  done <<< "$names"
 }
 
 dump_workflows "$REPO" "$TMP/target"
@@ -110,7 +225,17 @@ echo "$CONTEXTS" > "$CONTEXTS_FILE"
 
 EXIT=0
 python3 - <<'PY' && RC=$? || RC=$?
-import os, sys, glob, re
+import os, sys, glob, re, traceback
+
+# An uncaught exception exits 1, the code that means FINDING, so the fleet
+# audit would file a crash as a phantom check. Exit 4 (internal error) instead.
+def _internal_error(kind, exc, tb):
+    traceback.print_exception(kind, exc, tb)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(4)
+
+sys.excepthook = _internal_error
 
 try:
     import yaml
