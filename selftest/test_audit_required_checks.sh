@@ -180,6 +180,8 @@ fake_repo topcoder1/nofile "$(rules_json test)" ci.yml
 echo "contents/.github/workflows/ci.yml 404" > "$T/gh/topcoder1/nofile/fail"
 fake_repo topcoder1/oddlisting "$(rules_json test)" ci.yml
 echo '{"name":"workflows","type":"file","content":""}' > "$T/gh/topcoder1/oddlisting/listing.json"
+fake_repo topcoder1/emptylisting "$(rules_json test)" ci.yml
+echo '{}' > "$T/gh/topcoder1/emptylisting/listing.json"
 
 run_validator() { # repo [flags...] -> $VRC, $T/v.out, $T/v.err
   VRC=0
@@ -289,15 +291,19 @@ else
   cat "$T/v.out" "$T/v.err"
 fi
 
-run_validator topcoder1/oddlisting
-if [[ $VRC -eq 3 ]] &&
-  has "$T/v.err" "API error: GET /repos/topcoder1/oddlisting/contents/.github/workflows did not answer a directory listing" &&
-  api_error_only; then
-  pass "b: a listing that is not a directory listing exits 3"
-else
-  fail "b: a non-listing answer should exit 3 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
-fi
+# A file's object, and `{}`: `.[]` over `{}` yields nothing, which would read
+# as an empty directory and so as a missing producer.
+for r in oddlisting emptylisting; do
+  run_validator "topcoder1/$r"
+  if [[ $VRC -eq 3 ]] &&
+    has "$T/v.err" "API error: GET /repos/topcoder1/$r/contents/.github/workflows did not answer a directory listing" &&
+    api_error_only; then
+    pass "b: a listing that is not a directory listing ($r) exits 3"
+  else
+    fail "b: a non-listing answer ($r) should exit 3 (got $VRC)"
+    cat "$T/v.out" "$T/v.err"
+  fi
+done
 
 echo "contents/.github/workflows none" > "$T/gh/topcoder1/ci-workflows/fail"
 run_validator topcoder1/clean-a

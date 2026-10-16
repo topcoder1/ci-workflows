@@ -157,7 +157,10 @@ dump_workflows() {
   mkdir -p "$out_dir"
   local names f
   api_get "/repos/$repo/contents/.github/workflows"
-  if ! names=$(jq -r '.[] | select(.name | endswith(".yml") or endswith(".yaml")) | .name' 2>/dev/null <<< "$API_BODY"); then
+  # An array of entries, or exit 3: `.[]` over `{}` yields nothing, which
+  # would read as an empty directory and so as a missing producer.
+  if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$API_BODY" ||
+    ! names=$(jq -r '.[] | select(.name | endswith(".yml") or endswith(".yaml")) | .name' 2>/dev/null <<< "$API_BODY"); then
     echo "  API error: GET /repos/$repo/contents/.github/workflows did not answer a directory listing: ${API_BODY:0:200}" >&2
     exit 3
   fi
