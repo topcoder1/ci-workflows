@@ -711,10 +711,10 @@ fi
 
 CONCLUSION="" CALLER_CHANGED=false CALLER_CAUSE=same CALLER_PATH_IN="$CALLER_FILE" run_ran r4
 if [ "$RC" -eq 1 ] && [ "$REVIEWED" = false ] && [ "$(posts)" -eq 1 ] \
-   && grep -qF "This PR's calling workflow \`$CALLER_FILE\` matched the default branch's copy when this run checked, so the run asked for the Claude App token as usual. Unless the default branch's copy changed during the run, this is not the action's workflow-validation skip." "$BODY" \
+   && grep -qF "This PR's calling workflow \`$CALLER_FILE\`, as this run checked it out, matched the default branch's copy, so the run asked for the Claude App token as usual. If the action's workflow validation refused it anyway, it compared a different copy: the default branch changed during the run, or the validation read another commit of this PR. Update the branch from the default branch first." "$BODY" \
    && grep -qF "why is not known: see the run log" "$BODY" \
    && ! grep -qF "job token" "$BODY"; then
-  pass "R4 skip, caller unchanged: cause unknown, not the validation skip, exit 1"
+  pass "R4 skip, caller unchanged: App token was requested, names how validation could still differ, no job-token claim, exit 1"
 else
   show_ran "R4" r4
 fi

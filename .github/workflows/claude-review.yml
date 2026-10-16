@@ -609,7 +609,7 @@ jobs:
             file=" \`${CALLER_PATH}\`"
           fi
           if [ "${CALLER_CHANGED:-}" = false ]; then
-            cause="This PR's calling workflow${file} matched the default branch's copy when this run checked, so the run asked for the Claude App token as usual. Unless the default branch's copy changed during the run, this is not the action's workflow-validation skip."
+            cause="This PR's calling workflow${file}, as this run checked it out, matched the default branch's copy, so the run asked for the Claude App token as usual. If the action's workflow validation refused it anyway, it compared a different copy: the default branch changed during the run, or the validation read another commit of this PR. Update the branch from the default branch first."
             short="caller unchanged, App token requested"
           else
             case "${CALLER_CAUSE:-}" in
