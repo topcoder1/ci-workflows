@@ -74,6 +74,10 @@ fail() {
   failed=1
 }
 has() { grep -qF -- "$2" "$1"; } # file, literal
+# Failure diagnostics. Never fatal: under set -e a dump with nothing to show
+# (a grep without a match, a file the failed run never wrote) would end the
+# run and hide every check after it.
+show() { cat -- "$@" 2>/dev/null || true; }
 
 # ---------------------------------------------------------------------------
 # The shim. One fake repo per directory; `fail` holds "<rest> <status>" lines
@@ -266,7 +270,7 @@ if [[ $VRC -eq 0 ]] && has "$T/v.out" "✓  test" &&
   pass "0: a required check with a PR producer exits 0"
 else
   fail "0: the control repo should exit 0 with a ✓ (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 # ---------------------------------------------------------------------------
@@ -281,14 +285,14 @@ if [[ $VRC -eq 3 ]] &&
   pass "a: a 401 on the rules call exits 3 with the status and gh's message"
 else
   fail "a: a 401 on the rules call should exit 3 naming HTTP 401 / Bad credentials (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 if has "$T/gh/calls.log" "api /repos/topcoder1/badtoken/rules/branches/main" &&
   ! grep -q "contents" "$T/gh/calls.log"; then
   pass "a: the 401 reached the validator, which stopped before any contents call"
 else
   fail "a: expected exactly the rules call in the shim log"
-  cat "$T/gh/calls.log"
+  show "$T/gh/calls.log"
 fi
 
 run_validator topcoder1/gone
@@ -299,7 +303,7 @@ if [[ $VRC -eq 3 ]] &&
   pass "a: a 404 on the rules call exits 3, not 'no rules'"
 else
   fail "a: a 404 on the rules call should exit 3 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 run_validator topcoder1/offline
@@ -309,7 +313,7 @@ if [[ $VRC -eq 3 ]] &&
   pass "a: a rules call with no response exits 3, not 'no branch rules found'"
 else
   fail "a: a rules call with no response should exit 3 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 run_validator topcoder1/norules
@@ -317,7 +321,7 @@ if [[ $VRC -eq 0 ]] && has "$T/v.out" "no required_status_checks rule on main"; 
   pass "a: 200 [] (no rule applies) still exits 0"
 else
   fail "a: 200 [] should exit 0 with 'no required_status_checks rule on main' (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 for r in oddrules oddrules2; do
@@ -328,7 +332,7 @@ for r in oddrules oddrules2; do
     pass "a: a 200 that is not an array of rules ($r) exits 3 and echoes none of it"
   else
     fail "a: $r should exit 3 without running the filter (got $VRC)"
-    cat "$T/v.out" "$T/v.err"
+    show "$T/v.out" "$T/v.err"
   fi
 done
 
@@ -343,7 +347,7 @@ if [[ $VRC -eq 3 ]] &&
   pass "b: a 403 listing the workflows exits 3, not a finding"
 else
   fail "b: a 403 on the listing should exit 3 with no verdict (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 run_validator topcoder1/nofile
@@ -353,7 +357,7 @@ if [[ $VRC -eq 3 ]] &&
   pass "b: a 404 reading one workflow exits 3, not a finding"
 else
   fail "b: a 404 on a workflow file should exit 3 with no verdict (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 # A file's object, and `{}`: `.[]` over `{}` yields nothing, which would read
@@ -366,7 +370,7 @@ for r in oddlisting emptylisting; do
     pass "b: a listing that is not a directory listing ($r) exits 3 and echoes none of it"
   else
     fail "b: a non-listing answer ($r) should exit 3 (got $VRC)"
-    cat "$T/v.out" "$T/v.err"
+    show "$T/v.out" "$T/v.err"
   fi
 done
 
@@ -382,7 +386,7 @@ for r in notbase64 badpadding shortb64 notafile bigfile; do
     pass "b: a workflow file answer that is not base64 content ($r) exits 3 and echoes none of it"
   else
     fail "b: $r should exit 3 without echoing the answer (got $VRC)"
-    cat "$T/v.out" "$T/v.err"
+    show "$T/v.out" "$T/v.err"
   fi
 done
 
@@ -395,7 +399,7 @@ if [[ $VRC -eq 0 ]] && has "$T/gh/calls.log" "api /repos/topcoder1/clean-a/conte
   pass "b: no gh api call uses --jq (the file read is in the log; no filter is)"
 else
   fail "b: the validator should read every answer without gh --jq"
-  cat "$T/gh/calls.log"
+  show "$T/gh/calls.log"
 fi
 
 # No .github/workflows: the listing answers 404, which a private repo also
@@ -407,7 +411,7 @@ if [[ $VRC -eq 1 ]] && has "$T/v.out" "topcoder1/noworkflows has no .github/work
   pass "b: no workflows directory (contents readable) is audited: its required check is a finding"
 else
   fail "b: an absent workflows directory should exit 1 with a ✗ (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 run_validator topcoder1/nocontents
 if [[ $VRC -eq 3 ]] &&
@@ -416,7 +420,7 @@ if [[ $VRC -eq 3 ]] &&
   pass "b: a 404 listing with an unreadable root exits 3, never a finding"
 else
   fail "b: a 404 listing plus an unreadable root should exit 3 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 echo "contents/.github/workflows none" > "$T/gh/topcoder1/ci-workflows/fail"
@@ -428,7 +432,7 @@ if [[ $VRC -eq 3 ]] &&
   pass "b: the central listing failing with no response exits 3"
 else
   fail "b: a no-response failure on the central listing should exit 3 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 # ---------------------------------------------------------------------------
@@ -440,7 +444,7 @@ if [[ $VRC -eq 1 ]] && has "$T/v.out" "✗  plan-proofs / verify" && has "$T/v.o
   pass "c: a required check with no PR producer exits 1"
 else
   fail "c: the phantom repo should exit 1 with a ✗ line (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 # The fleet wrapper finds the validator on PATH first; pin it to this repo's.
@@ -463,7 +467,7 @@ if [[ $FRC -eq 1 ]] &&
   pass "c: the fleet wrapper files a validator exit 1 as a FINDING and exits 1"
 else
   fail "c: a finding should be filed as FINDING, exit 1 (got $FRC)"
-  cat "$T/digest.md" "$T/f.err"
+  show "$T/digest.md" "$T/f.err"
 fi
 
 # ---------------------------------------------------------------------------
@@ -487,7 +491,7 @@ if [[ $DRC -eq 0 && "$(cat "$T/stub.log")" == "$expected_audited" ]]; then
   pass "d: attaxion_dev, Attaxion-Portal and asm-infra-v2 are never validated; look-alikes are"
 else
   fail "d: expected exactly clean-a, my-attaxion-tool, asmx validated (exit $DRC)"
-  cat "$T/stub.log" "$T/d.err"
+  show "$T/stub.log" "$T/d.err"
 fi
 if has "$T/d.err" "audit-required-checks-fleet: $skip_line" &&
   [[ "$(sed -n 1p "$T/digest-d.md")" == "All 3 repos clean. Last run: "* ]] &&
@@ -495,7 +499,7 @@ if has "$T/d.err" "audit-required-checks-fleet: $skip_line" &&
   pass "d: the skipped names are on stderr and in the digest, under an all-clean first line"
 else
   fail "d: the skip should be logged and noted under 'All 3 repos clean.'"
-  cat "$T/digest-d.md" "$T/d.err"
+  show "$T/digest-d.md" "$T/d.err"
 fi
 DRC=0
 PATH="$T/stubbin:$PATH" STUB_LOG="$T/stub-all.log" bash "$FLEET" \
@@ -505,7 +509,7 @@ if [[ $DRC -eq 2 && ! -e "$T/stub-all.log" ]] && has "$T/d.err" "no repo left to
   pass "d: a list that is all Attaxion exits 2, never 'All 0 repos clean'"
 else
   fail "d: skipping every repo should exit 2 (got $DRC)"
-  cat "$T/d.err"
+  show "$T/d.err"
 fi
 
 # ---------------------------------------------------------------------------
@@ -524,7 +528,7 @@ else
     pass "e: an uncaught Python exception exits 4"
   else
     fail "e: an uncaught Python exception should exit 4 (got $PRC)"
-    cat "$T/p.err"
+    show "$T/p.err"
   fi
 fi
 
@@ -538,7 +542,7 @@ if [[ $VRC -eq 4 ]] && has "$T/v.err" "internal error: a command failed unexpect
   pass "e: a command failing with 1 unexpectedly exits 4"
 else
   fail "e: an unexpected failure should exit 4 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 run_validator topcoder1/clean-a --branch
@@ -546,7 +550,7 @@ if [[ $VRC -eq 2 ]] && has "$T/v.err" "--branch needs a value"; then
   pass "e: --branch with no value exits 2, not set -u's 1"
 else
   fail "e: --branch with no value should exit 2 (got $VRC)"
-  cat "$T/v.out" "$T/v.err"
+  show "$T/v.out" "$T/v.err"
 fi
 
 # ---------------------------------------------------------------------------
@@ -565,7 +569,7 @@ if [[ $FRC -eq 3 ]] &&
   pass "f: a finding and an error get distinct headings, and the wrapper exits 3"
 else
   fail "f: expected FINDING + ERROR headings, counts, no clean block, exit 3 (got $FRC)"
-  cat "$T/digest.md" "$T/f.err"
+  show "$T/digest.md" "$T/f.err"
 fi
 cp "$T/digest.md" "$T/mixed.md"
 
@@ -575,7 +579,7 @@ if [[ $FRC -eq 0 && "$(sed -n 1p "$T/digest.md")" == "All 2 repos clean. Last ru
   pass "f: clean repos exit 0 and write only the all-clean line"
 else
   fail "f: an all-clean run should exit 0 with one 'All 2 repos clean.' line (got $FRC)"
-  cat "$T/digest.md" "$T/f.err"
+  show "$T/digest.md" "$T/f.err"
 fi
 cp "$T/digest.md" "$T/clean.md"
 
@@ -662,7 +666,7 @@ if [[ $SRC -eq 3 ]] &&
   pass "g: validator exits 4 and 5 are ERRORs (validator crashed / unexpected exit code), and the wrapper exits 3"
 else
   fail "g: exits 4 and 5 should be filed as ERRORs with exit 3 (got $SRC)"
-  cat "$T/digest-g.md" "$T/g.err"
+  show "$T/digest-g.md" "$T/g.err"
 fi
 
 run_stub_fleet "topcoder1/unbound-a topcoder1/syntax-b topcoder1/find-c"
@@ -678,7 +682,7 @@ if [[ $SRC -eq 3 ]] &&
   pass "g: exit 1 is a FINDING only with the FAIL verdict; an unbound variable or a SyntaxError is an ERROR"
 else
   fail "g: exit 1 without '==> FAIL' should be an ERROR, with it a FINDING (got $SRC)"
-  cat "$T/digest-g.md" "$T/g.err"
+  show "$T/digest-g.md" "$T/g.err"
 fi
 
 run_fleet "topcoder1/oddrules topcoder1/oddlisting topcoder1/notbase64 topcoder1/notafile"
@@ -688,7 +692,7 @@ if [[ $FRC -eq 3 ]] &&
   pass "g: four malformed answers reach the digest as ERRORs naming the endpoint, with none of their bytes"
 else
   fail "g: the digest should hold 4 API errors and no answer bytes (got $FRC)"
-  grep -n "PRIVATE-BODY-CANARY" "$T/digest.md" "$T/f.err"
+  grep -n "PRIVATE-BODY-CANARY" "$T/digest.md" "$T/f.err" || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -736,7 +740,7 @@ if [[ $NRC -eq 5 ]] && has "$T/n1.err" 'jq: error (at <stdin>:5): Cannot index s
   pass "n1: the old rules fetch dies with run 38234284948's jq exit 5 on the same 401"
 else
   fail "n1: the old rules fetch should reproduce jq exit 5 (got $NRC)"
-  cat "$T/n1.err"
+  show "$T/n1.err"
 fi
 
 NRC=0
@@ -745,7 +749,7 @@ if [[ $NRC -eq 0 ]] && has "$T/n4.err" "no branch rules found for main"; then
   pass "n4: the old rules fetch passed a repo it never reached as 'no branch rules found' (rc 0)"
 else
   fail "n4: the old rules fetch should read no response as no rules (got $NRC)"
-  cat "$T/n4.err"
+  show "$T/n4.err"
 fi
 
 NRC=0
@@ -754,7 +758,7 @@ if [[ $NRC -eq 0 && ! -s "$T/n2.out" ]]; then
   pass "n2: the old listing fetch read the 403 as an empty workflow directory (rc 0)"
 else
   fail "n2: the old listing fetch should swallow the 403 (got rc $NRC)"
-  cat "$T/n2.out"
+  show "$T/n2.out"
 fi
 
 mkdir -p "$T/old-target"
