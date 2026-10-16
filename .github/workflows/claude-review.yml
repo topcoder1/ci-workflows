@@ -567,11 +567,11 @@ jobs:
       # Decision first, reporting second, as in the bot-skip step:
       # `reviewed=false` is written before any API call, and the exit 1 stands
       # whether or not the comment lands. The comment is ONE sticky per PR:
-      # later runs find it by its marker among github-actions[bot]'s comments
-      # and PATCH it, so it never duplicates and never edits anyone else's
-      # comment. If the comments cannot be listed, nothing is posted rather
-      # than risk a duplicate. A failed post retries 3x, then degrades to a
-      # warning with the body in the log, the runner's workflow-command
+      # later runs find the github-actions[bot] comment that starts with its
+      # marker and PATCH it, so it never duplicates and never edits anyone
+      # else's comment. If the comments cannot be listed, nothing is posted
+      # rather than risk a duplicate. A failed post retries 3x, then degrades
+      # to a warning with the body in the log, the runner's workflow-command
       # prefixes broken as in the summary step. A reviewed run makes no API
       # call. Pinned by selftest/test_claude_review_ran_check.sh.
       - name: Review-ran check (claude-code-action can exit 0 without reviewing)
@@ -638,12 +638,14 @@ jobs:
           } > "$comment"
 
           # This step's own sticky: the oldest github-actions[bot] comment
-          # carrying the marker, "" when there is none. Never another
-          # author's comment, whatever it quotes.
+          # that STARTS with the marker, "" when there is none. Never another
+          # author's comment, and never one that only quotes the marker: the
+          # review summary is a github-actions[bot] comment too, and a summary
+          # that mentions this step must not be overwritten by it.
           sticky_id() {
             gh api "repos/${REPO}/issues/${PR}/comments?per_page=100" --paginate \
               | jq -r -n --arg m "$marker" '[inputs[] | objects
-                  | select(.user.login == "github-actions[bot]" and ((.body // "") | tostring | contains($m)))
+                  | select(.user.login == "github-actions[bot]" and ((.body // "") | tostring | startswith($m)))
                   | .id] | first // empty'
           }
           id_re='^[0-9]+$'

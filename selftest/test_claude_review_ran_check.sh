@@ -267,6 +267,28 @@ else:
     at = [order.index(k) for k in ("caller", "claude", "ran", "summary", "guard")]
     if not (0 <= checkout < at[0] < at[1] < at[2] < at[3] < at[4]):
         problems.append(f"step order must be checkout < caller < claude < ran < summary < guard, got {order}")
+    # The caller check reads HEAD in $GITHUB_WORKSPACE as the commit the run
+    # took its caller from: the pull_request merge commit, which a default
+    # checkout leaves there. Another ref (the PR head, say) could hold a
+    # different caller than the one the action's exchange validates.
+    checkout_with = (steps[checkout].get("with") or {}) if checkout >= 0 else {}
+    for key in ("ref", "repository", "path"):
+        if key in checkout_with:
+            problems.append(
+                f"the checkout step sets `{key}`: the caller check needs the run's own commit (the "
+                "pull_request merge commit) checked out at the workspace root"
+            )
+    # The caller check and the review-ran check rest on this release's
+    # behaviour, read in its source; a bump must re-read it.
+    pin = "anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9"
+    if review.get("uses") != pin:
+        problems.append(
+            f"the review step uses {review.get('uses')!r}, not {pin!r}. The caller and review-ran checks "
+            "rely on that release: a non-empty github_token input skips the OIDC exchange "
+            "(setupGitHubToken, src/github/token.ts) and is never revoked (action.yml revokes only when "
+            "inputs.github_token == ''), and a workflow-validation skip exits 0 with no `conclusion` "
+            "(src/entrypoints/run.ts). Re-verify all three in the new release, then update this pin."
+        )
     if caller.get("continue-on-error") is not True:
         problems.append(
             "the caller check lacks `continue-on-error: true`: a crash there would skip the "
@@ -374,7 +396,7 @@ for p in problems:
     print(f"✗ {p}")
 sys.exit(1 if problems else 0)
 PY
-[ "$failed" -eq 0 ] && pass "checkout < caller < claude < ran < summary < guard; caller continue-on-error, env exact, permissions unchanged; github_token and REVIEW_BOT evaluated for changed=true/false/empty/unset; bot-skip, failed-review and cancelled paths never run the review-ran check"
+[ "$failed" -eq 0 ] && pass "checkout (default merge ref) < caller < claude < ran < summary < guard; action pinned at a4f54ef; caller continue-on-error, env exact, permissions unchanged; github_token and REVIEW_BOT evaluated for changed=true/false/empty/unset; bot-skip, failed-review and cancelled paths never run the review-ran check"
 
 # ---------------------------------------------------------------------------
 # 2. The shipped bash, extracted
@@ -747,9 +769,12 @@ else
   show_ran "R6" r6
 fi
 
-# Only github-actions[bot]'s own marked comment is the sticky: a human quoting
-# the marker, or another bot carrying it, is never edited.
+# Only a github-actions[bot] comment that STARTS with the marker is the
+# sticky. The review summary is a github-actions[bot] comment too, and one
+# that mentions the marker must survive; so must a human quoting it, another
+# bot carrying it, and a deleted account's comment.
 jq -nc --arg m "$MARKER" '[
+  {id: 110, user: {login: "github-actions[bot]"}, body: ("No issues found. The new step posts a sticky that starts with " + $m + " when the action skips.\n\n<sub>Claude Review</sub>")},
   {id: 111, user: {login: "a-maintainer"}, body: ("> " + $m + "\n> quoted from an earlier run")},
   {id: 112, user: {login: "claude[bot]"}, body: ($m + "\nnot this step'"'"'s comment")},
   {id: 113, user: null, body: $m}
@@ -757,7 +782,7 @@ jq -nc --arg m "$MARKER" '[
 CONCLUSION="" CALLER_CHANGED=true CALLER_CAUSE=edit CALLER_PATH_IN="$CALLER_FILE" \
   GH_ISSUE_COMMENTS="$T/others.json" run_ran r6b
 if [ "$RC" -eq 1 ] && [ "$(posts)" -eq 1 ] && [ "$(patches)" -eq 0 ]; then
-  pass "R6b the marker in a human's, another bot's or a deleted account's comment: never PATCHed, a new sticky is posted"
+  pass "R6b the marker quoted mid-body by a github-actions[bot] summary, or carried by a human, another bot or a deleted account: never PATCHed, a new sticky is posted"
 else
   show_ran "R6b" r6b
 fi
