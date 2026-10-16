@@ -23,7 +23,10 @@
 #   3  GitHub API error: a call failed (401, 403, 404, 5xx, no response) or
 #      answered something that is not the JSON it should be. stderr names the
 #      endpoint, the HTTP status and gh's message. A 404 is not "no rules":
-#      a private repo answers 404 to a token that cannot see it.
+#      a private repo answers 404 to a token that cannot see it. The one 404
+#      that is not an error: .github/workflows itself, when the repo's root
+#      listing is readable. The directory is then absent, and the repo is
+#      audited with no workflows of its own.
 #   4  internal error: the validator itself failed (an uncaught Python
 #      exception, or a command that failed unexpectedly).
 #
@@ -100,16 +103,25 @@ trap 'rm -rf "$TMP"' EXIT
 # workflows", which reads as a missing producer: a false finding.
 #
 # On success the body is in $API_BODY. On failure the endpoint, the HTTP
-# status and gh's message go to stderr and the script exits 3. Call it as a
+# status and gh's message go to stderr and the script exits 3; with
+# --allow-404 a 404 returns 1 instead, for the caller to settle. Call it as a
 # plain command, never inside $(...): its exit would end only that subshell.
 API_BODY=""
-api_get() { # <endpoint> [extra gh api args...]
-  local endpoint="$1" status
+api_get() { # [--allow-404] <endpoint> [extra gh api args...]
+  local allow_404="" endpoint status
+  if [[ "$1" == --allow-404 ]]; then
+    allow_404=1
+    shift
+  fi
+  endpoint="$1"
   shift
   if API_BODY=$(gh api "$endpoint" "$@" 2> "$TMP/gh.err"); then
     return 0
   fi
   status=$(grep -oE 'HTTP [0-9]{3}' "$TMP/gh.err" | tail -n 1 || true)
+  if [[ -n "$allow_404" && "$status" == "HTTP 404" ]]; then
+    return 1
+  fi
   echo "  API error: GET $endpoint failed (${status:-no HTTP status})" >&2
   sed 's/^/    /' "$TMP/gh.err" >&2
   if [[ "$status" == "HTTP 404" ]]; then
@@ -156,7 +168,16 @@ dump_workflows() {
   local out_dir="$2"
   mkdir -p "$out_dir"
   local names f
-  api_get "/repos/$repo/contents/.github/workflows"
+  if ! api_get --allow-404 "/repos/$repo/contents/.github/workflows"; then
+    # 404: no workflows directory, which is a state to audit (its required
+    # checks have no producer here). But a private repo also answers 404 to a
+    # token that cannot read its contents, and the rules call above proves
+    # only that the token sees the repo. So the directory counts as absent
+    # only if the root listing is readable; api_get exits 3 if it is not.
+    api_get "/repos/$repo/contents"
+    echo "  $repo has no .github/workflows directory"
+    return 0
+  fi
   # An array of entries, or exit 3: `.[]` over `{}` yields nothing, which
   # would read as an empty directory and so as a missing producer.
   if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$API_BODY" ||

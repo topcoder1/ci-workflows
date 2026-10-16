@@ -256,8 +256,10 @@ arbitrary helper scripts; that's a different kind of repo.
   body on stdout, `gh: … (HTTP n)` on stderr, rc=1). Pins: a 401, a 404 or
   no response on the rules call exits 3 naming the status (a 404 is not "no
   rules": a private repo answers 404 to a token that cannot see it), while
-  200 `[]` exits 0; a failed or malformed contents call exits 3 with no verdict; a
-  missing producer exits 1 and is filed as FINDING; a Python crash, an
+  200 `[]` exits 0; a failed or malformed contents call exits 3 with no
+  verdict, except that a repo with no `.github/workflows` is audited (its
+  checks have no producer) once its root listing proves the token can read
+  it; a missing producer exits 1 and is filed as FINDING; a Python crash, an
   unexpected command failure and a flag missing its value never exit 1;
   Attaxion repos are skipped by dotclaude's `^(asm-|attaxion)` rule and named
   in the log and digest; the workflow's digest step opens the issue for a

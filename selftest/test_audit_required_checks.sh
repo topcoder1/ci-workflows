@@ -28,7 +28,9 @@
 #      array of rules => exit 3
 #   b  a contents call on a private repo fails (the listing 403, one file 404,
 #      the central listing with no response; a listing that is not one)
-#      => exit 3, with no verdict lines and no FAIL line
+#      => exit 3, with no verdict lines and no FAIL line. A repo with no
+#      .github/workflows (listing 404) is audited when its root listing is
+#      readable (a finding), and exits 3 when that 404s too
 #   c  a required check with no PR producer => exit 1 with its ✗ line, and
 #      the fleet wrapper files it under FINDING and exits 1
 #   d  Attaxion repos are skipped by name, as in dotclaude's fleet red-workflow
@@ -115,6 +117,8 @@ fi
 case "$rest" in
   rules/branches/*)
     cat "$dir/rules.json" ;;
+  contents)
+    echo '[{"name":"README.md","type":"file"}]' ;;
   contents/.github/workflows)
     [ -d "$dir/workflows" ] || fail_with 404
     if [ -f "$dir/listing.json" ]; then
@@ -182,6 +186,11 @@ fake_repo topcoder1/oddlisting "$(rules_json test)" ci.yml
 echo '{"name":"workflows","type":"file","content":""}' > "$T/gh/topcoder1/oddlisting/listing.json"
 fake_repo topcoder1/emptylisting "$(rules_json test)" ci.yml
 echo '{}' > "$T/gh/topcoder1/emptylisting/listing.json"
+fake_repo topcoder1/noworkflows "$(rules_json test)"
+rmdir "$T/gh/topcoder1/noworkflows/workflows"
+fake_repo topcoder1/nocontents "$(rules_json test)"
+rmdir "$T/gh/topcoder1/nocontents/workflows"
+echo "contents 404" > "$T/gh/topcoder1/nocontents/fail"
 
 run_validator() { # repo [flags...] -> $VRC, $T/v.out, $T/v.err
   VRC=0
@@ -304,6 +313,27 @@ for r in oddlisting emptylisting; do
     cat "$T/v.out" "$T/v.err"
   fi
 done
+
+# No .github/workflows: the listing answers 404, which a private repo also
+# answers to a token that cannot read its contents. The directory counts as
+# absent only once the root listing proves this token can read them.
+run_validator topcoder1/noworkflows
+if [[ $VRC -eq 1 ]] && has "$T/v.out" "topcoder1/noworkflows has no .github/workflows directory" &&
+  has "$T/v.out" "✗  test" && ! grep -q "API error" "$T/v.err"; then
+  pass "b: no workflows directory (contents readable) is audited: its required check is a finding"
+else
+  fail "b: an absent workflows directory should exit 1 with a ✗ (got $VRC)"
+  cat "$T/v.out" "$T/v.err"
+fi
+run_validator topcoder1/nocontents
+if [[ $VRC -eq 3 ]] &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/nocontents/contents failed (HTTP 404)" &&
+  api_error_only; then
+  pass "b: a 404 listing with an unreadable root exits 3, never a finding"
+else
+  fail "b: a 404 listing plus an unreadable root should exit 3 (got $VRC)"
+  cat "$T/v.out" "$T/v.err"
+fi
 
 echo "contents/.github/workflows none" > "$T/gh/topcoder1/ci-workflows/fail"
 run_validator topcoder1/clean-a
