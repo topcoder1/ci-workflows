@@ -77,8 +77,22 @@ on:
 # no event remains to disarm it. cancel-in-progress kills the stale run; the
 # head guard on the enable step below covers the window where it was already
 # past cancellation. (Codex review round 8 P1.)
+#
+# Per PR AND per payload draft flag, as the callers' own groups are
+# (attaxion_dev#303; ci-workflows#110 and #116 split the review lanes). The
+# job below skips a draft-payload run, but in a group shared with live runs
+# that run can still cancel a live run, or replace it while it waits, and
+# then skip. A push to a draft PR followed about a second later by `gh pr
+# ready` delivered the draft-payload `synchronize` after `ready_for_review`:
+# the ready run was cancelled, the synchronize run skipped, and nothing
+# armed (whois-api-llc/wxa_vpn#2258). Live runs still share one group, so a
+# newer push still cancels a stale live run, as above. `-reusable-` keeps
+# this group apart from the callers': they declare
+# `safe-paths-automerge-<N>-<draft|live>`, groups are repo-scoped, and a run
+# must not contend for the group its own caller run holds. Pinned, with
+# negative controls, by selftest/test_concurrency_draft_split.py.
 concurrency:
-  group: safe-paths-automerge-${{ github.event.pull_request.number }}
+  group: safe-paths-automerge-reusable-${{ github.event.pull_request.number }}-${{ github.event.pull_request.draft && 'draft' || 'live' }}
   cancel-in-progress: true
 
 jobs:

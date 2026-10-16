@@ -480,6 +480,24 @@ arbitrary helper scripts; that's a different kind of repo.
   before their first step on `docker pull postgres:16` -> `toomanyrequests`:
   Docker Hub rate-limits anonymous pulls per IP, and GitHub-hosted runners
   share egress IPs.
+- `test_concurrency_draft_split.py` — a draft-gated workflow's concurrency
+  group must split by the payload's draft flag. Behind a `draft == false`
+  gate a draft-payload run is a no-op, but in a group it shares with live
+  runs it can cancel the ready run, or replace it while it waits, and then
+  skip. whois-api-llc/wxa_vpn#2258 (2026-10-16) was never armed that way:
+  `safe-paths-automerge.yml` declared its own unsplit group under callers
+  that split theirs. Pins that reusable's group as a hardcoded string, with
+  `cancel-in-progress: true` (live runs still supersede each other). Renders
+  the pinned string for draft and live payloads: split, per PR, and never a
+  group its callers hold (`-reusable-` keeps it apart from their
+  `safe-paths-automerge-<N>-<draft|live>`). Sweeps every draft-gated
+  workflow, gated directly or through a reusable it calls, for an unsplit
+  group. Negative controls: the pre-fix unsplit group, the callers' own
+  group, cancel-in-progress off, a group shared across PRs, a re-spaced
+  caller group, unmodeled expressions (`github.run_id`, the head SHA), a
+  draft gate added to `verifier-on-high-risk.yml` (whose per-PR group stays
+  unsplit only because no job there gates on draft), and `pr-review.yml`
+  reverted to one group.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

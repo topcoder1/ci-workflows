@@ -67,6 +67,13 @@ permissions:
     # had to be patched separately before the gate would even
     # start a job — see MEMORY.md lesson 2026-05-12.
 
+# One group per PR, deliberately NOT split by the payload's draft flag as
+# safe-paths-automerge.yml's is: no job here gates on draft, so a
+# draft-payload run diffs, classifies and posts the same check on the same
+# head SHA as a live run would, and whichever run the group keeps posts the
+# verdict. A split would only let a draft-payload run and a live run model
+# the same head twice. Add a draft gate and this group must split too:
+# selftest/test_concurrency_draft_split.py fails until it does.
 concurrency:
   group: verifier-on-high-risk-${{ github.event.pull_request.number }}
   cancel-in-progress: true
