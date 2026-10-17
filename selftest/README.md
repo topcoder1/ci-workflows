@@ -280,7 +280,8 @@ arbitrary helper scripts; that's a different kind of repo.
   forms `gh api --paginate` prints (one array, gh 2.97.0; an array per page,
   gh's help), and a bad rule on page 1, a `null` page 2 and a page 2 that
   fails all exit 3. And `--branch` and workflow file names went into the URL
-  unencoded, so `#` (a fragment gh never sends), `?` and a bad `%` read
+  unencoded, so `#` (a fragment gh never sends), `?`, a bad `%` and gh's
+  `{repo}` / `:repo` placeholders (filled from the checkout gh runs in) read
   another branch or file, or failed in gh: they are now percent-encoded,
   `/` kept, and an API error names the endpoint as sent. The shim reads an
   endpoint the way gh and GitHub were measured to, and shim controls pin
