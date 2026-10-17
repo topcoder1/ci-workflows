@@ -60,6 +60,16 @@
 #      `:repo` placeholder or a space is read as that file, a branch with `#` or
 #      `%41` is read as that branch, and an API error names the endpoint as
 #      it was sent
+#   j  every rule has a string type, and every required_status_checks rule
+#      lists its checks as objects with a non-empty string context
+#      (2026-10-17): a rule with no type or a number for one, a
+#      required_status_checks rule with no list, a string or an empty object
+#      for one, or a string for its parameters, a check that is a string, a
+#      check with no, an empty, a numeric or an object context, a bad check
+#      before or after a good one, and a bad rule beside a good one each exit
+#      3 with the endpoint and nothing else; through the fleet they are
+#      ERRORs, and the digest step opens the issue. A full answer, and a rule
+#      with an empty list, still exit 0
 # Negative controls (the shim reproduces each old failure, run verbatim):
 #   n1 the old rules fetch + filter dies with jq exit 5 on case a's 401
 #   n4 the old rules fetch reads case a's no-response failure as "no branch
@@ -491,7 +501,7 @@ fi
 for r in oddrules oddrules2; do
   run_validator "topcoder1/$r"
   if [[ $VRC -eq 3 ]] &&
-    has "$T/v.err" "API error: GET /repos/topcoder1/$r/rules/branches/main did not answer an array of rules" &&
+    has "$T/v.err" "API error: GET /repos/topcoder1/$r/rules/branches/main did not answer a valid list of rules" &&
     ! grep -q "jq: error" "$T/v.err" && api_error_only && no_body_bytes; then
     pass "a: a 200 that is not an array of rules ($r) exits 3 and echoes none of it"
   else
@@ -895,7 +905,7 @@ fake_repo topcoder1/badpage "$(rules_after 100 test | jq -c '.[0] = "PRIVATE-BOD
 touch "$T/gh/topcoder1/badpage/pages_apart"
 run_validator topcoder1/badpage
 if [[ $VRC -eq 3 ]] &&
-  has "$T/v.err" "API error: GET /repos/topcoder1/badpage/rules/branches/main did not answer an array of rules" &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/badpage/rules/branches/main did not answer a valid list of rules" &&
   api_error_only && no_body_bytes; then
   pass "h: a bad rule on page 1 of 2 exits 3 and echoes none of the answer"
 else
@@ -926,7 +936,7 @@ for form in array-per-page gh-2.97.0; do
   rule_pages "$r" "$form" "$page1" null
   run_validator "$r"
   if [[ $VRC -eq 3 ]] &&
-    has "$T/v.err" "API error: GET /repos/$r/rules/branches/main did not answer an array of rules" &&
+    has "$T/v.err" "API error: GET /repos/$r/rules/branches/main did not answer a valid list of rules" &&
     api_error_only && no_body_bytes; then
     pass "h: a page 2 that is not a list exits 3 and echoes none of the answer ($form)"
   else
@@ -1029,11 +1039,119 @@ mkdir -p "$T/gh/topcoder1/sent3/branch-rules/rel/main#x"
 echo '{"message":"not a list","leak":"PRIVATE-BODY-CANARY-branch"}' > "$T/gh/topcoder1/sent3/branch-rules/rel/main#x/rules.json"
 run_validator topcoder1/sent3 --branch "rel/main#x"
 if [[ $VRC -eq 3 ]] &&
-  has "$T/v.err" "API error: GET /repos/topcoder1/sent3/rules/branches/rel/main%23x did not answer an array of rules" &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/sent3/rules/branches/rel/main%23x did not answer a valid list of rules" &&
   api_error_only && no_body_bytes; then
   pass "i: a rules answer for 'rel/main#x' that is not a list names its endpoint as sent"
 else
   fail "i: the bad rules answer for 'rel/main#x' should name .../rel/main%23x (got $VRC)"
+  show "$T/v.out" "$T/v.err"
+fi
+
+# ---------------------------------------------------------------------------
+# j. A rule the filter cannot read is an API error, never "no required checks"
+#    (2026-10-17). The shape check asked for an array of objects and no more,
+#    and the filter keeps the rules whose type is required_status_checks and
+#    reads their checks with `[]?`: a rule with no string type, a
+#    required_status_checks rule with no list of checks, or a check with an
+#    empty context read as "no required_status_checks rule", exit 0, so the
+#    fleet filed the repo as clean and opened no issue, and whatever check
+#    the rule required was never validated. A check with no context, or a
+#    number for one, read as a phantom named `null` or `5`; a check that is
+#    not an object crashed the filter, exit 4; and a context that was an
+#    object was printed, the answer's own bytes, into the public digest.
+#    dotclaude's copy has required this shape since topcoder1/dotclaude#521.
+# ---------------------------------------------------------------------------
+# Each answer is clean-a's with one defect, every ruleset_source in it a
+# canary, which an edit can also use as $c. A jq error inside fake_repo's
+# arguments would serve an empty answer, which exits 3 with the same message:
+# a case that tested nothing would pass. So a broken edit fails here.
+malformed() { # owner/repo, a jq edit of clean-a's rules answer
+  local answer
+  if answer=$(rules_json test |
+    jq -c --arg c "PRIVATE-BODY-CANARY-${1#*/}" "map(.ruleset_source = \$c) | $2") &&
+    jq -e --arg c "PRIVATE-BODY-CANARY-${1#*/}" 'type == "array" and (tostring | contains($c))' \
+      > /dev/null 2>&1 <<< "$answer"; then
+    fake_repo "$1" "$answer" ci.yml
+  else
+    fail "j: the edit '$2' did not build a rules answer for $1"
+  fi
+}
+malformed topcoder1/notype 'del(.[1].type)'
+malformed topcoder1/numtype '.[1].type = 7'
+malformed topcoder1/nolist '.[1].parameters = {}'
+malformed topcoder1/stringlist '.[1].parameters.required_status_checks = "test"'
+# `[]?` iterates an object's values as it does a list's elements.
+malformed topcoder1/objectlist '.[1].parameters.required_status_checks = {}'
+malformed topcoder1/stringcheck '.[1].parameters.required_status_checks = ["test"]'
+malformed topcoder1/nocontext '.[1].parameters.required_status_checks = [{integration_id: 15368}]'
+malformed topcoder1/emptycontext '.[1].parameters.required_status_checks[0].context = ""'
+malformed topcoder1/numcontext '.[1].parameters.required_status_checks[0].context = 5'
+# A good rule does not vouch for a bad one beside it: ci.yml produces the good
+# rule's `test`, and the bad rule's checks are unknown.
+malformed topcoder1/onebadrule '. + [{type: "required_status_checks", parameters: {}}]'
+# A bad check beside a good one in the same list, after it and before it.
+malformed topcoder1/badsecondcheck '.[1].parameters.required_status_checks += [{context: ""}]'
+malformed topcoder1/badfirstcheck '.[1].parameters.required_status_checks = [{integration_id: 15368}] + .[1].parameters.required_status_checks'
+# Parameters that are not an object make the check itself fail in jq, whose
+# error must reach neither stream.
+malformed topcoder1/stringparams '.[1].parameters = "x"'
+# A context that is an object, which the old filter printed into the output.
+# shellcheck disable=SC2016  # $c is the edit's jq variable, the canary
+malformed topcoder1/objectcontext '.[1].parameters.required_status_checks[0].context = {k: $c}'
+# The whole output, byte for byte, is the header and the API error: no
+# verdict, and no byte of the answer from any field, canary or not. (cmp, as
+# $(...) would drop trailing newlines.)
+for r in notype numtype nolist stringlist objectlist stringcheck nocontext emptycontext numcontext \
+  objectcontext onebadrule badsecondcheck badfirstcheck stringparams; do
+  run_validator "topcoder1/$r"
+  printf '%s\n' "==> Validating required status checks for topcoder1/$r (branch: main)" > "$T/j.out"
+  printf '%s\n' "  API error: GET /repos/topcoder1/$r/rules/branches/main did not answer a valid list of rules" > "$T/j.err"
+  if [[ $VRC -eq 3 ]] && cmp -s "$T/j.out" "$T/v.out" && cmp -s "$T/j.err" "$T/v.err"; then
+    pass "j: a rules answer with a malformed rule ($r) exits 3 with the endpoint and nothing else"
+  else
+    fail "j: $r should exit 3 with only the API error for its endpoint (got $VRC)"
+    show "$T/v.out" "$T/v.err"
+  fi
+done
+
+# Through the fleet: ERRORs that name the endpoint and carry none of the
+# answer, so the digest step opens the issue. Before, the run was "All 3
+# repos clean." and opened none.
+run_fleet "topcoder1/clean-a topcoder1/notype topcoder1/nolist"
+if [[ $FRC -eq 3 ]] &&
+  has "$T/digest.md" "Fleet: 3 repos audited (1 clean, 0 with findings, 2 could not be audited)" &&
+  has "$T/digest.md" "### topcoder1/notype — ERROR: not audited (exit 3: GitHub API error)" &&
+  has "$T/digest.md" "### topcoder1/nolist — ERROR: not audited (exit 3: GitHub API error)" &&
+  has "$T/digest.md" "API error: GET /repos/topcoder1/nolist/rules/branches/main did not answer a valid list of rules" &&
+  ! grep -q "PRIVATE-BODY-CANARY" "$T/digest.md" "$T/f.err" &&
+  [[ "$(needs_issue "$T/digest.md" "$T/clean.md")" == yes ]]; then
+  pass "j: the fleet files malformed rules answers as ERRORs, and the digest step opens the issue"
+else
+  fail "j: malformed rules answers should be fleet ERRORs that open the issue (got $FRC)"
+  show "$T/digest.md" "$T/f.err"
+fi
+
+# Still valid: rules of other types with their own parameters, a check with an
+# integration_id beside its context, as GitHub answers, and a
+# required_status_checks rule whose list is empty, which requires nothing.
+fake_repo topcoder1/fullshape "$(rules_json test | jq -c '
+  .[1].parameters.required_status_checks[0].integration_id = 15368
+  | . + [{type: "pull_request", parameters: {required_approving_review_count: 1, dismiss_stale_reviews_on_push: true}},
+         {type: "non_fast_forward"}]')" ci.yml
+run_validator topcoder1/fullshape
+if [[ $VRC -eq 0 ]] && has "$T/v.out" "✓  test" && ! grep -q "API error" "$T/v.err"; then
+  pass "j: a full rules answer (other rule types, a check's integration_id) is validated, exit 0"
+else
+  fail "j: fullshape should pass the shape check and validate test, exit 0 (got $VRC)"
+  show "$T/v.out" "$T/v.err"
+fi
+fake_repo topcoder1/emptychecks "$(rules_json test | jq -c '.[1].parameters.required_status_checks = []')" ci.yml
+run_validator topcoder1/emptychecks
+if [[ $VRC -eq 0 ]] && has "$T/v.out" "no required_status_checks rule on main" &&
+  ! grep -q "API error" "$T/v.err"; then
+  pass "j: a required_status_checks rule with an empty list requires nothing, exit 0"
+else
+  fail "j: an empty list of checks should exit 0 (got $VRC)"
   show "$T/v.out" "$T/v.err"
 fi
 
