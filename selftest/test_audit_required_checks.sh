@@ -1168,6 +1168,9 @@ touch "$T/gh/topcoder1/pagebytes/pages_apart"
 shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
 s3_apart="$SHRC $(cat "$T/s.out")"
 rm "$T/gh/topcoder1/pagebytes/pages_apart"
+printf '%s' '[]' > "$pb/2.json"
+shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
+s3_empty="$SHRC $(cat "$T/s.out")"
 printf '%s' null > "$pb/2.json"
 shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
 s3_null="$SHRC $(cat "$T/s.out")"
@@ -1178,13 +1181,14 @@ s3_fail="$SHRC $(cat "$T/s.out")"
 if [[ $s3_one == '0 [{"type":"deletion"}]' &&
   $s3_joined == '0 [{"type":"deletion"},{"type":"creation"}]' &&
   $s3_apart == '0 [{"type":"deletion"}][{"type":"creation"}]' &&
+  $s3_empty == '0 [{"type":"deletion"} ]' &&
   $s3_null == '0 [{"type":"deletion"}null' &&
   $s3_fail == '1 [{"type":"deletion"}{"message":"Resource not accessible by personal access token",'* ]] &&
   has "$T/s.err" "gh: Resource not accessible by personal access token (HTTP 403)"; then
-  pass "s3: GitHub's pages print as gh prints them: one page alone, joined into one array or an array per page, a null and a failing page 2 joined in as they came"
+  pass "s3: GitHub's pages print as gh prints them: one page alone, joined into one array or an array per page, an empty page 2 as ' ]', a null and a failing page 2 joined in as they came"
 else
   fail "s3: unexpected page bytes"
-  printf '%s\n' "$s3_one" "$s3_joined" "$s3_apart" "$s3_null" "$s3_fail"
+  printf '%s\n' "$s3_one" "$s3_joined" "$s3_apart" "$s3_empty" "$s3_null" "$s3_fail"
 fi
 
 fake_repo topcoder1/unencoded '[]' ci.yml
