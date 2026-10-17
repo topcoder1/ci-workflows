@@ -56,9 +56,10 @@
 #      a bad rule on page 1 of 2, a page 2 that is not a list, and a page 2
 #      that fails each exit 3, echoing none of the answer
 #   i  --branch and workflow file names go into the URL percent-encoded, `/`
-#      kept (2026-10-17): a file name with `#`, `?`, `%` or a space is read as
-#      that file, a branch with `#` or `%41` is read as that branch, and an
-#      API error names the endpoint as it was sent
+#      kept (2026-10-17): a file name with `#`, `?`, `%`, gh's `{repo}`
+#      placeholder or a space is read as that file, a branch with `#` or
+#      `%41` is read as that branch, and an API error names the endpoint as
+#      it was sent
 # Negative controls (the shim reproduces each old failure, run verbatim):
 #   n1 the old rules fetch + filter dies with jq exit 5 on case a's 401
 #   n4 the old rules fetch reads case a's no-response failure as "no branch
@@ -72,8 +73,8 @@
 #   s1 the rules answer comes 30 rules a page, and per_page and page select
 #   s2 --paginate prints every page, as one array or as an array per page
 #   s3 explicit page bytes print as given, a failing page included
-#   s4 an unencoded `#`, `?` or bad `%` reads another file or fails in gh,
-#      and an unencoded branch reads another branch's rules
+#   s4 an unencoded `#`, `?`, bad `%` or `{repo}` reads another file or
+#      fails in gh, and an unencoded branch reads another branch's rules
 #
 # Run from the repo root:
 #   bash selftest/test_audit_required_checks.sh
@@ -113,7 +114,12 @@ show() { cat -- "$@" 2>/dev/null || true; }
 #
 # It reads an endpoint the way gh 2.97.0 and GitHub did, measured 2026-10-16
 # on topcoder1/dotclaude and against a local server, and 2026-10-17 on this
-# repo. gh parses the endpoint as a URL. It never sends a #fragment
+# repo. gh first fills the {owner}, {repo} and {branch} placeholders from the
+# checkout it runs in (in this repo's worktree, `contents/{repo}.yml`
+# requested `contents/ci-workflows.yml`; outside any checkout gh fails,
+# `unable to expand placeholder in path`); the shim fills them as for the
+# scheduled audit, this repo's checkout on main. `%7Brepo%7D` is sent as it
+# is. Then gh parses the endpoint as a URL. It never sends a #fragment
 # (`rules/branches/main#x` read main's rules), and a % in the path that starts
 # no %XX escape fails in gh before anything is sent (`invalid URL escape
 # "%zz"`, rc 1). GitHub decodes %XX in the path (`rules/branches/ma%69n` read
@@ -135,7 +141,10 @@ if [ "${1:-}" != api ]; then
   echo "shim: unexpected gh $*" >&2
   exit 98
 fi
-url="${2%%#*}"
+url="${2//\{owner\}/topcoder1}"
+url="${url//\{repo\}/ci-workflows}"
+url="${url//\{branch\}/main}"
+url="${url%%#*}"
 bad_escape='%($|[^0-9A-Fa-f]|[0-9A-Fa-f]($|[^0-9A-Fa-f]))'
 if grep -Eq "$bad_escape" <<< "${url%%\?*}"; then
   echo "parse \"https://api.github.com/${url#/}\": invalid URL escape" >&2
@@ -901,15 +910,16 @@ for form in array-per-page gh-2.97.0; do
   fi
 
   # A page 2 that fails: gh --paginate exits 1 there, after printing the
-  # pages before it, and page 1's rules must never be judged on their own.
+  # pages before it, and page 1's rules must never be judged on their own,
+  # nor printed.
   r="topcoder1/failpage-$form"
   fake_repo "$r" '[]' ci.yml
-  rule_pages "$r" "$form" "$(rules_after 29 test)" 403
+  rule_pages "$r" "$form" "$(rules_after 29 test | sed 's#"o/r"#"PRIVATE-BODY-CANARY-page1"#g')" 403
   run_validator "$r"
   if [[ $VRC -eq 3 ]] &&
     has "$T/v.err" "API error: GET /repos/$r/rules/branches/main failed (HTTP 403)" &&
     has "$T/v.err" "gh: Resource not accessible by personal access token (HTTP 403)" &&
-    api_error_only; then
+    api_error_only && no_body_bytes; then
     pass "h: a page 2 that fails exits 3 naming its status ($form)"
   else
     fail "h: a page 2 that fails ($form) should exit 3 with HTTP 403 (got $VRC)"
@@ -925,10 +935,11 @@ done
 #    %XX that is left. A `/` is sent as it is.
 # ---------------------------------------------------------------------------
 # Each file is its repo's only producer of the required check. Unencoded,
-# `#` and `?` cut the name to `ci`, a file the repo does not have, and `%.`
-# stopped gh. A space always worked: gh escapes it itself.
+# `#` and `?` cut the name to `ci`, a file the repo does not have, `%.`
+# stopped gh, and gh filled `{repo}` in with the checkout's repo name. A space
+# always worked: gh escapes it itself.
 n=0
-for name in "ci#2.yml" "ci?2.yml" "50%.yml" "ci 2.yml"; do
+for name in "ci#2.yml" "ci?2.yml" "50%.yml" "{repo}.yml" "ci 2.yml"; do
   n=$((n + 1))
   r="topcoder1/filename$n"
   fake_repo "$r" "$(rules_json test)"
@@ -1147,8 +1158,8 @@ fi
 fake_repo topcoder1/unencoded '[]' ci.yml
 uw="$T/gh/topcoder1/unencoded/workflows"
 printf 'cut\n' > "$uw/ci"
-for name in "ci#2.yml" "ci?2.yml" "50%.yml"; do cp "$T/wf/ci.yml" "$uw/$name"; done
-for branch in release relAse; do
+for name in "ci#2.yml" "ci?2.yml" "50%.yml" "ci-workflows.yml"; do cp "$T/wf/ci.yml" "$uw/$name"; done
+for branch in release relAse main; do
   mkdir -p "$T/gh/topcoder1/unencoded/branch-rules/$branch"
   rules_json "from $branch" > "$T/gh/topcoder1/unencoded/branch-rules/$branch/rules.json"
 done
@@ -1167,6 +1178,8 @@ unencoded "contents/.github/workflows/ci#2.yml" .name ci
 unencoded "contents/.github/workflows/ci?2.yml" .name ci
 unencoded "rules/branches/release#2" '.[1].parameters.required_status_checks[0].context' "from release"
 unencoded "rules/branches/rel%41se" '.[1].parameters.required_status_checks[0].context' "from relAse"
+unencoded "contents/.github/workflows/{repo}.yml" .name ci-workflows.yml
+unencoded "rules/branches/{branch}" '.[1].parameters.required_status_checks[0].context' "from main"
 shim "/repos/topcoder1/unencoded/contents/.github/workflows/50%.yml"
 if [[ $SHRC -eq 1 && ! -s "$T/s.out" ]] && has "$T/s.err" "invalid URL escape"; then
   pass "s4: an unencoded '50%.yml' fails in gh, an invalid URL escape, before anything is sent"
