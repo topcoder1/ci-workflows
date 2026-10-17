@@ -273,7 +273,18 @@ arbitrary helper scripts; that's a different kind of repo.
   may use `--jq` (gh's own filter error quotes the response; the shim
   reproduces that). Negative controls run the old fetches verbatim against
   the same answers: jq exit 5, a silent "no branch rules found" exit 0, an
-  empty listing, an empty workflow file.
+  empty listing, an empty workflow file. Two more gaps, closed 2026-10-17,
+  each a silent pass. The rules call read one page of the branch's rules,
+  30 a page, so a `required_status_checks` rule past page 1 read as no
+  required checks, exit 0: a rule at 31 or at 101 is now validated, in both
+  forms `gh api --paginate` prints (one array, gh 2.97.0; an array per page,
+  gh's help), and a bad rule on page 1, a `null` page 2 and a page 2 that
+  fails all exit 3. And `--branch` and workflow file names went into the URL
+  unencoded, so `#` (a fragment gh never sends), `?` and a bad `%` read
+  another branch or file, or failed in gh: they are now percent-encoded,
+  `/` kept, and an API error names the endpoint as sent. The shim reads an
+  endpoint the way gh and GitHub were measured to, and shim controls pin
+  that on the unpaginated, unencoded requests.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.
