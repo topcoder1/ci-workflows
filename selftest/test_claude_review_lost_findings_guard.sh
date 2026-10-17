@@ -157,8 +157,11 @@ else:
         problems.append(f"guard EXECUTION_FILE not wired to steps.claude.outputs.execution_file: {env.get('EXECUTION_FILE')!r}")
     if env.get("STARTED_AT") != "${{ steps.clock.outputs.started_at }}":
         problems.append(f"guard STARTED_AT not wired to steps.clock.outputs.started_at: {env.get('STARTED_AT')!r}")
-    if env.get("REVIEW_BOT") != "claude[bot]":
-        problems.append(f"guard REVIEW_BOT must match the action's bot_name default 'claude[bot]': {env.get('REVIEW_BOT')!r}")
+    # claude[bot] on the App token, github-actions[bot] when the caller check
+    # gave the review the job token; evaluated in test_claude_review_ran_check.sh.
+    want_bot = "${{ steps.caller.outputs.changed != 'false' && 'github-actions[bot]' || 'claude[bot]' }}"
+    if env.get("REVIEW_BOT") != want_bot:
+        problems.append(f"guard REVIEW_BOT must follow the review's token ({want_bot}): {env.get('REVIEW_BOT')!r}")
     if env.get("SUMMARY_FILE") != "${{ steps.summary.outputs.file }}":
         problems.append(f"guard SUMMARY_FILE not wired to steps.summary.outputs.file: {env.get('SUMMARY_FILE')!r}")
     if "/issues/" in str(guard.get("run", "")):

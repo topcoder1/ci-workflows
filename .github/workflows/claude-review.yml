@@ -323,6 +323,107 @@ jobs:
           "$HOME/.local/bin/claude" --version
           echo "executable=$HOME/.local/bin/claude" >> "$GITHUB_OUTPUT"
 
+      # WHICH TOKEN THE REVIEW RUNS WITH. claude-code-action gets its GitHub
+      # token by exchanging the job's OIDC token for a Claude GitHub App
+      # token, and the exchange refuses any run whose calling workflow
+      # differs from the default branch's copy ("workflow validation"). The
+      # action then warns and returns without failing its step
+      # (src/github/token.ts and src/entrypoints/run.ts at the pin below), so
+      # every install PR and every PR that edited its caller passed
+      # `review / Claude Review` with nothing reviewed - every other file in
+      # its diff included.
+      #
+      # A `github_token` input skips the exchange: setupGitHubToken() returns
+      # a given token before it requests an OIDC token, and the action's
+      # "Revoke app token" step runs only when no token was given. So a PR
+      # whose caller differs is reviewed with the job token, and every other
+      # PR keeps the App identity. This step decides which:
+      #   changed=false  the caller's blob at HEAD equals the default
+      #                  branch's (cause=same); the ONLY outcome that keeps
+      #                  the App token
+      #   changed=true   the blobs differ (cause=edit), the caller is absent
+      #                  on the default branch (cause=install, a 404 "Not
+      #                  Found"), or a read failed (cause=unknown)
+      # FAIL SAFE: anything short of a proven match reviews with the job
+      # token, so the review runs either way. Both consumers test
+      # `changed != 'false'`, which a step that died before writing its
+      # outputs also passes, and `continue-on-error` keeps such a death from
+      # skipping the review.
+      #
+      # `github.workflow_ref` names the CALLER: in a reusable workflow the
+      # `github` context is the caller's. HEAD is the checkout above, the
+      # commit the run took its caller from; the default branch's copy comes
+      # from the contents API, which works at any `checkout_depth`. The job
+      # token holds this job's `permissions:` (contents: read, pull-requests:
+      # write), all a review needs, and comments made with it start no
+      # workflow runs. Its inline comments come from github-actions[bot], not
+      # claude[bot], so the lost-findings guard's REVIEW_BOT follows the same
+      # predicate. If the action skips anyway, the review-ran check after it
+      # fails the job. One race stays open, closed that way: a caller change
+      # landing on the default branch in the seconds between this read and
+      # the action's token exchange. A re-run then reviews with the job
+      # token, because the PR's merge commit no longer matches. Pinned by
+      # selftest/test_claude_review_ran_check.sh.
+      - name: Caller check (review with the job token when this PR changes its calling workflow)
+        id: caller
+        if: ${{ steps.bot_check.outputs.skipped != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CALLER_REF: ${{ github.workflow_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          changed=true
+          cause=unknown
+          path=""
+          head_blob=""
+          base_blob=""
+          path_re='^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$'
+          sha_re='^[0-9a-f]{40}$'
+          # "<owner>/<repo>/<path>@<ref>". A pull_request ref
+          # (refs/pull/<n>/merge) holds no "@"; anything that does not reduce
+          # to a plain workflow file is left unread (cause=unknown).
+          candidate=${CALLER_REF:-}
+          candidate=${candidate#*/*/}
+          candidate=${candidate%@*}
+          if [[ $candidate =~ $path_re ]]; then
+            path=$candidate
+            head_blob=$(git -C "${GITHUB_WORKSPACE:-.}" rev-parse --verify --quiet "HEAD:${path}") || head_blob=""
+          fi
+          if [[ $head_blob =~ $sha_re ]] && [ -n "${DEFAULT_BRANCH:-}" ]; then
+            err="${RUNNER_TEMP:-/tmp}/claude-review-caller-check.err"
+            # gh prints an HTTP error's JSON body to STDOUT, so `reply` is set
+            # on failure too; only the exit status tells the two apart.
+            if reply=$(gh api -X GET "repos/${REPO}/contents/${path}" -f ref="$DEFAULT_BRANCH" 2>"$err"); then
+              base_blob=$(jq -r 'if type == "object" and .type == "file" then .sha // "" else "" end' <<<"$reply" 2>/dev/null) || base_blob=""
+            elif grep -qF '(HTTP 404)' "$err" \
+                 && [ "$(jq -r '.message // ""' <<<"$reply" 2>/dev/null)" = "Not Found" ]; then
+              # A missing REF is a 404 too ("No commit found for the ref");
+              # only "Not Found" is the file missing on the default branch.
+              cause=install
+            fi
+          fi
+          if [[ $head_blob =~ $sha_re ]] && [[ $base_blob =~ $sha_re ]]; then
+            if [ "$head_blob" = "$base_blob" ]; then
+              changed=false
+              cause=same
+            else
+              cause=edit
+            fi
+          fi
+          {
+            echo "changed=$changed"
+            echo "cause=$cause"
+            echo "path=$path"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$changed" = false ]; then
+            echo "caller check: ${path} matches the default branch's copy - reviewing with the Claude App token"
+          else
+            echo "::notice::caller check: cause=${cause}${path:+ (${path})} - reviewing with the job token, so inline comments come from github-actions[bot]"
+          fi
+
       # Wall-clock anchor for the lost-findings guard below: only comments the
       # review bot creates AFTER this instant count as this run's output. A
       # re-run attempt gets a fresh anchor, so an earlier attempt's comments
@@ -349,9 +450,17 @@ jobs:
         # this lane runs the version pinned above), and that CLI's handling of
         # project files has not been reviewed for them yet. The pin moved off
         # @v1 after v1.0.113/.114 broke the CLI install (ci-workflows#37).
+        # A bump must also re-check what the caller check relies on: a
+        # `github_token` input skips the OIDC exchange and is never revoked,
+        # and a validation skip still exits 0 with no `conclusion`.
         uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The job token when this PR changes its calling workflow, or when
+          # the caller check could not prove it does not; '' otherwise, the
+          # action's default (the OIDC exchange for the Claude App token).
+          # See "Caller check" above.
+          github_token: ${{ steps.caller.outputs.changed != 'false' && github.token || '' }}
           # Use the verified pin; otherwise the action installs its own CLI version.
           path_to_claude_code_executable: ${{ steps.claude_install.outputs.executable }}
           # Allow bot-initiated PRs (dependabot, renovate). Without this the
@@ -447,6 +556,130 @@ jobs:
             --max-budget-usd ${{ inputs.max_budget_usd }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Task,Agent,Skill,Workflow"
+
+      # REVIEW-RAN CHECK. claude-code-action can end its step `success` having
+      # reviewed nothing: on the workflow-validation skip (see "Caller check")
+      # it returns before Claude runs and never calls setFailed, and so would
+      # any other early return. Such a run sets neither the `conclusion` nor
+      # the `execution_file` output. A run that reviewed sets `conclusion` to
+      # success or failure, and a run that errors fails the step. So success
+      # with no conclusion means NOTHING WAS REVIEWED, and a required check
+      # must not go green on that: this step fails the job (fail closed). With
+      # the caller check in place it fires only on a skip nobody expected,
+      # which is exactly when a human has to look.
+      #
+      # Decision first, reporting second, as in the bot-skip step:
+      # `reviewed=false` is written before any API call, and the exit 1 stands
+      # whether or not the comment lands. The comment is ONE sticky per PR:
+      # later runs find the github-actions[bot] comment that starts and ends
+      # with its markers and PATCH it, so it never duplicates and never edits
+      # anyone else's comment. If the comments cannot be listed, nothing is
+      # posted rather than risk a duplicate. A failed post retries 3x, then
+      # degrades to a warning with the body in the log, the runner's
+      # workflow-command prefixes broken as in the summary step. A reviewed
+      # run makes no API call. Pinned by
+      # selftest/test_claude_review_ran_check.sh.
+      - name: Review-ran check (claude-code-action can exit 0 without reviewing)
+        id: ran
+        if: ${{ !cancelled() && steps.bot_check.outputs.skipped != 'true' && steps.claude.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+          CALLER_CHANGED: ${{ steps.caller.outputs.changed }}
+          CALLER_CAUSE: ${{ steps.caller.outputs.cause }}
+          CALLER_PATH: ${{ steps.caller.outputs.path }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          case "${CONCLUSION:-}" in
+            success|failure)
+              echo "reviewed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "reviewed=false" >> "$GITHUB_OUTPUT"
+
+          # What the caller check knew. The path is re-validated before it
+          # reaches the comment.
+          path_re='^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$'
+          file=""
+          if [[ ${CALLER_PATH:-} =~ $path_re ]]; then
+            file=" \`${CALLER_PATH}\`"
+          fi
+          if [ "${CALLER_CHANGED:-}" = false ]; then
+            cause="This PR's calling workflow${file}, as this run checked it out, matched the default branch's copy, so the run asked for the Claude App token as usual. If the action's workflow validation refused it anyway, it compared a different copy: the default branch changed during the run, or the validation read another commit of this PR. Update the branch from the default branch first."
+            short="caller unchanged, App token requested"
+          else
+            case "${CALLER_CAUSE:-}" in
+              install)
+                cause="This PR adds its calling workflow${file}. The action's App-token exchange refuses such a PR (workflow validation), so this run gave the action the job token instead."
+                short="caller added, job token used"
+                ;;
+              edit)
+                cause="This PR changes its calling workflow${file}. The action's App-token exchange refuses such a PR (workflow validation), so this run gave the action the job token instead."
+                short="caller changed, job token used"
+                ;;
+              *)
+                cause="This run could not compare its calling workflow${file} with the default branch's copy, so it gave the action the job token as a precaution."
+                short="caller check inconclusive, job token used"
+                ;;
+            esac
+          fi
+          marker="<!-- claude-review:not-reviewed -->"
+          end_marker="<!-- claude-review:not-reviewed:end -->"
+          comment="${RUNNER_TEMP:?RUNNER_TEMP is not set}/claude-review-not-reviewed.md"
+          {
+            echo "$marker"
+            echo "### ⚠️ Not reviewed: \`review / Claude Review\` did not review this PR"
+            echo
+            echo "claude-code-action ended its step without running a review (it set no \`conclusion\`), so this check fails on purpose: a required review must not pass when nothing was reviewed. No file in this PR was reviewed."
+            echo
+            echo "${cause} The action still did not review, and why is not known: see the run log."
+            echo
+            echo "Re-run the check. If it fails the same way again, read the whole diff yourself before merging."
+            echo
+            echo "<sub>Claude Review · [workflow run](${RUN_URL}) · Every run of this check that ends without a review updates this comment; a later green run did review the PR.</sub>"
+            echo "$end_marker"
+          } > "$comment"
+
+          # This step's own sticky: the oldest github-actions[bot] comment
+          # that starts with the marker AND ends with the end marker, "" when
+          # there is none. Never another author's comment. The review summary
+          # is a github-actions[bot] comment too, and the model writes its
+          # beginning, but the summary step appends its own footer after the
+          # model's text, so no summary can end with the end marker.
+          sticky_id() {
+            gh api "repos/${REPO}/issues/${PR}/comments?per_page=100" --paginate \
+              | jq -r -n --arg m "$marker" --arg e "$end_marker" '[inputs[] | objects
+                  | ((.body // "") | tostring) as $b
+                  | select(.user.login == "github-actions[bot]" and ($b | startswith($m))
+                           and ($b | sub("\\s+$"; "") | endswith($e)))
+                  | .id] | first // empty'
+          }
+          id_re='^[0-9]+$'
+          posted=0
+          for i in 1 2 3; do
+            if id=$(sticky_id); then
+              if [[ $id =~ $id_re ]]; then
+                gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -F "body=@${comment}" > /dev/null && { posted=1; break; }
+              elif [ -z "$id" ]; then
+                gh pr comment "$PR" -R "$REPO" --body-file "$comment" > /dev/null && { posted=1; break; }
+              fi
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep "$((i * 5))"
+            fi
+          done
+          if [ "$posted" -ne 1 ]; then
+            echo "::warning::could not post the not-reviewed comment on PR #${PR} after 3 attempts (comments API failure; the check fails either way). The comment follows."
+            tr '\r' '\n' < "$comment" | sed -e 's/##\[/#?[/g' -e 's/^/    | /'
+          fi
+          shown=${CONCLUSION:-}
+          shown=${shown//[!A-Za-z0-9_.-]/_}
+          echo "::error::claude-code-action exited without reviewing PR #${PR} (step success, conclusion '${shown:0:40}'; ${short}). Failing so a required review cannot pass with nothing reviewed: re-run the check, and if it fails again read the whole diff before merging."
+          exit 1
 
       # THE SUMMARY IS POSTED HERE, NOT BY THE MODEL. The prompt used to have
       # the model post it itself, `gh pr comment <N> --body "..."` through an
@@ -592,7 +825,13 @@ jobs:
           STARTED_AT: ${{ steps.clock.outputs.started_at }}
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
           SUMMARY_FILE: ${{ steps.summary.outputs.file }}
-          REVIEW_BOT: claude[bot]
+          # Who posts the review's inline comments: github-actions[bot] when
+          # the caller check gave the review the job token, the Claude App's
+          # claude[bot] otherwise. Same predicate as the review step's
+          # `github_token`. Every workflow's job token is github-actions[bot],
+          # so on those runs step 2 counts only the comments this review's
+          # own inline-comment calls placed.
+          REVIEW_BOT: ${{ steps.caller.outputs.changed != 'false' && 'github-actions[bot]' || 'claude[bot]' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
         run: |
@@ -662,10 +901,36 @@ jobs:
           # '[inputs[] ...]'` flattens one page or many the same way.
           if ! gh api "repos/${REPO}/pulls/${PR}/comments?per_page=100" --paginate \
                  | jq -c -n --arg since "$STARTED_AT" --arg bot "$REVIEW_BOT" \
-                     '[inputs[] | objects | select(.user.login == $bot and .created_at >= $since) | {body: (.body // "")}]' \
+                     '[inputs[] | objects | select(.user.login == $bot and .created_at >= $since)
+                       | {body: (.body // ""), spot: "\(.path // "")#\(.line // .original_line // "")"}]' \
                  > "$T/posted.json"; then
             warn "could not list review comments on PR #${PR}; cannot verify inline findings - skipping"
             exit 0
+          fi
+          # JOB-TOKEN RUNS (the caller check gave the review github.token):
+          # github-actions[bot] is every workflow's job-token identity, so
+          # another workflow's inline comments in the window could stand in
+          # for this review's lost ones. Count only comments at a path#line
+          # this review's own inline-comment calls named; the action posts
+          # path and line as given (it rewrites the body), and a comment a
+          # later push outdated keeps that line as `original_line`. A
+          # transcript that cannot be read for them leaves the count as it
+          # was (fail safe). Accepted residual: another workflow commenting
+          # on the very same path and line in the same minutes still counts.
+          # Matching bodies would misfire whenever the action's sanitizer
+          # rewrites one (HTML comments, entities), and buffered comments
+          # post after the session, so their IDs never reach the transcript.
+          if [ "$REVIEW_BOT" = "github-actions[bot]" ] && [ "$HAVE_TRANSCRIPT" -eq 1 ]; then
+            if jq -c --arg t "$INLINE_TOOL" '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
+                   | select(.type == "tool_use" and .name == $t) | .input | objects
+                   | "\(.path // "")#\(.line // "")"] | unique' "$EXECUTION_FILE" > "$T/spots.json" 2>/dev/null \
+               && jq -c --slurpfile s "$T/spots.json" '[.[] | select(.spot as $k | any($s[0][]; . == $k))]' \
+                    "$T/posted.json" > "$T/posted.mine.json" 2>/dev/null; then
+              note "job-token run: $(jq 'length' "$T/posted.mine.json") of $(jq 'length' "$T/posted.json") github-actions[bot] inline comment(s) sit where this review's inline-comment calls pointed"
+              mv "$T/posted.mine.json" "$T/posted.json"
+            else
+              warn "job-token run: could not match inline comments to this review's calls - counting every github-actions[bot] inline comment since ${STARTED_AT}"
+            fi
           fi
           POSTED=$(jq 'length' "$T/posted.json")
 
