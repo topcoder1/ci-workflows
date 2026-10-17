@@ -44,27 +44,36 @@ jobs:
   # run of the calling workflow on the head commit, whatever order runs
   # finish in, and a `skipped` check satisfies the requirement, even over
   # an older run's failure (measured 2026-10-16 in a private scratch repo).
-  # The event payload's draft flag is a copy taken when the event fired. A
-  # push to a draft PR followed about a second later by `gh pr ready` can
-  # create the draft-payload `synchronize` run AFTER the `ready_for_review`
-  # run. The review job used to gate on that copy alone, so the newer run
-  # published `review / Claude Review` = skipped: the PR read as reviewed
-  # while its real review was still running, or after the review failed.
+  # The event payload's draft flag is a copy, and a push to a draft PR
+  # followed seconds later by `gh pr ready` can leave a draft-payload
+  # `synchronize` run as the head's newest run: created AFTER the
+  # `ready_for_review` run, or the ONLY run on the head when the ready
+  # event carried the previous head (both seen in that lab, 2026-10-17).
+  # The review job used to gate on that copy alone, so the run published
+  # `review / Claude Review` = skipped: over a review still running or
+  # failed, or with no review of that head at all.
   #
   # So a run whose payload says draft reads the PR's draft flag NOW, and
   # the review is skipped only when the PR is still a draft: a skip needs
   # the payload AND the live read to agree, so no run skips that did not
-  # skip before. A skip on a live draft is safe. GitHub merges no draft,
-  # and marking the PR ready fires `ready_for_review`. Every caller must
-  # listen for that (lint.yml's draft-gate check fails a caller that does
-  # not), so it creates a NEWER run, and that run's review is the verdict.
-  # A run whose payload says ready skips this job and reviews as before, at
-  # no added cost or latency.
+  # skip before. A `true` is read again 15 s later, and the skip needs
+  # both: in that lab a push event's own payload carried a draft flag that
+  # was seconds stale, and a stale `true` can leave a head unreviewed. A
+  # skip on a live draft is safe. GitHub merges no draft, and marking the
+  # PR ready fires `ready_for_review`. Every caller must listen for that
+  # (lint.yml's draft-gate check fails a caller that does not), so it
+  # creates a NEWER run, whose review is the verdict. When that event
+  # carried the previous head instead, the ready came before GitHub took
+  # the push, and the new head's run, created after that, reads the PR
+  # after the ready. A run whose payload says ready skips this job and
+  # reviews as before, at no added cost or latency.
   #
   # FAIL CLOSED: a read that fails three times, or returns anything but a
   # bare true or false, writes `unknown`, and the review runs. So does a
-  # gate job that dies or times out before it writes: the review's `if:`
-  # skips on the exact output 'true' only.
+  # gate job that dies or times out before it writes (measured: its own
+  # check then reads failure or cancelled); the review's `if:` skips on
+  # the exact output 'true' only, and `!cancelled()` reads the run, not
+  # this job.
   #
   # Permissions: a reusable's job cannot ask for more than its caller
   # grants (fleet callers: contents read, pull-requests write, id-token
@@ -73,10 +82,13 @@ jobs:
   # "Expected". Reading the PR needs `pull-requests: read`, and that is all
   # this job holds.
   #
-  # Accepted cost: in that push-then-ready race the draft-payload run finds
-  # the PR ready and reviews, and so does the `ready_for_review` run, so
-  # that head is reviewed twice (see the guard's OVERLAP NOTE below).
-  # Pinned by selftest/test_claude_review_live_draft_gate.py.
+  # Accepted cost: a ready that lands after a draft-payload event, but
+  # before that run's gate reads (about a runner pickup), makes that run
+  # review. When the `ready_for_review` run is on the same head, the head
+  # is reviewed twice. The draft-payload run sits in the caller's draft
+  # concurrency group, which no live run cancels, so it keeps reviewing
+  # even after a newer push replaces its head (see the guard's OVERLAP
+  # NOTE below). Pinned by selftest/test_claude_review_live_draft_gate.py.
   live_draft:
     name: Live draft state
     runs-on: ubuntu-latest
@@ -95,16 +107,18 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
-          draft=unknown
-          if [[ ${PR:-} =~ ^[0-9]+$ ]]; then
+          # One read, retried. Prints true or false, or unknown when no
+          # exit-0 reply was a bare true or false. gh prints an HTTP
+          # error's JSON body to STDOUT, so only the exit status says
+          # whether `reply` is the flag.
+          read_draft() {
+            local attempt reply
             for attempt in 1 2 3; do
-              # gh prints an HTTP error's JSON body to STDOUT, so only the
-              # exit status says whether `reply` is the flag.
               if reply=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.draft'); then
                 case "$reply" in
                   true|false)
-                    draft=$reply
-                    break
+                    echo "$reply"
+                    return 0
                     ;;
                 esac
               fi
@@ -112,10 +126,20 @@ jobs:
                 sleep "$((attempt * 5))"
               fi
             done
+            echo unknown
+          }
+          draft=unknown
+          if [[ ${PR:-} =~ ^[0-9]+$ ]]; then
+            draft=$(read_draft)
+            # A skip needs a second true, 15 s later (see the job comment).
+            if [ "$draft" = true ]; then
+              sleep 15
+              draft=$(read_draft)
+            fi
           fi
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
           case "$draft" in
-            true) echo "PR #${PR} is still a draft: the review is skipped. Marking it ready fires ready_for_review, and that run reviews it." ;;
+            true) echo "PR #${PR} is still a draft (read twice, 15 s apart): the review is skipped. Marking it ready fires ready_for_review, and that run reviews it." ;;
             false) echo "::notice::PR #${PR} was marked ready after this run's event fired: reviewing, although the event says draft." ;;
             *) echo "::warning::could not read the live draft flag of PR #${PR:-?}: reviewing (fail closed)." ;;
           esac
@@ -894,17 +918,19 @@ jobs:
       # overlap: every caller installed from
       # templates/ci-workflows/callers/pr-review.yml carries `concurrency:
       # claude-review-<pr>-<draft|live>, cancel-in-progress: true`, and a
-      # cancelled run's guard never executes (`!cancelled()`). One pair
-      # does: in the push-then-ready race, a draft-payload run that finds
-      # the PR ready reviews too (see live_draft), beside the
-      # `ready_for_review` run, in the other group. Each guard then counts
-      # the other run's inline comments, so a loss in one run is masked
-      # only while the other run posted at least as many on the PR.
-      # Accepted: the two reviews read the same PR within seconds of each
-      # other. A job-level concurrency group in this reusable would make
-      # that caller-independent — deliberately not bundled into this
-      # change: a third run on one group cancels a waiting one, and a
-      # cancelled newest run blocks the required check.
+      # cancelled run's guard never executes (`!cancelled()`). One kind
+      # does overlap: a draft-payload run that finds the PR ready reviews
+      # too (see live_draft), in the caller's draft group, which no live
+      # run cancels. It can run beside the `ready_for_review` run, and
+      # beside the run of any push made while it is still reviewing. Each
+      # guard then counts the other run's inline comments, so a loss in
+      # one run is masked only while the other run posted at least as many
+      # on the PR. Accepted: it needs a ready within seconds of a push to a
+      # draft, and a loss inside that review's window. A job-level
+      # concurrency group in this reusable would make that
+      # caller-independent — deliberately not bundled into this change: a
+      # third run on one group cancels a waiting one, and a cancelled
+      # newest run blocks the required check.
       #
       # ORDERING NOTE: claude-code-action's "Post buffered inline comments"
       # is a regular composite step (composite actions have no `post:`

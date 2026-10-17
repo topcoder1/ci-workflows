@@ -4,15 +4,16 @@ THE GAP. GitHub judges a required check by the newest-created run of the
 calling workflow on the head commit, whatever order the runs finish in, and a
 `skipped` check satisfies the requirement, even over an older run's failure
 (measured 2026-10-16 in a private scratch repo). The review job used to gate
-on the event payload's draft flag alone. A push to a draft PR followed about a
-second later by `gh pr ready` can create the draft-payload `synchronize` run
-AFTER the `ready_for_review` run, so the newer run published
-`review / Claude Review` = skipped, and the PR read as reviewed while its real
-review was still running, or after that review failed.
+on the event payload's draft flag alone. A push to a draft PR followed seconds
+later by `gh pr ready` can leave a draft-payload `synchronize` run as the
+head's newest run: created AFTER the `ready_for_review` run, or the ONLY run on
+the head when the ready event carried the previous head (both seen in that
+lab). That run published `review / Claude Review` = skipped, over a review
+still running or failed, or with no review of the head at all.
 
 THE FIX. A run whose payload says draft runs the `live_draft` job, which reads
-the PR's draft flag at run time. The review is skipped only when that read
-also says draft. Three layers pin it:
+the PR's draft flag at run time, and reads a `true` again 15 s later. The
+review is skipped only when both reads say draft. Three layers pin it:
 
 1. Wiring, EVALUATED: both jobs' `if:` conditions run through a small
    evaluator for the GitHub expression subset they use (&& and || return an
@@ -20,15 +21,18 @@ also says draft. Three layers pin it:
    mismatched types to numbers, an `if:` without a status function carries an
    implicit success(), which a skipped `needs` fails). They are checked
    against a HARDCODED truth table over payload, gate outcome and
-   cancellation, never compared as text. The gate job's permissions must fit
-   inside the fleet caller's grant: a reusable job that asks for more fails
-   every run at startup, which publishes no check at all.
+   cancellation, never compared as text, and the shipped review `if:` must
+   skip nothing the old gate reviewed over a wider grid of gate endings. The
+   gate job's permissions must fit inside the fleet caller's grant: a reusable
+   job that asks for more fails every run at startup, which publishes no check
+   at all.
 2. The shipped bash: the read step is extracted from the workflow and run
    under /bin/bash with the runner's flags (-eo pipefail) against a stubbed
    `gh` and `sleep`. Only an exit-0 reply that is exactly `true` or `false`
    counts. Anything else (an error body on stdout, which gh prints with exit
    1, null, a quoted or capitalized literal, two lines) is retried, then
-   written as `unknown`, which reviews.
+   written as `unknown`, which reviews. A `true` is confirmed by a second
+   read 15 s later, and the second read decides.
 3. Negative controls: mutants of the workflow text and of the extracted
    script, each a plausible regression, must each fail layer 1 or 2. The
    evaluator and the stub have their own controls.
@@ -221,24 +225,30 @@ def job_runs(job, ctx, needs_results, cancelled):
 # payload at all (null), which reviews, as it always has.
 PAYLOADS = (True, False, None)
 # What the gate job can leave behind when it runs: (result, its `draft`
-# output). It writes true/false/unknown and exits 0; a job that died or timed
-# out before writing leaves the output unset (null) or empty.
+# output). It writes true/false/unknown and exits 0. A job that dies (failure)
+# or times out (cancelled, measured) keeps whatever it wrote: nothing, or a
+# `true` written just before it died.
 GATE_ENDINGS = (
     ("success", "true"),
     ("success", "false"),
     ("success", "unknown"),
     ("failure", None),
     ("failure", ""),
+    ("failure", "true"),
+    ("cancelled", None),
+    ("cancelled", ""),
+    ("cancelled", "true"),
 )
 
 
-def expected_review(payload, gate_result, gate_output, cancelled):
+def expected_review(payload, gate_output, cancelled):
     """THE TRUTH TABLE, hardcoded. The review is skipped only on a draft
-    payload whose live read said draft, or on a cancelled run (a newer run
-    superseded it and carries the verdict)."""
+    payload whose gate wrote `true`, whatever became of the gate after it
+    wrote, or on a cancelled run (a newer run superseded it and carries the
+    verdict)."""
     if cancelled:
         return False
-    return not (payload is True and gate_result == "success" and gate_output == "true")
+    return not (payload is True and gate_output == "true")
 
 
 def scenarios():
@@ -345,14 +355,36 @@ def wiring_problems(doc):
                 f"needs.{GATE_JOB}.outputs.draft": output,
             }
             got = job_runs(review, ctx, [result], cancelled)
-            want = expected_review(payload, result, output, cancelled)
+            want = expected_review(payload, output, cancelled)
             if got != want:
                 problems.append(
                     f"review runs={got} for payload draft={payload!r}, gate {result} "
                     f"output={output!r}, cancelled={cancelled}; want {want}"
                 )
+        problems += subset_problems(review)
     except (ValueError, KeyError) as exc:
         problems.append(f"an `if:` the evaluator cannot read: {exc}")
+    return problems
+
+
+def subset_problems(review):
+    """The fix may only ADD reviews. The old gate skipped every draft payload
+    and nothing else, so on the shipped review `if:`, a run that was not
+    cancelled may skip only on a draft payload. Checked over a grid wider than
+    the table: every gate result, and outputs the gate never writes."""
+    problems = []
+    for payload in PAYLOADS:
+        for result in ("success", "failure", "cancelled", "skipped"):
+            for output in (None, "", "true", "TRUE", "false", "unknown", "draft"):
+                ctx = {
+                    "github.event.pull_request.draft": payload,
+                    f"needs.{GATE_JOB}.outputs.draft": output,
+                }
+                if payload is not True and not job_runs(review, ctx, [result], False):
+                    problems.append(
+                        f"review skipped on payload draft={payload!r}, gate {result} "
+                        f"output={output!r}: the old gate reviewed that run"
+                    )
     return problems
 
 
@@ -394,12 +426,15 @@ def test_wiring_and_truth_table():
 
 
 def test_no_skip_outside_the_old_skip_set():
-    """The fix may only ADD reviews: every (non-cancelled) skip it allows was a
-    skip under the old payload-only gate, which skipped every draft payload."""
-    for payload, result, output, cancelled in scenarios():
-        if cancelled or expected_review(payload, result, output, cancelled):
-            continue
-        assert payload is True, (payload, result, output)
+    """subset_problems on the SHIPPED review `if:`, plus a control: an `if:`
+    that skips a ready payload must be caught, or the check is vacuous."""
+    review = load()["jobs"][REVIEW_JOB]
+    assert subset_problems(review) == []
+    mutant = {
+        **review,
+        "if": "${{ !cancelled() && needs.live_draft.outputs.draft == 'false' }}",
+    }
+    assert subset_problems(mutant)
 
 
 # --- layer 2: the shipped bash ---------------------------------------------
@@ -515,10 +550,18 @@ def gave_up(answers, pr="7"):
 
 # Hardcoded: the expectations are the contract.
 READS = {
-    "draft": Read([OK_TRUE], "true", 1, [], "is still a draft"),
+    # A `true` is read again 15 s later; the stub repeats its last answer.
+    "draft": Read([OK_TRUE], "true", 2, ["15"], "is still a draft"),
     "ready": Read([OK_FALSE], "false", 1, [], "::notice::"),
+    # Readied between the two reads, or the second read failed: it decides.
+    "draft-then-ready": Read([OK_TRUE, OK_FALSE], "false", 2, ["15"], "::notice::"),
+    "draft-then-error": Read(
+        [OK_TRUE, ERROR], "unknown", 4, ["15", "5", "10"], "::warning::"
+    ),
     "error-thrice": gave_up([ERROR]),
-    "error-then-draft": Read([ERROR, OK_TRUE], "true", 2, ["5"], "is still a draft"),
+    "error-then-draft": Read(
+        [ERROR, OK_TRUE], "true", 3, ["5", "15"], "is still a draft"
+    ),
     "errors-then-ready": Read(
         [ERROR, ERROR, OK_FALSE], "false", 3, ["5", "10"], "::notice::"
     ),
@@ -639,8 +682,13 @@ def test_workflow_mutant_is_caught(mutant):
 
 
 SCRIPT_MUTANTS = {
-    # The unknown path reads as draft: every failed read skips the review.
-    "unknown is draft": ("draft=unknown\n", "draft=true\n"),
+    # A read that never got a usable reply reads as draft: every failed
+    # read skips the review.
+    "failed read is draft": ("  echo unknown\n", "  echo true\n"),
+    # Without a PR number the step reads nothing; that reads as draft.
+    "no pr is draft": ("draft=unknown\n", "draft=true\n"),
+    # One `true` decides: a stale first read skips the review.
+    "no confirmation read": ("    sleep 15\n    draft=$(read_draft)\n", "    :\n"),
     # The exit status ignored: a failed call's stdout taken as the flag.
     "exit status ignored": (
         "if reply=$(gh api \"repos/${REPO}/pulls/${PR}\" --jq '.draft'); then",
