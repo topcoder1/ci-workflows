@@ -50,12 +50,30 @@
 #      `==> FAIL` verdict, so an unbound variable or a SyntaxError (both exit
 #      1) is an ERROR; and malformed answers reach the digest, a PUBLIC issue,
 #      as API errors carrying none of their bytes
+#   h  the rules call reads every page (2026-10-17): a required_status_checks
+#      rule as rule 31 (past the 30 an unpaginated call read) or rule 101
+#      (past a page of 100) is validated, in both forms gh --paginate prints;
+#      a bad rule on page 1 of 2, a page 2 that is not a list, and a page 2
+#      that fails each exit 3, echoing none of the answer
+#   i  --branch and workflow file names go into the URL percent-encoded, `/`
+#      kept (2026-10-17): a file name with `#`, `?`, `%` or a space is read as
+#      that file, a branch with `#` or `%41` is read as that branch, and an
+#      API error names the endpoint as it was sent
 # Negative controls (the shim reproduces each old failure, run verbatim):
 #   n1 the old rules fetch + filter dies with jq exit 5 on case a's 401
 #   n4 the old rules fetch reads case a's no-response failure as "no branch
 #      rules found" and exits 0: a repo it never reached passes as clean
 #   n2 the old listing fetch reads case b's 403 as zero workflow names
 #   n3 the old per-file fetch turns case b's 404 into an empty workflow file
+# Shim controls: cases h and i tell the fix from the bug only while the shim
+# reads a request as gh and GitHub do, so these pin it on the requests the
+# validator sent before them (the rules call without --paginate, each value
+# as it was given) and on both forms --paginate prints:
+#   s1 the rules answer comes 30 rules a page, and per_page and page select
+#   s2 --paginate prints every page, as one array or as an array per page
+#   s3 explicit page bytes print as given, a failing page included
+#   s4 an unencoded `#`, `?` or bad `%` reads another file or fails in gh,
+#      and an unencoded branch reads another branch's rules
 #
 # Run from the repo root:
 #   bash selftest/test_audit_required_checks.sh
@@ -81,12 +99,32 @@ show() { cat -- "$@" 2>/dev/null || true; }
 
 # ---------------------------------------------------------------------------
 # The shim. One fake repo per directory; `fail` holds "<rest> <status>" lines
-# (<rest> is the endpoint after /repos/<owner>/<repo>/), `listing.json`, when
-# present, replaces the generated directory listing, and `answers/<file>`
-# replaces a workflow file's contents answer. Every call is logged. Like gh,
-# it applies a --jq filter itself, and a filter that fails prints part of the
-# response in its error (measured 2026-10-16, gh 2.97.0:
+# (<rest> is the endpoint after /repos/<owner>/<repo>/ in the request gh
+# sends, query string included), `listing.json`, when present, replaces the
+# generated directory listing, and `answers/<file>` replaces a workflow file's
+# contents answer. With a `branch-rules/` directory, each branch's rules are
+# in branch-rules/<branch>/rules.json and any other branch has none;
+# `pages_apart` prints a --paginate rules answer as an array per page; and
+# `rule-pages/<n>.json` holds the bytes gh prints for page <n> of the rules
+# answer, or `<n>.fail` the status that page fails with. Every call is
+# logged. Like gh, it applies a --jq filter itself, and a filter that fails
+# prints part of the response in its error (measured 2026-10-16, gh 2.97.0:
 # `expected an object but got: array ([{"_links":{"git":"https: ...])`).
+#
+# It reads an endpoint the way gh 2.97.0 and GitHub did, measured 2026-10-16
+# on topcoder1/dotclaude and against a local server, and 2026-10-17 on this
+# repo. gh parses the endpoint as a URL. It never sends a #fragment
+# (`rules/branches/main#x` read main's rules), and a % in the path that starts
+# no %XX escape fails in gh before anything is sent (`invalid URL escape
+# "%zz"`, rc 1). GitHub decodes %XX in the path (`rules/branches/ma%69n` read
+# main's rules) and in the query, where `&` starts the next parameter and a
+# parameter with a bad % is dropped. It pages the rules answer, 30 rules a
+# page unless per_page asks for up to 100. gh --paginate asks for 100 unless
+# the endpoint names a per_page, follows every next page, and prints the pages
+# of an array as one array, the `]` only after the last page (a null page 2
+# printed `[{"type":"deletion"}null`, rc 0; a 403 on page 2 printed page 1,
+# then the error body, rc 1). gh's help instead describes an array per page,
+# the form `pages_apart` gives.
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin" "$T/gh"
 cat > "$T/bin/gh" <<'STUB'
@@ -97,7 +135,13 @@ if [ "${1:-}" != api ]; then
   echo "shim: unexpected gh $*" >&2
   exit 98
 fi
-ep="${2#/}"
+url="${2%%#*}"
+bad_escape='%($|[^0-9A-Fa-f]|[0-9A-Fa-f]($|[^0-9A-Fa-f]))'
+if grep -Eq "$bad_escape" <<< "${url%%\?*}"; then
+  echo "parse \"https://api.github.com/${url#/}\": invalid URL escape" >&2
+  exit 1
+fi
+ep="${url#/}"
 ep="${ep#repos/}"
 owner="${ep%%/*}"
 ep="${ep#*/}"
@@ -105,11 +149,35 @@ repo="${ep%%/*}"
 rest="${ep#*/}"
 dir="$GH_FAKE/$owner/$repo"
 filter=""
+paginate=no
 prev=""
 for a in "$@"; do
   if [ "$prev" = "--jq" ]; then filter="$a"; fi
+  if [ "$a" = --paginate ]; then paginate=yes; fi
   prev="$a"
 done
+pct_decode() { printf '%b' "${1//%/\\x}"; }
+path=$(pct_decode "${rest%%\?*}")
+per_page="" page=1
+case "$rest" in
+  *\?*) query="${rest#*\?}" ;;
+  *) query="" ;;
+esac
+while [ -n "$query" ]; do
+  param="${query%%&*}"
+  case "$query" in
+    *'&'*) query="${query#*&}" ;;
+    *) query="" ;;
+  esac
+  if grep -Eq "$bad_escape" <<< "$param"; then continue; fi
+  case "$param" in
+    per_page=*) per_page=$(pct_decode "${param#*=}") ;;
+    page=*) page=$(pct_decode "${param#*=}") ;;
+  esac
+done
+if [ -z "$per_page" ]; then
+  if [ "$paginate" = yes ]; then per_page=100; else per_page=30; fi
+fi
 respond() { # the answer on stdin -> stdout, through --jq when one was given
   local body
   body=$(cat)
@@ -147,9 +215,56 @@ if [ -f "$dir/fail" ]; then
   done < "$dir/fail"
 fi
 [ -d "$dir" ] || fail_with 404
-case "$rest" in
+serve_rules() { # rules file -> the rules answer, paged
+  local n from total
+  if [ -d "$dir/rule-pages" ]; then
+    # Page after page, as given; with --paginate, up to the first page that
+    # fails, which ends the call with that page's error.
+    n="$page"
+    while :; do
+      if [ -f "$dir/rule-pages/$n.fail" ]; then
+        fail_with "$(cat "$dir/rule-pages/$n.fail")"
+      fi
+      cat "$dir/rule-pages/$n.json"
+      n=$((n + 1))
+      if [ "$paginate" = no ]; then break; fi
+      if [ ! -f "$dir/rule-pages/$n.json" ] && [ ! -f "$dir/rule-pages/$n.fail" ]; then
+        break
+      fi
+    done
+    return
+  fi
+  if ! jq -e 'type == "array"' "$1" > /dev/null 2>&1; then
+    cat "$1" # not a list: nothing to page
+    return
+  fi
+  case "$per_page" in '' | *[!0-9]*) per_page=30 ;; esac
+  case "$page" in '' | *[!0-9]*) page=1 ;; esac
+  if [ "$per_page" -gt 100 ]; then per_page=100; fi
+  from=$(((page - 1) * per_page))
+  if [ "$paginate" = no ]; then
+    jq -c --argjson from "$from" --argjson n "$per_page" '.[$from:$from + $n]' "$1"
+  elif [ -f "$dir/pages_apart" ]; then
+    total=$(jq length "$1")
+    while :; do
+      jq -jc --argjson from "$from" --argjson n "$per_page" '.[$from:$from + $n]' "$1"
+      from=$((from + per_page))
+      if [ "$from" -ge "$total" ]; then break; fi
+    done
+  else
+    jq -c --argjson from "$from" '.[$from:]' "$1"
+  fi
+}
+case "$path" in
   rules/branches/*)
-    respond < "$dir/rules.json" ;;
+    branch="${path#rules/branches/}"
+    if [ ! -d "$dir/branch-rules" ]; then
+      serve_rules "$dir/rules.json"
+    elif [ -f "$dir/branch-rules/$branch/rules.json" ]; then
+      serve_rules "$dir/branch-rules/$branch/rules.json"
+    else
+      echo '[]'
+    fi ;;
   contents)
     echo '[{"name":"README.md","type":"file"}]' | respond ;;
   contents/.github/workflows)
@@ -160,7 +275,7 @@ case "$rest" in
       (cd "$dir/workflows" && ls) | jq -R . | jq -s 'map({name: ., type: "file"})' | respond
     fi ;;
   contents/.github/workflows/*)
-    name="${rest#contents/.github/workflows/}"
+    name="${path#contents/.github/workflows/}"
     if [ -f "$dir/answers/$name" ]; then
       respond < "$dir/answers/$name"
     else
@@ -195,6 +310,18 @@ rules_json() { # required contexts... -> a rules answer in the API's shape
   local ctx="" c
   for c in "$@"; do ctx="$ctx${ctx:+,}{\"context\":\"$c\"}"; done
   printf '[{"type":"deletion","ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":1},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"do_not_enforce_on_create":false,"required_status_checks":[%s]},"ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":1}]\n' "$ctx"
+}
+rules_after() { # count, required contexts... -> a rules answer: count rules
+  # that require no check, then a required_status_checks rule listing the
+  # contexts, rule count + 1
+  jq -nc --argjson n "$1" '
+    [range(1; $n + 1)
+     | {type: "deletion", ruleset_source_type: "Repository", ruleset_source: "o/r", ruleset_id: .}]
+    + [{type: "required_status_checks",
+        parameters: {strict_required_status_checks_policy: false, do_not_enforce_on_create: false,
+                     required_status_checks: [$ARGS.positional[] | {context: .}]},
+        ruleset_source_type: "Repository", ruleset_source: "o/r", ruleset_id: ($n + 1)}]' \
+    --args "${@:2}"
 }
 fake_repo() { # owner/repo, rules answer, workflow fixtures...
   local d="$T/gh/$1" w
@@ -696,6 +823,185 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# h. The rules call reads every page. The endpoint pages its answer, 30 rules
+#    a page unless per_page asks for up to 100, and the required_status_checks
+#    rule can be on any page. Read without --paginate, one past page 1 was
+#    never seen, and the branch passed as having no required checks, exit 0,
+#    even with a required context that has no producer. Each case runs in
+#    both forms --paginate output takes: gh 2.97.0 prints the pages of an
+#    array as one array, and gh's help describes an array per page.
+# ---------------------------------------------------------------------------
+# Rule 31 is past the 30 rules an unpaginated call reads; rule 101 is past
+# the first page of 100 that --paginate asks for.
+for rule_no in 31 101; do
+  for form in one-array array-per-page; do
+    r="topcoder1/rule$rule_no-$form"
+    fake_repo "$r" "$(rules_after $((rule_no - 1)) test "plan-proofs / verify")" ci.yml
+    if [[ $form == array-per-page ]]; then touch "$T/gh/$r/pages_apart"; fi
+    run_validator "$r"
+    if [[ $VRC -eq 1 ]] && has "$T/v.out" "found 2 required context(s):" &&
+      has "$T/v.out" "✓  test" && has "$T/v.out" "✗  plan-proofs / verify"; then
+      pass "h: a required check rule as rule $rule_no is read and validated ($form)"
+    else
+      fail "h: rule $rule_no ($form) should be read and its phantom found, exit 1 (got $VRC)"
+      show "$T/v.out" "$T/v.err"
+    fi
+  done
+done
+
+# Printed as an array per page, the answer is several JSON values, and jq
+# goes by the last one only, in `jq -e` and in its exit status alike (jq
+# 1.7.1, measured 2026-10-17: an error on an earlier input still exits 0).
+# Unmerged, a rule that is not an object on page 1 of 2 read as a clean pass;
+# it must fail the answer as it does when there is one page.
+fake_repo topcoder1/badpage "$(rules_after 100 test | jq -c '.[0] = "PRIVATE-BODY-CANARY-badpage"')" ci.yml
+touch "$T/gh/topcoder1/badpage/pages_apart"
+run_validator topcoder1/badpage
+if [[ $VRC -eq 3 ]] &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/badpage/rules/branches/main did not answer an array of rules" &&
+  api_error_only && no_body_bytes; then
+  pass "h: a bad rule on page 1 of 2 exits 3 and echoes none of the answer"
+else
+  fail "h: a bad rule on page 1 of 2 should exit 3 (got $VRC)"
+  show "$T/v.out" "$T/v.err"
+fi
+
+rule_pages() { # owner/repo, page-1 form, page 1's rules, page 2's bytes or HTTP status
+  # Page 1 as gh prints it: an array of its own, or (gh 2.97.0) the array
+  # left open for the pages after it.
+  local d="$T/gh/$1/rule-pages"
+  mkdir -p "$d"
+  if [[ $2 == gh-2.97.0 ]]; then
+    printf '%s' "${3%]}" > "$d/1.json"
+  else
+    printf '%s' "$3" > "$d/1.json"
+  fi
+  case "$4" in
+    [0-9][0-9][0-9]) echo "$4" > "$d/2.fail" ;;
+    *) printf '%s' "$4" > "$d/2.json" ;;
+  esac
+}
+page1=$(rules_after 29 "plan-proofs / verify" | sed 's#"o/r"#"PRIVATE-BODY-CANARY-page1"#g')
+for form in array-per-page gh-2.97.0; do
+  # A null page 2. An array per page prints `[page 1]null`, and jq's `add`
+  # takes a null for nothing at all: merged, it is page 1 alone, judged as if
+  # it held every rule, and page 1's phantom would exit 1. gh 2.97.0 prints
+  # `[page 1's rules null`, which is not JSON at all.
+  r="topcoder1/nullpage-$form"
+  fake_repo "$r" '[]' ci.yml
+  rule_pages "$r" "$form" "$page1" null
+  run_validator "$r"
+  if [[ $VRC -eq 3 ]] &&
+    has "$T/v.err" "API error: GET /repos/$r/rules/branches/main did not answer an array of rules" &&
+    api_error_only && no_body_bytes; then
+    pass "h: a page 2 that is not a list exits 3 and echoes none of the answer ($form)"
+  else
+    fail "h: a null page 2 ($form) should exit 3 (got $VRC)"
+    show "$T/v.out" "$T/v.err"
+  fi
+
+  # A page 2 that fails: gh --paginate exits 1 there, after printing the
+  # pages before it, and page 1's rules must never be judged on their own.
+  r="topcoder1/failpage-$form"
+  fake_repo "$r" '[]' ci.yml
+  rule_pages "$r" "$form" "$(rules_after 29 test)" 403
+  run_validator "$r"
+  if [[ $VRC -eq 3 ]] &&
+    has "$T/v.err" "API error: GET /repos/$r/rules/branches/main failed (HTTP 403)" &&
+    has "$T/v.err" "gh: Resource not accessible by personal access token (HTTP 403)" &&
+    api_error_only; then
+    pass "h: a page 2 that fails exits 3 naming its status ($form)"
+  else
+    fail "h: a page 2 that fails ($form) should exit 3 with HTTP 403 (got $VRC)"
+    show "$T/v.out" "$T/v.err"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# i. Values in the URL are percent-encoded. gh parses the endpoint as a URL,
+#    so a value spliced in as it is can read something else: `#` starts a
+#    fragment gh never sends, `?` starts the query, and a `%` that starts no
+#    %XX escape stops gh before it sends anything, while GitHub decodes any
+#    %XX that is left. A `/` is sent as it is.
+# ---------------------------------------------------------------------------
+# Each file is its repo's only producer of the required check. Unencoded,
+# `#` and `?` cut the name to `ci`, a file the repo does not have, and `%.`
+# stopped gh. A space always worked: gh escapes it itself.
+n=0
+for name in "ci#2.yml" "ci?2.yml" "50%.yml" "ci 2.yml"; do
+  n=$((n + 1))
+  r="topcoder1/filename$n"
+  fake_repo "$r" "$(rules_json test)"
+  cp "$T/wf/ci.yml" "$T/gh/$r/workflows/$name"
+  run_validator "$r"
+  if [[ $VRC -eq 0 ]] && has "$T/v.out" "✓  test" && has "$T/v.out" "target/$name (direct match"; then
+    pass "i: a workflow file named '$name' is read as that file"
+  else
+    fail "i: the file '$name' should be read as the producer of test, exit 0 (got $VRC)"
+    show "$T/v.out" "$T/v.err"
+  fi
+done
+
+# Only the named branch has rules. Unencoded, `#` cut it to `release` and
+# GitHub decoded %41 to `A`: branches with no rules, which read as a clean
+# pass.
+fake_repo topcoder1/branches '[]' ci.yml
+for branch in "release#2" "rel%41se"; do
+  mkdir -p "$T/gh/topcoder1/branches/branch-rules/$branch"
+  rules_json test "plan-proofs / verify" > "$T/gh/topcoder1/branches/branch-rules/$branch/rules.json"
+done
+for branch in "release#2" "rel%41se"; do
+  run_validator topcoder1/branches --branch "$branch"
+  if [[ $VRC -eq 1 ]] && has "$T/v.out" "(branch: $branch)" &&
+    has "$T/v.out" "✓  test" && has "$T/v.out" "✗  plan-proofs / verify"; then
+    pass "i: --branch '$branch' reads that branch's rules"
+  else
+    fail "i: --branch '$branch' should read its own rules and find the phantom, exit 1 (got $VRC)"
+    show "$T/v.out" "$T/v.err"
+  fi
+done
+
+# An API error names the endpoint as it was sent: a file read that fails, a
+# file answer that is not base64 content, and a rules answer that is not a
+# list, for a branch whose `/` is sent as it is.
+fake_repo topcoder1/sent "$(rules_json test)"
+cp "$T/wf/ci.yml" "$T/gh/topcoder1/sent/workflows/ci#2.yml"
+echo "contents/.github/workflows/ci%232.yml 404" > "$T/gh/topcoder1/sent/fail"
+run_validator topcoder1/sent
+if [[ $VRC -eq 3 ]] &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/sent/contents/.github/workflows/ci%232.yml failed (HTTP 404)" &&
+  api_error_only; then
+  pass "i: a failed read of 'ci#2.yml' names its endpoint as sent"
+else
+  fail "i: the 404 on 'ci#2.yml' should name .../ci%232.yml (got $VRC)"
+  show "$T/v.out" "$T/v.err"
+fi
+fake_repo topcoder1/sent2 "$(rules_json test)"
+cp "$T/wf/ci.yml" "$T/gh/topcoder1/sent2/workflows/ci#2.yml"
+answer topcoder1/sent2 "ci#2.yml" '{"type":"file","name":"ci#2.yml","encoding":"base64","content":"PRIVATE-BODY-CANARY not base64!"}'
+run_validator topcoder1/sent2
+if [[ $VRC -eq 3 ]] &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/sent2/contents/.github/workflows/ci%232.yml did not answer base64 file content" &&
+  api_error_only && no_body_bytes; then
+  pass "i: a 'ci#2.yml' answer that is not base64 content names its endpoint as sent"
+else
+  fail "i: the bad answer for 'ci#2.yml' should name .../ci%232.yml (got $VRC)"
+  show "$T/v.out" "$T/v.err"
+fi
+fake_repo topcoder1/sent3 '[]' ci.yml
+mkdir -p "$T/gh/topcoder1/sent3/branch-rules/rel/main#x"
+echo '{"message":"not a list","leak":"PRIVATE-BODY-CANARY-branch"}' > "$T/gh/topcoder1/sent3/branch-rules/rel/main#x/rules.json"
+run_validator topcoder1/sent3 --branch "rel/main#x"
+if [[ $VRC -eq 3 ]] &&
+  has "$T/v.err" "API error: GET /repos/topcoder1/sent3/rules/branches/rel/main%23x did not answer an array of rules" &&
+  api_error_only && no_body_bytes; then
+  pass "i: a rules answer for 'rel/main#x' that is not a list names its endpoint as sent"
+else
+  fail "i: the bad rules answer for 'rel/main#x' should name .../rel/main%23x (got $VRC)"
+  show "$T/v.out" "$T/v.err"
+fi
+
+# ---------------------------------------------------------------------------
 # Negative controls: the old code, verbatim from origin/main at bd86424
 # (scripts/validate-required-checks.sh lines 61-72, 94-95, 97-98), in its own
 # bash process under the old script's `set -euo pipefail`, against the same
@@ -768,6 +1074,105 @@ if [[ $NRC -eq 0 && -f "$T/old-target/ci.yml" && ! -s "$T/old-target/ci.yml" ]];
   pass "n3: the old per-file fetch turned the 404 into an empty ci.yml (rc 0)"
 else
   fail "n3: the old per-file fetch should swallow the 404 (got rc $NRC)"
+fi
+
+# ---------------------------------------------------------------------------
+# Shim controls. Cases h and i tell the fix from the bug only while the shim
+# reads a request the way gh and GitHub do (measured: see the shim). These pin
+# it on the requests origin/main at 71322c5 sent, the rules call without
+# --paginate and each value as it was given, and on both forms --paginate
+# prints.
+# ---------------------------------------------------------------------------
+shim() { # endpoint [gh args...] -> $SHRC, $T/s.out, $T/s.err
+  SHRC=0
+  GH_FAKE="$T/gh" "$T/bin/gh" api "$@" > "$T/s.out" 2> "$T/s.err" < /dev/null || SHRC=$?
+}
+
+fake_repo topcoder1/rules31 "$(rules_after 30 test)"
+shim /repos/topcoder1/rules31/rules/branches/main
+s1_first=$(jq -c '[length, any(.[]; .type == "required_status_checks")]' "$T/s.out" 2> /dev/null || true)
+shim "/repos/topcoder1/rules31/rules/branches/main?page=2"
+s1_second=$(jq -c 'map(.ruleset_id)' "$T/s.out" 2> /dev/null || true)
+shim "/repos/topcoder1/rules31/rules/branches/main?per_page=100"
+s1_whole=$(jq -c length "$T/s.out" 2> /dev/null || true)
+shim "/repos/topcoder1/rules31/rules/branches/main?per_page=1&page=2"
+s1_amp=$(jq -c 'map(.ruleset_id)' "$T/s.out" 2> /dev/null || true)
+shim "/repos/topcoder1/rules31/rules/branches/main?per_page=1%zz&page=2"
+s1_bad=$(jq -c 'map(.ruleset_id)' "$T/s.out" 2> /dev/null || true)
+if [[ $s1_first == "[30,false]" && $s1_second == "[31]" && $s1_whole == 31 &&
+  $s1_amp == "[2]" && $s1_bad == "[31]" ]]; then
+  pass "s1: the rules answer comes 30 rules a page; per_page and page select, & splits, a bad % drops its parameter"
+else
+  fail "s1: expected [30,false] [31] 31 [2] [31], got $s1_first $s1_second $s1_whole $s1_amp $s1_bad"
+fi
+
+fake_repo topcoder1/rules101 "$(rules_after 100 test)"
+shim /repos/topcoder1/rules101/rules/branches/main --paginate
+s2_one=$(jq -c length "$T/s.out" 2> /dev/null | tr '\n' ' ' || true)
+touch "$T/gh/topcoder1/rules101/pages_apart"
+shim /repos/topcoder1/rules101/rules/branches/main --paginate
+s2_apart=$(jq -c length "$T/s.out" 2> /dev/null | tr '\n' ' ' || true)
+if [[ $s2_one == "101 " && $s2_apart == "100 1 " ]]; then
+  pass "s2: --paginate asks for 100 rules a page and prints every page, as one array or an array per page"
+else
+  fail "s2: expected page lengths '101 ' and '100 1 ', got '$s2_one' and '$s2_apart'"
+fi
+
+fake_repo topcoder1/pagebytes '[]'
+pb="$T/gh/topcoder1/pagebytes/rule-pages"
+mkdir -p "$pb"
+printf '%s' '[{"type":"deletion"}]' > "$pb/1.json"
+printf '%s' null > "$pb/2.json"
+shim /repos/topcoder1/pagebytes/rules/branches/main
+s3_plain="$SHRC $(cat "$T/s.out")"
+shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
+s3_apart="$SHRC $(cat "$T/s.out")"
+printf '%s' '[{"type":"deletion"}' > "$pb/1.json"
+shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
+s3_open="$SHRC $(cat "$T/s.out")"
+rm "$pb/2.json"
+echo 403 > "$pb/2.fail"
+shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
+s3_fail="$SHRC $(cat "$T/s.out")"
+if [[ $s3_plain == '0 [{"type":"deletion"}]' && $s3_apart == '0 [{"type":"deletion"}]null' &&
+  $s3_open == '0 [{"type":"deletion"}null' &&
+  $s3_fail == '1 [{"type":"deletion"}{"message":"Resource not accessible by personal access token",'* ]] &&
+  has "$T/s.err" "gh: Resource not accessible by personal access token (HTTP 403)"; then
+  pass "s3: explicit pages print as given: one page, an array per page, gh 2.97.0's open array, a failing page 2"
+else
+  fail "s3: unexpected page bytes"
+  printf '%s\n' "$s3_plain" "$s3_apart" "$s3_open" "$s3_fail"
+fi
+
+fake_repo topcoder1/unencoded '[]' ci.yml
+uw="$T/gh/topcoder1/unencoded/workflows"
+printf 'cut\n' > "$uw/ci"
+for name in "ci#2.yml" "ci?2.yml" "50%.yml"; do cp "$T/wf/ci.yml" "$uw/$name"; done
+for branch in release relAse; do
+  mkdir -p "$T/gh/topcoder1/unencoded/branch-rules/$branch"
+  rules_json "from $branch" > "$T/gh/topcoder1/unencoded/branch-rules/$branch/rules.json"
+done
+unencoded() { # endpoint after /repos/topcoder1/unencoded/, a jq filter, what it must read
+  shim "/repos/topcoder1/unencoded/$1"
+  local got
+  got=$(jq -r "$2" "$T/s.out" 2> /dev/null || true)
+  if [[ $SHRC -eq 0 && $got == "$3" ]]; then
+    pass "s4: an unencoded '$1' reads $3"
+  else
+    fail "s4: '$1' should read $3, got '$got' (rc $SHRC)"
+    show "$T/s.err"
+  fi
+}
+unencoded "contents/.github/workflows/ci#2.yml" .name ci
+unencoded "contents/.github/workflows/ci?2.yml" .name ci
+unencoded "rules/branches/release#2" '.[1].parameters.required_status_checks[0].context' "from release"
+unencoded "rules/branches/rel%41se" '.[1].parameters.required_status_checks[0].context' "from relAse"
+shim "/repos/topcoder1/unencoded/contents/.github/workflows/50%.yml"
+if [[ $SHRC -eq 1 && ! -s "$T/s.out" ]] && has "$T/s.err" "invalid URL escape"; then
+  pass "s4: an unencoded '50%.yml' fails in gh, an invalid URL escape, before anything is sent"
+else
+  fail "s4: '50%.yml' should fail in gh with rc 1 and no answer (got rc $SHRC)"
+  show "$T/s.out" "$T/s.err"
 fi
 
 echo
