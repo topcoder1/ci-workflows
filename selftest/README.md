@@ -534,6 +534,32 @@ arbitrary helper scripts; that's a different kind of repo.
   per-PR group stays unsplit only because no job there gates on draft),
   `pr-review.yml` reverted to one group, and a job-level group, unsplit or
   the callers' own.
+- `test_claude_review_live_draft_gate.py` — `claude-review.yml` skips the
+  review only while the PR is still a draft. GitHub judges a required check
+  by the newest-created run of the caller on the head commit, and a
+  `skipped` check satisfies it, so a draft-payload run created after the
+  `ready_for_review` run (a push, then `gh pr ready` a second later) used to
+  publish a skipped `review / Claude Review` over the real review. A run
+  whose payload says draft now reads the PR's draft flag live (the
+  `live_draft` job) and skips only when that read says draft too. Pins (1)
+  both jobs' `if:` conditions, EVALUATED by a small GitHub-expression
+  evaluator (an `if:` without a status function carries an implicit
+  `success()`, which a skipped `needs` fails) against a hardcoded truth
+  table over the payload (draft, ready, none), the gate's ending (skipped;
+  `true`, `false` or `unknown`; died before writing) and cancellation, plus
+  the invariant that no skip falls outside the old payload-only skip set;
+  every job's permissions inside the fleet caller's grant (a job asking for
+  more fails every run at startup and publishes no check), the gate holding
+  `pull-requests: read` only; and the `draft == false` literal the
+  draft-gate lint's registry keys on; (2) the read step's shipped bash,
+  under `/bin/bash -eo pipefail` against a stubbed `gh`: only an exit-0
+  bare `true` or `false` counts, and an error body on stdout, null, empty,
+  `True`, `"true"`, two lines, or `true` on a failed call is retried twice
+  (5 s, 10 s), then written as `unknown`, which reviews; a missing or
+  non-numeric PR number reads nothing; (3) negative controls: ten workflow
+  mutants (the payload-only gate, no status function, `== 'false'`,
+  `always()`, an inverted gate, an extra permission, an unwired output, two
+  renames, no `needs`) and five script mutants must each fail.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.
