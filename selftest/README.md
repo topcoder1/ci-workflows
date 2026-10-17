@@ -285,7 +285,18 @@ arbitrary helper scripts; that's a different kind of repo.
   another branch or file, or failed in gh: they are now percent-encoded,
   `/` kept, and an API error names the endpoint as sent. The shim reads an
   endpoint the way gh and GitHub were measured to, and shim controls pin
-  that on the unpaginated, unencoded requests.
+  that on the unpaginated, unencoded requests. A third gap, closed the same
+  day, was a silent pass too: the rules answer was checked only for being an
+  array of objects, so a rule with no string `type`, a
+  `required_status_checks` rule whose checks were missing, a string or an
+  empty object, or a check with an empty `context` read as no required
+  checks, exit 0, and the fleet filed the repo as clean and opened no issue;
+  a `context` that was an object was printed, the answer's own bytes, into
+  the public digest. Every rule now needs a string `type`, and
+  every `required_status_checks` rule a list of objects with a non-empty
+  string `context`, as dotclaude's copy has required since its #521; any
+  other answer exits 3 naming the endpoint and none of the answer, and the
+  fleet files it as an ERROR.
 - `test_pr_files_listing.sh` — no reusable may fetch changed files via
   `gh pr diff` (HTTP 406 past 20k diff lines); pins the paginated
   files-API idiom instead.

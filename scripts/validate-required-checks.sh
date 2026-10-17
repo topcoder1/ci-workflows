@@ -164,13 +164,22 @@ uri() {
 #    page for nothing at all, so a null page would merge away unseen.
 RULES_ENDPOINT="/repos/$REPO/rules/branches/$(uri "$BRANCH")"
 api_get "$RULES_ENDPOINT" --paginate
-# An array of rule objects, or exit 3: the filter below must never run on
-# anything else. The check runs on the merged pages, because `jq -e` given
-# several values goes by the last one only. `[]` (no rule applies) passes and
-# exits 0 further down.
+# An array of rule objects, each with a string type, whose
+# required_status_checks rules each list their checks as objects with a
+# non-empty string context, or exit 3: the filter below must never run on
+# anything else. A rule missing its type or its list would read as no
+# required checks, a clean pass. The check runs on the merged pages, because
+# `jq -e` given several values goes by the last one only. `[]` (no rule
+# applies) passes and exits 0 further down.
 if ! RULESET_DATA=$(jq -cs 'if all(.[]; type == "array") then add else error("a page is not a list") end' 2>/dev/null <<< "$API_BODY") ||
-  ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$RULESET_DATA"; then
-  echo "  API error: GET $RULES_ENDPOINT did not answer an array of rules" >&2
+  ! jq -e '
+    type == "array" and all(.[]; type == "object" and (.type | type) == "string")
+    and all(.[] | select(.type == "required_status_checks");
+      (.parameters.required_status_checks | type) == "array"
+      and all(.parameters.required_status_checks[];
+        type == "object" and (.context | type) == "string" and .context != ""))
+  ' >/dev/null 2>&1 <<< "$RULESET_DATA"; then
+  echo "  API error: GET $RULES_ENDPOINT did not answer a valid list of rules" >&2
   exit 3
 fi
 CONTEXTS=$(echo "$RULESET_DATA" | jq -r \
