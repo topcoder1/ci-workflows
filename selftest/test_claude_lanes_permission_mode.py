@@ -2,14 +2,15 @@
 
 claude-code-action builds the CLI's arguments through the Agent SDK it bundles.
 Up to SDK 0.3.276 (action v1.0.229) the SDK passed `--permission-mode default`
-whenever the caller set no mode; from 0.3.300 (action v1.0.250) it passes
-nothing, and the CLI takes its mode from the settings it loads. The action
+whenever the caller set no mode; from 0.3.286 (first in action v1.0.238;
+v1.0.250 bundles 0.3.300) it passes nothing, and the CLI takes its mode from the settings it loads. The action
 loads the user, project and local sources, and the project's
 .claude/settings.json is the caller's, restored from the PR's base branch,
 which is not always the default branch. A `permissions.defaultMode` there
 (`bypassPermissions`, `acceptEdits`, `auto`, ...) would then pick the
-reviewer's mode, and every mode but `default` lets some tool outside the
-lane's --allowedTools run. So each lane passes `--permission-mode default` in
+reviewer's mode, and `bypassPermissions`, `acceptEdits` and `auto` each let
+some tool outside the lane's --allowedTools run (`plan` and `dontAsk` are
+stricter, but the lanes are written for `default`). So each lane passes `--permission-mode default` in
 claude_args, the argument the SDK used to send. `auto` is no substitute: it
 runs the tools its classifier approves, allowlisted or not.
 

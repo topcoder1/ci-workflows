@@ -247,7 +247,8 @@ jobs:
           # selftest/test_review_lanes_comment_no_shell.py.
           #
           # --permission-mode default keeps that allowlist binding: the Agent
-          # SDK the action bundles stopped sending it at 0.3.300, which leaves
+          # SDK the action bundles stopped sending it at 0.3.286 (first in
+          # v1.0.238; v1.0.250 bundles 0.3.300), which leaves
           # the mode to the base branch's .claude/settings.json. Not `auto`.
           # claude-review.yml's claude_args comment says why. Guarded by
           # selftest/test_claude_lanes_permission_mode.py.
