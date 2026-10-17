@@ -70,9 +70,11 @@
 # reads a request as gh and GitHub do, so these pin it on the requests the
 # validator sent before them (the rules call without --paginate, each value
 # as it was given) and on both forms --paginate prints:
-#   s1 the rules answer comes 30 rules a page, and per_page and page select
+#   s1 the rules answer comes 30 rules a page, per_page and page select, and
+#      a bad % in its query gets HTTP 400
 #   s2 --paginate prints every page, as one array or as an array per page
-#   s3 explicit page bytes print as given, a failing page included
+#   s3 GitHub's pages print as gh prints them, with and without --paginate,
+#      a null and a failing page 2 included
 #   s4 an unencoded `#`, `?`, bad `%`, `{repo}` or `:repo` reads another file
 #      or fails in gh, and an unencoded branch reads another branch's rules
 #
@@ -106,9 +108,9 @@ show() { cat -- "$@" 2>/dev/null || true; }
 # contents answer. With a `branch-rules/` directory, each branch's rules are
 # in branch-rules/<branch>/rules.json and any other branch has none;
 # `pages_apart` prints a --paginate rules answer as an array per page; and
-# `rule-pages/<n>.json` holds the bytes gh prints for page <n> of the rules
-# answer, or `<n>.fail` the status that page fails with. Every call is
-# logged. Like gh, it applies a --jq filter itself, and a filter that fails
+# `rule-pages/<n>.json` holds GitHub's body for page <n> of the rules answer,
+# which the shim prints as gh would, or `<n>.fail` the status that page fails
+# with. Every call is logged. Like gh, it applies a --jq filter itself, and a filter that fails
 # prints part of the response in its error (measured 2026-10-16, gh 2.97.0:
 # `expected an object but got: array ([{"_links":{"git":"https: ...])`).
 #
@@ -126,13 +128,18 @@ show() { cat -- "$@" 2>/dev/null || true; }
 # that starts no %XX escape fails in gh before anything is sent (`invalid URL
 # escape "%zz"`, rc 1). GitHub decodes %XX in the path
 # (`rules/branches/ma%69n` read main's rules) and in the query, where `&`
-# starts the next parameter and a parameter with a bad % is dropped. It pages
-# the rules answer, 30 rules a page unless per_page asks for up to 100. gh
-# --paginate asks for 100 unless the endpoint names a per_page, follows every
-# next page, and prints the pages of an array as one array, the `]` only
-# after the last page (a null page 2 printed `[{"type":"deletion"}null`, rc 0;
-# a 403 on page 2 printed page 1, then the error body, rc 1). gh's help
-# instead describes an array per page, the form `pages_apart` gives.
+# starts the next parameter. A query parameter with a bad % is dropped on the
+# contents endpoint (`?ref=no-such%zz` read the default branch), and gets
+# HTTP 400 on the rules endpoint (`gh: HTTP 400`, no stdout, rc 1). GitHub
+# pages the rules answer, 30 rules a page unless per_page asks for up to 100.
+# gh --paginate asks for 100 unless the endpoint names a per_page, follows
+# every next page, and prints the pages of an array as one array (its
+# paginatedArrayReader): a page with another after it loses its closing `]`,
+# a later page's opening `[` becomes `,`, and anything else is printed as it
+# came (a null page 2 printed `[{"type":"deletion"}null`, rc 0; a 403 on page
+# 2 printed page 1, then the error body, rc 1). gh's help instead describes
+# an array per page, the form `pages_apart` gives. Without --paginate, gh
+# prints the one page as GitHub sent it.
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin" "$T/gh"
 cat > "$T/bin/gh" <<'STUB'
@@ -170,7 +177,7 @@ for a in "$@"; do
 done
 pct_decode() { printf '%b' "${1//%/\\x}"; }
 path=$(pct_decode "${rest%%\?*}")
-per_page="" page=1
+per_page="" page=1 bad_query=no
 case "$rest" in
   *\?*) query="${rest#*\?}" ;;
   *) query="" ;;
@@ -181,7 +188,10 @@ while [ -n "$query" ]; do
     *'&'*) query="${query#*&}" ;;
     *) query="" ;;
   esac
-  if grep -Eq "$bad_escape" <<< "$param"; then continue; fi
+  if grep -Eq "$bad_escape" <<< "$param"; then
+    bad_query=yes
+    continue
+  fi
   case "$param" in
     per_page=*) per_page=$(pct_decode "${param#*=}") ;;
     page=*) page=$(pct_decode "${param#*=}") ;;
@@ -204,6 +214,8 @@ respond() { # the answer on stdin -> stdout, through --jq when one was given
 }
 fail_with() { # status -> gh's stdout and stderr for that failure, rc=1
   case "$1" in
+    400)
+      echo "gh: HTTP 400" >&2 ;;
     401)
       printf '{\n  "message": "Bad credentials",\n  "documentation_url": "https://docs.github.com/rest",\n  "status": "401"\n}\n'
       echo "gh: Bad credentials (HTTP 401)" >&2 ;;
@@ -228,21 +240,33 @@ if [ -f "$dir/fail" ]; then
 fi
 [ -d "$dir" ] || fail_with 404
 serve_rules() { # rules file -> the rules answer, paged
-  local n from total
+  local n from total body more
   if [ -d "$dir/rule-pages" ]; then
-    # Page after page, as given; with --paginate, up to the first page that
-    # fails, which ends the call with that page's error.
+    # GitHub's pages, printed as gh prints them; with --paginate, up to the
+    # first page that fails, which ends the call with that page's error.
     n="$page"
     while :; do
       if [ -f "$dir/rule-pages/$n.fail" ]; then
         fail_with "$(cat "$dir/rule-pages/$n.fail")"
       fi
-      cat "$dir/rule-pages/$n.json"
-      n=$((n + 1))
-      if [ "$paginate" = no ]; then break; fi
-      if [ ! -f "$dir/rule-pages/$n.json" ] && [ ! -f "$dir/rule-pages/$n.fail" ]; then
-        break
+      body=$(cat "$dir/rule-pages/$n.json")
+      more=no
+      if [ "$paginate" = yes ] &&
+        { [ -f "$dir/rule-pages/$((n + 1)).json" ] || [ -f "$dir/rule-pages/$((n + 1)).fail" ]; }; then
+        more=yes
       fi
+      if [ "$paginate" = yes ] && [ ! -f "$dir/pages_apart" ]; then
+        if [ "$n" != "$page" ]; then
+          case "$body" in
+            '[]'*) body=" ${body#?}" ;;
+            '['*) body=",${body#?}" ;;
+          esac
+        fi
+        if [ "$more" = yes ]; then body="${body%]}"; fi
+      fi
+      printf '%s' "$body"
+      if [ "$more" = no ]; then break; fi
+      n=$((n + 1))
     done
     return
   fi
@@ -269,6 +293,7 @@ serve_rules() { # rules file -> the rules answer, paged
 }
 case "$path" in
   rules/branches/*)
+    if [ "$bad_query" = yes ]; then fail_with 400; fi
     branch="${path#rules/branches/}"
     if [ ! -d "$dir/branch-rules" ]; then
       serve_rules "$dir/rules.json"
@@ -878,16 +903,13 @@ else
   show "$T/v.out" "$T/v.err"
 fi
 
-rule_pages() { # owner/repo, page-1 form, page 1's rules, page 2's bytes or HTTP status
-  # Page 1 as gh prints it: an array of its own, or (gh 2.97.0) the array
-  # left open for the pages after it.
+rule_pages() { # owner/repo, form, page 1's body, page 2's body or HTTP status
+  # GitHub's two pages, which gh --paginate prints in `form`: as one array
+  # (gh-2.97.0) or as an array per page.
   local d="$T/gh/$1/rule-pages"
   mkdir -p "$d"
-  if [[ $2 == gh-2.97.0 ]]; then
-    printf '%s' "${3%]}" > "$d/1.json"
-  else
-    printf '%s' "$3" > "$d/1.json"
-  fi
+  if [[ $2 == array-per-page ]]; then touch "$T/gh/$1/pages_apart"; fi
+  printf '%s' "$3" > "$d/1.json"
   case "$4" in
     [0-9][0-9][0-9]) echo "$4" > "$d/2.fail" ;;
     *) printf '%s' "$4" > "$d/2.json" ;;
@@ -1112,12 +1134,13 @@ s1_whole=$(jq -c length "$T/s.out" 2> /dev/null || true)
 shim "/repos/topcoder1/rules31/rules/branches/main?per_page=1&page=2"
 s1_amp=$(jq -c 'map(.ruleset_id)' "$T/s.out" 2> /dev/null || true)
 shim "/repos/topcoder1/rules31/rules/branches/main?per_page=1%zz&page=2"
-s1_bad=$(jq -c 'map(.ruleset_id)' "$T/s.out" 2> /dev/null || true)
+s1_bad="$SHRC $(wc -c < "$T/s.out" | tr -d ' ')"
 if [[ $s1_first == "[30,false]" && $s1_second == "[31]" && $s1_whole == 31 &&
-  $s1_amp == "[2]" && $s1_bad == "[31]" ]]; then
-  pass "s1: the rules answer comes 30 rules a page; per_page and page select, & splits, a bad % drops its parameter"
+  $s1_amp == "[2]" && $s1_bad == "1 0" ]] && has "$T/s.err" "gh: HTTP 400"; then
+  pass "s1: the rules answer comes 30 rules a page; per_page and page select, & splits, a bad % in the query gets HTTP 400"
 else
-  fail "s1: expected [30,false] [31] 31 [2] [31], got $s1_first $s1_second $s1_whole $s1_amp $s1_bad"
+  fail "s1: expected [30,false] [31] 31 [2] '1 0', got $s1_first $s1_second $s1_whole $s1_amp '$s1_bad'"
+  show "$T/s.err"
 fi
 
 fake_repo topcoder1/rules101 "$(rules_after 100 test)"
@@ -1136,26 +1159,32 @@ fake_repo topcoder1/pagebytes '[]'
 pb="$T/gh/topcoder1/pagebytes/rule-pages"
 mkdir -p "$pb"
 printf '%s' '[{"type":"deletion"}]' > "$pb/1.json"
-printf '%s' null > "$pb/2.json"
+printf '%s' '[{"type":"creation"}]' > "$pb/2.json"
 shim /repos/topcoder1/pagebytes/rules/branches/main
-s3_plain="$SHRC $(cat "$T/s.out")"
+s3_one="$SHRC $(cat "$T/s.out")"
+shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
+s3_joined="$SHRC $(cat "$T/s.out")"
+touch "$T/gh/topcoder1/pagebytes/pages_apart"
 shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
 s3_apart="$SHRC $(cat "$T/s.out")"
-printf '%s' '[{"type":"deletion"}' > "$pb/1.json"
+rm "$T/gh/topcoder1/pagebytes/pages_apart"
+printf '%s' null > "$pb/2.json"
 shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
-s3_open="$SHRC $(cat "$T/s.out")"
+s3_null="$SHRC $(cat "$T/s.out")"
 rm "$pb/2.json"
 echo 403 > "$pb/2.fail"
 shim /repos/topcoder1/pagebytes/rules/branches/main --paginate
 s3_fail="$SHRC $(cat "$T/s.out")"
-if [[ $s3_plain == '0 [{"type":"deletion"}]' && $s3_apart == '0 [{"type":"deletion"}]null' &&
-  $s3_open == '0 [{"type":"deletion"}null' &&
+if [[ $s3_one == '0 [{"type":"deletion"}]' &&
+  $s3_joined == '0 [{"type":"deletion"},{"type":"creation"}]' &&
+  $s3_apart == '0 [{"type":"deletion"}][{"type":"creation"}]' &&
+  $s3_null == '0 [{"type":"deletion"}null' &&
   $s3_fail == '1 [{"type":"deletion"}{"message":"Resource not accessible by personal access token",'* ]] &&
   has "$T/s.err" "gh: Resource not accessible by personal access token (HTTP 403)"; then
-  pass "s3: explicit pages print as given: one page, an array per page, gh 2.97.0's open array, a failing page 2"
+  pass "s3: GitHub's pages print as gh prints them: one page alone, joined into one array or an array per page, a null and a failing page 2 joined in as they came"
 else
   fail "s3: unexpected page bytes"
-  printf '%s\n' "$s3_plain" "$s3_apart" "$s3_open" "$s3_fail"
+  printf '%s\n' "$s3_one" "$s3_joined" "$s3_apart" "$s3_null" "$s3_fail"
 fi
 
 fake_repo topcoder1/unencoded '[]' ci.yml
