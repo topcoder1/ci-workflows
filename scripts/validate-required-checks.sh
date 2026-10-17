@@ -140,15 +140,37 @@ api_get() { # [--allow-404] <endpoint> [extra gh api args...]
   exit 3
 }
 
+# uri <value>: <value> percent-encoded, all but `/`, to go into the endpoint
+# of a gh api call. gh parses the endpoint as a URL, so a value spliced in as
+# it is can read something else: gh never sends what follows a `#`, a `?`
+# starts the query, and a `%` that starts no %XX escape fails inside gh
+# before anything is sent, while GitHub decodes any %XX that is left.
+# `--branch release#2` read release's rules, and a workflow file named
+# `ci#2.yml` was read as `ci`. A `/` is sent as it is, so a branch with one
+# reads exactly as it always did. Call it in an assignment: inside a
+# command's arguments its failure would not stop the command.
+uri() {
+  jq -rn --arg v "$1" '$v | @uri | split("%2F") | join("/")'
+}
+
 # 1. Fetch ruleset for the branch and pull required contexts.
 #    Use the branch-rules endpoint (lists rulesets that apply to a branch),
-#    then filter to the matching ruleset name.
-api_get "/repos/$REPO/rules/branches/$BRANCH"
-RULESET_DATA="$API_BODY"
+#    then filter to the matching ruleset name. It pages its answer, 30 rules
+#    a page, and the required_status_checks rule can be on any page: read
+#    without --paginate, one past page 1 was never seen, and the branch passed
+#    as having no required checks. gh 2.97.0 prints every page as one array;
+#    its help, and older gh, describe an array per page. `jq -s add` merges
+#    either into one list, once every page is an array: `add` takes a null
+#    page for nothing at all, so a null page would merge away unseen.
+RULES_ENDPOINT="/repos/$REPO/rules/branches/$(uri "$BRANCH")"
+api_get "$RULES_ENDPOINT" --paginate
 # An array of rule objects, or exit 3: the filter below must never run on
-# anything else. `[]` (no rule applies) passes and exits 0 further down.
-if ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$RULESET_DATA"; then
-  echo "  API error: GET /repos/$REPO/rules/branches/$BRANCH did not answer an array of rules" >&2
+# anything else. The check runs on the merged pages, because `jq -e` given
+# several values goes by the last one only. `[]` (no rule applies) passes and
+# exits 0 further down.
+if ! RULESET_DATA=$(jq -cs 'if all(.[]; type == "array") then add else error("a page is not a list") end' 2>/dev/null <<< "$API_BODY") ||
+  ! jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1 <<< "$RULESET_DATA"; then
+  echo "  API error: GET $RULES_ENDPOINT did not answer an array of rules" >&2
   exit 3
 fi
 CONTEXTS=$(echo "$RULESET_DATA" | jq -r \
@@ -177,7 +199,7 @@ dump_workflows() {
   local repo="$1"
   local out_dir="$2"
   mkdir -p "$out_dir"
-  local names f content
+  local names f content endpoint
   if ! api_get --allow-404 "/repos/$repo/contents/.github/workflows"; then
     # 404: no workflows directory, which is a state to audit (its required
     # checks have no producer here). But a private repo also answers 404 to a
@@ -199,7 +221,8 @@ dump_workflows() {
   # the script.
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    api_get "/repos/$repo/contents/.github/workflows/$f"
+    endpoint="/repos/$repo/contents/.github/workflows/$(uri "$f")"
+    api_get "$endpoint"
     # Base64 file content, or exit 3. A directory under that name, a file
     # over 1 MB (`encoding: none`, no inline content) and malformed base64
     # would otherwise leave an empty or garbled workflow, which reads as a
@@ -208,7 +231,7 @@ dump_workflows() {
     # the end, once GitHub's line breaks are dropped.
     if ! content=$(jq -er 'select(type == "object" and .encoding == "base64" and (.content | type) == "string" and (.content | gsub("\\s"; "") | test("^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))) | .content' 2>/dev/null <<< "$API_BODY") ||
       ! printf '%s\n' "$content" | base64 -d > "$out_dir/$f" 2>/dev/null; then
-      echo "  API error: GET /repos/$repo/contents/.github/workflows/$f did not answer base64 file content" >&2
+      echo "  API error: GET $endpoint did not answer base64 file content" >&2
       exit 3
     fi
   done <<< "$names"
