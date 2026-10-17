@@ -56,8 +56,8 @@
 #      a bad rule on page 1 of 2, a page 2 that is not a list, and a page 2
 #      that fails each exit 3, echoing none of the answer
 #   i  --branch and workflow file names go into the URL percent-encoded, `/`
-#      kept (2026-10-17): a file name with `#`, `?`, `%`, gh's `{repo}`
-#      placeholder or a space is read as that file, a branch with `#` or
+#      kept (2026-10-17): a file name with `#`, `?`, `%`, gh's `{repo}` or
+#      `:repo` placeholder or a space is read as that file, a branch with `#` or
 #      `%41` is read as that branch, and an API error names the endpoint as
 #      it was sent
 # Negative controls (the shim reproduces each old failure, run verbatim):
@@ -73,8 +73,8 @@
 #   s1 the rules answer comes 30 rules a page, and per_page and page select
 #   s2 --paginate prints every page, as one array or as an array per page
 #   s3 explicit page bytes print as given, a failing page included
-#   s4 an unencoded `#`, `?`, bad `%` or `{repo}` reads another file or
-#      fails in gh, and an unencoded branch reads another branch's rules
+#   s4 an unencoded `#`, `?`, bad `%`, `{repo}` or `:repo` reads another file
+#      or fails in gh, and an unencoded branch reads another branch's rules
 #
 # Run from the repo root:
 #   bash selftest/test_audit_required_checks.sh
@@ -114,23 +114,25 @@ show() { cat -- "$@" 2>/dev/null || true; }
 #
 # It reads an endpoint the way gh 2.97.0 and GitHub did, measured 2026-10-16
 # on topcoder1/dotclaude and against a local server, and 2026-10-17 on this
-# repo. gh first fills the {owner}, {repo} and {branch} placeholders from the
-# checkout it runs in (in this repo's worktree, `contents/{repo}.yml`
-# requested `contents/ci-workflows.yml`; outside any checkout gh fails,
-# `unable to expand placeholder in path`); the shim fills them as for the
-# scheduled audit, this repo's checkout on main. `%7Brepo%7D` is sent as it
-# is. Then gh parses the endpoint as a URL. It never sends a #fragment
-# (`rules/branches/main#x` read main's rules), and a % in the path that starts
-# no %XX escape fails in gh before anything is sent (`invalid URL escape
-# "%zz"`, rc 1). GitHub decodes %XX in the path (`rules/branches/ma%69n` read
-# main's rules) and in the query, where `&` starts the next parameter and a
-# parameter with a bad % is dropped. It pages the rules answer, 30 rules a
-# page unless per_page asks for up to 100. gh --paginate asks for 100 unless
-# the endpoint names a per_page, follows every next page, and prints the pages
-# of an array as one array, the `]` only after the last page (a null page 2
-# printed `[{"type":"deletion"}null`, rc 0; a 403 on page 2 printed page 1,
-# then the error body, rc 1). gh's help instead describes an array per page,
-# the form `pages_apart` gives.
+# repo. gh first fills the placeholders {owner}, {repo} and {branch}, and
+# :owner, :repo and :branch where no letter, digit or `_` follows, from the
+# checkout it runs in: in this repo's worktree `contents/{repo}.yml` and
+# `contents/:repo.yml` requested `contents/ci-workflows.yml`, while
+# `:repository.yml`, `%7Brepo%7D.yml` and `%3Arepo.yml` were sent as they
+# were, and outside any checkout gh fails (`unable to expand placeholder in
+# path`). The shim fills them as for the scheduled audit, this repo's
+# checkout on main. Then gh parses the endpoint as a URL. It never sends a
+# #fragment (`rules/branches/main#x` read main's rules), and a % in the path
+# that starts no %XX escape fails in gh before anything is sent (`invalid URL
+# escape "%zz"`, rc 1). GitHub decodes %XX in the path
+# (`rules/branches/ma%69n` read main's rules) and in the query, where `&`
+# starts the next parameter and a parameter with a bad % is dropped. It pages
+# the rules answer, 30 rules a page unless per_page asks for up to 100. gh
+# --paginate asks for 100 unless the endpoint names a per_page, follows every
+# next page, and prints the pages of an array as one array, the `]` only
+# after the last page (a null page 2 printed `[{"type":"deletion"}null`, rc 0;
+# a 403 on page 2 printed page 1, then the error body, rc 1). gh's help
+# instead describes an array per page, the form `pages_apart` gives.
 # ---------------------------------------------------------------------------
 mkdir -p "$T/bin" "$T/gh"
 cat > "$T/bin/gh" <<'STUB'
@@ -144,6 +146,7 @@ fi
 url="${2//\{owner\}/topcoder1}"
 url="${url//\{repo\}/ci-workflows}"
 url="${url//\{branch\}/main}"
+url=$(printf '%s' "$url" | sed -E 's/:owner([^0-9A-Za-z_]|$)/topcoder1\1/g; s/:repo([^0-9A-Za-z_]|$)/ci-workflows\1/g; s/:branch([^0-9A-Za-z_]|$)/main\1/g')
 url="${url%%#*}"
 bad_escape='%($|[^0-9A-Fa-f]|[0-9A-Fa-f]($|[^0-9A-Fa-f]))'
 if grep -Eq "$bad_escape" <<< "${url%%\?*}"; then
@@ -936,10 +939,10 @@ done
 # ---------------------------------------------------------------------------
 # Each file is its repo's only producer of the required check. Unencoded,
 # `#` and `?` cut the name to `ci`, a file the repo does not have, `%.`
-# stopped gh, and gh filled `{repo}` in with the checkout's repo name. A space
-# always worked: gh escapes it itself.
+# stopped gh, and gh filled `{repo}` and `:repo` in with the checkout's repo
+# name. A space always worked: gh escapes it itself.
 n=0
-for name in "ci#2.yml" "ci?2.yml" "50%.yml" "{repo}.yml" "ci 2.yml"; do
+for name in "ci#2.yml" "ci?2.yml" "50%.yml" "{repo}.yml" ":repo.yml" "ci 2.yml"; do
   n=$((n + 1))
   r="topcoder1/filename$n"
   fake_repo "$r" "$(rules_json test)"
@@ -1179,6 +1182,7 @@ unencoded "contents/.github/workflows/ci?2.yml" .name ci
 unencoded "rules/branches/release#2" '.[1].parameters.required_status_checks[0].context' "from release"
 unencoded "rules/branches/rel%41se" '.[1].parameters.required_status_checks[0].context' "from relAse"
 unencoded "contents/.github/workflows/{repo}.yml" .name ci-workflows.yml
+unencoded "contents/.github/workflows/:repo.yml" .name ci-workflows.yml
 unencoded "rules/branches/{branch}" '.[1].parameters.required_status_checks[0].context' "from main"
 shim "/repos/topcoder1/unencoded/contents/.github/workflows/50%.yml"
 if [[ $SHRC -eq 1 && ! -s "$T/s.out" ]] && has "$T/s.err" "invalid URL escape"; then
