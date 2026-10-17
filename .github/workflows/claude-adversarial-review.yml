@@ -182,7 +182,7 @@ jobs:
         id: claude
         # Pinned by full SHA; claude-review.yml's action step says why this
         # version and how the pin moves.
-        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
         # Attributes come from the base commit, never from the PR. `gh pr diff`
         # is GitHub's server-side diff, which ignores .gitattributes, but the
         # allowlisted `git log` prints patches too (-p), and git takes
@@ -245,10 +245,17 @@ jobs:
           # posts. `grep` covers the searching. verifier-on-high-risk.yml's
           # allowlist comment lists the same gadgets (rg, sed, awk). Pinned by
           # selftest/test_review_lanes_comment_no_shell.py.
+          #
+          # --permission-mode default keeps that allowlist binding: the Agent
+          # SDK the action bundles stopped sending it at 0.3.300, which leaves
+          # the mode to the base branch's .claude/settings.json. Not `auto`.
+          # claude-review.yml's claude_args comment says why. Guarded by
+          # selftest/test_claude_lanes_permission_mode.py.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 40
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(grep:*),Bash(git log:*)"
+            --permission-mode default
 
       # THE VERDICT IS POSTED HERE, NOT BY THE MODEL, for the reason
       # claude-review.yml's "Post review summary" step gives: posting through

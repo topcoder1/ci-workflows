@@ -2,7 +2,7 @@
 # Behavioral test for claude-review.yml's caller check and review-ran check:
 # a required `review / Claude Review` must never pass with nothing reviewed.
 #
-# THE GAP. claude-code-action (pinned at v1.0.229) gets its GitHub token by
+# THE GAP. claude-code-action (pinned at v1.0.250) gets its GitHub token by
 # exchanging the job's OIDC token for a Claude GitHub App token, and the
 # exchange refuses any run whose calling workflow differs from the default
 # branch's copy. The action then logs "Skipping action due to workflow
@@ -287,7 +287,7 @@ else:
             )
     # The caller check and the review-ran check rest on this release's
     # behaviour, read in its source; a bump must re-read it.
-    pin = "anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9"
+    pin = "anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8"
     if review.get("uses") != pin:
         problems.append(
             f"the review step uses {review.get('uses')!r}, not {pin!r}. The caller and review-ran checks "
@@ -403,7 +403,7 @@ for p in problems:
     print(f"✗ {p}")
 sys.exit(1 if problems else 0)
 PY
-[ "$failed" -eq 0 ] && pass "checkout (default merge ref) < caller < claude < ran < summary < guard; action pinned at a4f54ef; caller continue-on-error, env exact, permissions unchanged; github_token and REVIEW_BOT evaluated for changed=true/false/empty/unset; bot-skip, failed-review and cancelled paths never run the review-ran check"
+[ "$failed" -eq 0 ] && pass "checkout (default merge ref) < caller < claude < ran < summary < guard; action pinned at a26b07d; caller continue-on-error, env exact, permissions unchanged; github_token and REVIEW_BOT evaluated for changed=true/false/empty/unset; bot-skip, failed-review and cancelled paths never run the review-ran check"
 
 # ---------------------------------------------------------------------------
 # 2. The shipped bash, extracted

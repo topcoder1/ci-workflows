@@ -521,7 +521,7 @@ jobs:
         # CLI install and well under 1 more on real runs) and the reporting
         # after it. Real runs take about 2 minutes in all.
         timeout-minutes: 10
-        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
         # Attributes come from the base commit, never from the PR. The model
         # reads each file with `git diff` in the PR checkout, and git takes
         # .gitattributes from that checkout: a path the PR itself marks
@@ -589,10 +589,18 @@ jobs:
           # on detection. Read-tool path denies cover the same surface for
           # the Read tool. The redactor + per-file-list artifact upload
           # are the last-line defenses.
+          #
+          # --permission-mode default keeps the allowlist and denylist above
+          # binding: the Agent SDK the action bundles stopped sending it at
+          # 0.3.300, which leaves the mode to the base branch's
+          # .claude/settings.json. Not `auto`. claude-review.yml's claude_args
+          # comment says why. Guarded by
+          # selftest/test_claude_lanes_permission_mode.py.
           claude_args: |
             --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","transcript_markdown"],"properties":{"verdict":{"type":"string","enum":["PASS","FAIL"]},"transcript_markdown":{"type":"string","minLength":200,"maxLength":50000}}}'
             --allowedTools "Read,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(grep:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(ls:*),Bash(find:*),Bash(file:*)"
             --disallowedTools "Write,Edit,MultiEdit,NotebookEdit,Read(//proc/**),Read(//sys/**),Read(//etc/**),Read(//var/**),Read(//root/**),Read(//tmp/**),Read(~/**)"
+            --permission-mode default
 
       - name: Materialize evidence from structured_output
         if: steps.classify.outputs.matched == 'yes'

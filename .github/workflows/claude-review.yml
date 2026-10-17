@@ -444,16 +444,28 @@ jobs:
         # guard below, which recovers whatever was posted before the cut.
         timeout-minutes: 30
         # Pinned by full SHA and bumped by manual PR, for this lane and the
-        # adversarial and verifier lanes alike. v1.0.229 is the newest release
-        # reviewed: later ones bundle Claude Code 2.1.277+, which the
-        # adversarial and verifier lanes would run (they use the bundled CLI;
-        # this lane runs the version pinned above), and that CLI's handling of
-        # project files has not been reviewed for them yet. The pin moved off
-        # @v1 after v1.0.113/.114 broke the CLI install (ci-workflows#37).
-        # A bump must also re-check what the caller check relies on: a
-        # `github_token` input skips the OIDC exchange and is never revoked,
-        # and a validation skip still exits 0 with no `conclusion`.
-        uses: anthropics/claude-code-action@a4f54ef2c58884867281bd8e2f8d63352ad019a9 # v1.0.229
+        # adversarial and verifier lanes alike; the pin moved off @v1 after
+        # v1.0.113/.114 broke the CLI install (ci-workflows#37). The Claude
+        # Code CLI a release bundles does not reach any lane: each runs its
+        # own pinned CLI through path_to_claude_code_executable
+        # (selftest/test_claude_lanes_cli_pin.py), so a CLI change is a
+        # CLAUDE_CODE_VERSION bump, never a side effect of this one. A bump
+        # must re-read the new release's source for:
+        #   - what the caller and review-ran checks rely on: a `github_token`
+        #     input skips the OIDC exchange (src/github/token.ts) and is never
+        #     revoked (action.yml revokes only when it is ''), and a workflow
+        #     validation skip exits 0 with no `conclusion`
+        #     (src/entrypoints/run.ts). Then move the pin in
+        #     selftest/test_claude_review_ran_check.sh;
+        #   - the composite's step order: "Post buffered inline comments"
+        #     still runs inside this step, before the lost-findings guard;
+        #   - the permission mode the bundled Agent SDK sends. Up to 0.3.276
+        #     (v1.0.229) it sent `--permission-mode default` on its own;
+        #     0.3.300 (v1.0.250) sends none, which is why every lane's
+        #     claude_args carries it (see below), and claude_args must still
+        #     reach the CLI as `--permission-mode default`
+        #     (base-action/src/parse-sdk-options.ts).
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # The job token when this PR changes its calling workflow, or when
@@ -550,12 +562,26 @@ jobs:
           # final message, which the "Post review summary" step posts. When
           # the model posted it through the shell, a code span in it ran as a
           # command (see that step).
+          #
+          # --permission-mode default: the mode the allowlist is written for.
+          # In it a tool that needs permission (Bash, edits, MCP tools) runs
+          # only when --allowedTools allows it, since a headless run has no one
+          # to ask. The Agent SDK the action bundles sent this flag on its own
+          # up to 0.3.276; 0.3.300 sends no mode, and the CLI then takes
+          # `permissions.defaultMode` from the caller's .claude/settings.json,
+          # which the action restores from the PR's base branch (not always
+          # the default branch). `bypassPermissions` or `acceptEdits` there
+          # would let tools outside the allowlist run. Not `auto` either: it
+          # runs whatever its classifier approves, allowlisted or not. The
+          # adversarial and verifier lanes pass the same flag. Guarded by
+          # selftest/test_claude_lanes_permission_mode.py.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns ${{ inputs.max_turns }}
             --max-budget-usd ${{ inputs.max_budget_usd }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Task,Agent,Skill,Workflow"
+            --permission-mode default
 
       # REVIEW-RAN CHECK. claude-code-action can end its step `success` having
       # reviewed nothing: on the workflow-validation skip (see "Caller check")
