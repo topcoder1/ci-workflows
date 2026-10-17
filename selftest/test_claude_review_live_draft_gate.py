@@ -6,9 +6,9 @@ calling workflow on the head commit, whatever order the runs finish in, and a
 (measured 2026-10-16 in a private scratch repo). The review job used to gate
 on the event payload's draft flag alone. A push to a draft PR followed seconds
 later by `gh pr ready` can leave a draft-payload `synchronize` run as the
-head's newest run: created AFTER the `ready_for_review` run, or the ONLY run on
-the head when the ready event carried the previous head (both seen in that
-lab). That run published `review / Claude Review` = skipped, over a review
+head's newest run: created AFTER the `ready_for_review` run (seen on
+whois-api-llc/wxa_vpn#2258), or the ONLY run on the head when the ready event
+carried the previous head (seen in that lab, 2026-10-17). That run published `review / Claude Review` = skipped, over a review
 still running or failed, or with no review of the head at all.
 
 THE FIX. A run whose payload says draft runs the `live_draft` job, which reads

@@ -47,11 +47,12 @@ jobs:
   # The event payload's draft flag is a copy, and a push to a draft PR
   # followed seconds later by `gh pr ready` can leave a draft-payload
   # `synchronize` run as the head's newest run: created AFTER the
-  # `ready_for_review` run, or the ONLY run on the head when the ready
-  # event carried the previous head (both seen in that lab, 2026-10-17).
-  # The review job used to gate on that copy alone, so the run published
-  # `review / Claude Review` = skipped: over a review still running or
-  # failed, or with no review of that head at all.
+  # `ready_for_review` run (whois-api-llc/wxa_vpn#2258, 2026-10-16), or the
+  # ONLY run on the head when the ready event carried the previous head
+  # (seen in that lab, 2026-10-17). The review job used to gate on that
+  # copy alone, so the run published `review / Claude Review` = skipped:
+  # over a review still running or failed, or with no review of that head
+  # at all.
   #
   # So a run whose payload says draft reads the PR's draft flag NOW, and
   # the review is skipped only when the PR is still a draft: a skip needs
@@ -71,9 +72,10 @@ jobs:
   # FAIL CLOSED: a read that fails three times, or returns anything but a
   # bare true or false, writes `unknown`, and the review runs. So does a
   # gate job that dies or times out before it writes (measured: its own
-  # check then reads failure or cancelled); the review's `if:` skips on
-  # the exact output 'true' only, and `!cancelled()` reads the run, not
-  # this job.
+  # check then reads failure or cancelled): the review's `if:` skips only
+  # on the output `true`, which only two `true` reads write, and
+  # `!cancelled()` turns false only when the RUN is cancelled (by a newer
+  # run or by hand), never on this job's own timeout (measured).
   #
   # Permissions: a reusable's job cannot ask for more than its caller
   # grants (fleet callers: contents read, pull-requests write, id-token
@@ -82,13 +84,15 @@ jobs:
   # "Expected". Reading the PR needs `pull-requests: read`, and that is all
   # this job holds.
   #
-  # Accepted cost: a ready that lands after a draft-payload event, but
-  # before that run's gate reads (about a runner pickup), makes that run
-  # review. When the `ready_for_review` run is on the same head, the head
-  # is reviewed twice. The draft-payload run sits in the caller's draft
-  # concurrency group, which no live run cancels, so it keeps reviewing
-  # even after a newer push replaces its head (see the guard's OVERLAP
-  # NOTE below). Pinned by selftest/test_claude_review_live_draft_gate.py.
+  # Accepted cost: a ready that lands after any draft-payload event (a
+  # push, or a PR opened or reopened as a draft) but before that run's
+  # gate has read twice (a runner pickup plus 15 s, about 20 s in the
+  # lab) makes that run review. When the `ready_for_review` run is on the
+  # same head, the head is reviewed twice. The draft-payload run sits in
+  # the caller's draft concurrency group, which no live run cancels, so it
+  # keeps reviewing even after a newer push replaces its head (see the
+  # guard's OVERLAP NOTE below). Pinned by
+  # selftest/test_claude_review_live_draft_gate.py.
   live_draft:
     name: Live draft state
     runs-on: ubuntu-latest
@@ -925,9 +929,9 @@ jobs:
       # beside the run of any push made while it is still reviewing. Each
       # guard then counts the other run's inline comments, so a loss in
       # one run is masked only while the other run posted at least as many
-      # on the PR. Accepted: it needs a ready within seconds of a push to a
-      # draft, and a loss inside that review's window. A job-level
-      # concurrency group in this reusable would make that
+      # on the PR. Accepted: it needs a ready within about 20 s of a
+      # draft-payload event, and a loss inside that review's window. A
+      # job-level concurrency group in this reusable would make that
       # caller-independent — deliberately not bundled into this change: a
       # third run on one group cancels a waiting one, and a cancelled
       # newest run blocks the required check.
