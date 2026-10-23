@@ -411,6 +411,11 @@ PY
 extract_run "$WF" "$CALLER_STEP" "$T/caller.sh" || { echo "FAILED"; exit 1; }
 extract_run "$WF" "$RAN_STEP" "$T/ran.sh" || { echo "FAILED"; exit 1; }
 extract_run "$WF" "$GUARD_STEP" "$T/guard.sh" || { echo "FAILED"; exit 1; }
+# The guard redacts through the redactor "Install the secret redactor" puts in
+# RUNNER_TEMP: installed once here, as the job installs it before the review.
+extract_run "$WF" "Install the secret redactor" "$T/install_redactor.sh" || { echo "FAILED"; exit 1; }
+RUNNER_TEMP="$T/runner_temp" bash "$T/install_redactor.sh" > /dev/null \
+  || fail "could not install the secret redactor"
 for f in caller ran; do
   /bin/bash -n "$T/$f.sh" || fail "the $f step does not parse under /bin/bash (macOS 3.2 / runner 5)"
 done
@@ -918,6 +923,7 @@ run_guard() {  # run_guard NAME REVIEW_BOT PULLS_JSON
     REPO=o/r PR=7 STARTED_AT="2026-10-16T08:00:00Z" REVIEW_BOT="$2" \
     RUN_URL="https://github.example/o/r/actions/runs/42" GITHUB_RUN_ID=42 MAX_BUDGET_USD=3 \
     EXECUTION_FILE="$T/guard_x.json" SUMMARY_FILE="$T/guard_summary.md" GH_PULLS_JSON="$3" \
+    RUNNER_TEMP="$T/runner_temp" \
     /bin/bash -e -o pipefail "$script" > "$T/guard.$name.txt" 2>&1
   RC=$?
   set -e

@@ -62,6 +62,7 @@ import pytest
 import yaml
 
 from selftest.test_review_lanes_base_attributes import LANES
+from selftest.test_review_lanes_secret_redaction import install as install_redactor
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -876,6 +877,8 @@ def test_codex_sees_the_pointer_under_a_stripped_environment(tmp_path):
     out.mkdir()
     summary = tmp_path / "summary.md"
     summary.write_text("")
+    runner_temp = tmp_path / "runner_temp"
+    install_redactor(runner_temp)
     script = shipped_run(step).replace("/tmp/", f"{out}/")
     review = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
@@ -886,6 +889,7 @@ def test_codex_sees_the_pointer_under_a_stripped_environment(tmp_path):
             "PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}",
             "STUB_HOME": str(home),
             "GITHUB_STEP_SUMMARY": str(summary),
+            "RUNNER_TEMP": str(runner_temp),
         },
         capture_output=True,
         text=True,

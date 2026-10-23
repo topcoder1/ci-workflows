@@ -41,6 +41,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from selftest.test_review_lanes_secret_redaction import install as install_redactor
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 ACTION = "anthropics/claude-code-action@"
@@ -249,6 +251,8 @@ def run_post_step(
     calls.mkdir(exist_ok=True)
     runner_temp = tmp_path / "runner_temp"
     runner_temp.mkdir(exist_ok=True)
+    # The step redacts through the redactor an earlier step installs.
+    install_redactor(runner_temp)
     values = {
         "github.token": "stub-token",
         "github.repository": "o/r",

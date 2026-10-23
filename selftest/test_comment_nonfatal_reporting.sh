@@ -883,7 +883,10 @@ fi
 
 # Both Claude lanes' posting steps read the model's final message from the
 # action's transcript. lane_case LABEL SCRIPT FINAL_MESSAGE COMMENT_FAIL runs
-# the shipped step against a transcript ending in FINAL_MESSAGE.
+# the shipped step against a transcript ending in FINAL_MESSAGE. Each step
+# redacts the message through the redactor "Install the secret redactor"
+# puts in RUNNER_TEMP, so each case installs it first, as the job does.
+extract_run "$REVIEW_WF" "Install the secret redactor" "$T/install_redactor.sh" || true
 lane_case() {
   local label="$1" script="$2" result="$3" comment_fail="$4" outcome="${5:-success}"
   echo "· scenario $label"
@@ -892,6 +895,8 @@ lane_case() {
     > "$T/transcript.json"
   rm -rf "$T/runner_temp"
   mkdir -p "$T/runner_temp"
+  RUNNER_TEMP="$T/runner_temp" bash "$T/install_redactor.sh" > /dev/null \
+    || fail "$label: could not install the secret redactor"
   : > "$T/out"
   : > "$T/ghlog"
   rc=0
