@@ -183,6 +183,9 @@ extract_run "$WF" "$STEP" "$T/guard.sh" || { echo "FAILED"; exit 1; }
 /bin/bash -n "$T/guard.sh" || fail "guard block does not parse under /bin/bash (macOS 3.2 / runner 5)"
 extract_run "$WF" "$SUMMARY_STEP" "$T/summary.sh" || { echo "FAILED"; exit 1; }
 /bin/bash -n "$T/summary.sh" || fail "summary block does not parse under /bin/bash (macOS 3.2 / runner 5)"
+# Both steps redact through the redactor "Install the secret redactor" puts
+# in RUNNER_TEMP; run_guard installs it first, as the job does.
+extract_run "$WF" "Install the secret redactor" "$T/install_redactor.sh" || { echo "FAILED"; exit 1; }
 
 # The stub. Reads serve fixture files verbatim (the shape real `gh api
 # --paginate` prints: one JSON array per page, back to back). Writes are
@@ -322,6 +325,8 @@ run_guard() {
   rm -f "$T/posted.md" "$T/summary_posted.md"
   rm -rf "$T/runner_temp"
   mkdir -p "$T/runner_temp"
+  RUNNER_TEMP="$T/runner_temp" bash "$T/install_redactor.sh" > /dev/null \
+    || fail "$name: could not install the secret redactor"
   : > "$T/summary_output"
   set +e
   GH_LOG="$T/gh.log" GH_POSTED="$T/summary_posted.md" \
@@ -336,6 +341,7 @@ run_guard() {
         PATH="$T/bin:$PATH" \
         REPO="whois-api-llc/wxa-graph" PR="403" STARTED_AT="$SINCE" \
         REVIEW_BOT="claude[bot]" RUN_URL="https://example.test/run/1" GITHUB_RUN_ID="31925279662" \
+        RUNNER_TEMP="$T/runner_temp" \
         MAX_BUDGET_USD="${MAX_BUDGET_USD:-3}" \
         EXECUTION_FILE="${EXECUTION_FILE:-}" SUMMARY_FILE="$summary_file" \
         GH_PULLS_JSON="${GH_PULLS_JSON:-$T/none.json}" \

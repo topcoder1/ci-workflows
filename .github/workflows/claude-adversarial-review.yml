@@ -178,6 +178,497 @@ jobs:
             echo "submodule.${name}.ignore=none"
           done < "$tmp/gitmodules-ignore-names.sorted"
 
+      # SECRET REDACTION. The verdict is the model's text, and a PR that adds
+      # or removes a credential puts it in the diff the model quotes. This
+      # step installs the redactor that "Post adversarial verdict" runs over
+      # the verdict before it posts or prints it. claude-review.yml's copy
+      # of the step says why and what it covers; every copy is the same
+      # script, pinned by selftest/test_review_lanes_secret_redaction.py.
+      - name: Install the secret redactor
+        id: redactor
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP:?RUNNER_TEMP is not set}/secret-redactor"
+          mkdir -p "$dir"
+          cat > "$dir/redact_secrets.py" <<'PY'
+          """Redact credential-shaped values from review-lane text before it leaves the job.
+
+            redact_secrets.py FILE...          rewrite each FILE in place
+            redact_secrets.py                  filter stdin to stdout, line by line, so
+                                               a log fed through it stays live
+            redact_secrets.py --hook           PreToolUse hook: read the hook event on
+                                               stdin, return the tool input with every
+                                               string redacted; any failure exits 2,
+                                               which blocks the call
+            redact_secrets.py --json FILE...   rewrite each JSON FILE with every string
+                                               in it redacted
+            redact_secrets.py --check FILE...  name each FILE that holds a secret shape
+                                               (kinds only, never a value); exit 1 when
+                                               any does, 2 when it cannot read one
+
+          Each value becomes `[REDACTED <kind>]`. Labels, paths and the rest of the
+          text stay as they were.
+          """
+          import collections
+          import json
+          import re
+          import sys
+
+
+          def mark(kind):
+              return f"[REDACTED {kind}]"
+
+
+          MARK = re.compile(r"\[REDACTED ([a-z-]+)\]")
+          # Start of a value that a word can run into: not after a letter or digit
+          # (`task-admin-` is no OpenAI key), but after the `\n` of an escaped newline.
+          START = r"(?:(?<![A-Za-z0-9])|(?<=\\[nrt]))"
+          # Vendor-prefixed shapes. The prefix anchors them, so most take no left
+          # boundary at all: JSON text puts a word character right against a value.
+          TOKENS = [
+              ("whoisxml-api-key", r"at_[A-Za-z0-9]{29}(?![A-Za-z0-9])"),
+              ("aws-access-key-id", r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"),
+              ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
+              ("github-token", r"github_pat_[A-Za-z0-9]{20,}_[A-Za-z0-9]{40,}"),
+              ("slack-token", r"xox[a-z](?:\.xox[a-z])?-[A-Za-z0-9-]{10,}"),
+              ("slack-token", r"xapp-[0-9]+-[A-Za-z0-9-]{10,}"),
+              ("slack-webhook", r"hooks\.slack\.com/services/[A-Za-z0-9/_-]{20,}"),
+              ("anthropic-api-key", START + r"sk-ant-[A-Za-z0-9_-]{20,}"),
+              ("openai-api-key", START + r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"),
+              ("openai-api-key", r"sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}"),
+              ("openai-api-key", START + r"sk-[A-Za-z0-9]{48}(?![A-Za-z0-9])"),
+              ("google-api-key", r"AIza[0-9A-Za-z_-]{35}"),
+              ("npm-token", r"npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])"),
+              ("gitlab-token", r"glpat-[A-Za-z0-9_-]{20,}"),
+              ("stripe-key", START + r"(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{20,}"),
+              # Starts only where no base64url character runs into it: a match tried
+              # from every `eyJ` inside a long run rescans the run (quadratic).
+              ("jwt", r"(?:(?<![A-Za-z0-9_-])|(?<=\\[nrt]))eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+          ]
+          TOKENS = [(kind, re.compile(pattern)) for kind, pattern in TOKENS]
+
+          PEM_BEGIN = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
+          PEM_END = re.compile(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
+          # A line break, real or JSON-escaped.
+          LINE_BREAK = re.compile(r"\r?\n|\\r\\n|\\n")
+          # A line of a key: indentation and a quote or diff marker first (a key a PR
+          # removes reads `-MII...`), then an RFC 1421 header, or base64 with what wraps
+          # it when the key is written as a code literal: quotes, `,` and `+` joining
+          # the pieces, a `\` continuing the line.
+          KEY_LEAD = re.compile(r"[ \t]*(?:>[ \t]?)?[+-]?")
+          KEY_HEADER = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment|Version|Hash):")
+          KEY_WRAP = re.compile(r"[\s\"'`,\\]+")
+          BASE64_TOKEN = re.compile(r"[A-Za-z0-9+/=]+(?:\.\.\.|…)?")
+          # A run of base64 long enough to be key material.
+          BASE64_RUN = re.compile(r"[A-Za-z0-9+/=]{16,}")
+          # `user:password@` in a URL.
+          # The scheme is bounded: unbounded, every word start in a long run of
+          # letters and dashes rescans the run (quadratic on a base64url blob).
+          URL_PASSWORD = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}://[^/\s:@'\"`]+:)([^/\s@'\"`]+)(@)")
+          # The value of an Authorization header, whatever its scheme: the header names
+          # it a credential, so any length counts (`Basic YTpi` is `a:b`).
+          AUTH_HEADER = re.compile(
+              r"(?i)(authorization[\"'*]{0,2}[ \t]*[:=][ \t]*[\"'`]?(?:[a-z]+[ \t]+)?)"
+              r"([A-Za-z0-9._~+/-]{4,}=*)"
+          )
+          # `Bearer <token>` / `Basic <token>` elsewhere, capitalized as in a header:
+          # 16 characters or more, since shorter is prose ("send a Bearer token").
+          AUTH = re.compile(r"(\b(?:Bearer|Basic)[ \t]+)([A-Za-z0-9._~+/-]{16,}=*)")
+          SCHEMES = {"bearer", "basic", "token", "digest", "negotiate"}
+          # A path is no credential (`src/middleware/authorization.ts`).
+          PATH_LIKE = re.compile(r"[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+|.*\.(?:py|ts|tsx|js|go|rb|java|ya?ml|json|md|txt|sh|toml)")
+          # `apiKey=`, `"password": `, `DB_PASSWORD=`, `client_secret => `: a name
+          # ending in a credential word, then the value it is given. A comparison
+          # (`==`, `!=`, `:=`) names the credential and gives it nothing.
+          LABELED = re.compile(
+              r"""(?ix)
+              (?<![A-Za-z0-9])
+              (?P<label>[A-Za-z0-9_.-]{0,40}?
+                (?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret(?:[_-]?(?:access[_-]?)?key)?
+                  |client[_-]?secret|private[_-]?key|token|password|passwd|passphrase
+                  |credentials?))
+              (?P<sep>(?:\\?["'*]){0,2}[ \t]*(?:=>|[:=](?![=>]))[ \t]*)
+              (?:
+                 (?P<prefix>[bBrRuUfF]{0,2})(?P<esc>\\?)(?P<q>["'`])
+                 (?P<quoted>(?:(?!(?P=esc)(?P=q))[^\\\n]|\\.)*?)(?P=esc)(?P=q)
+               | (?P<bare>(?:[^\s"'`,;&()\[\]{}<>|\\]|\\(?!["'`]))+)
+              )
+              """
+          )
+          # A value that refers to a secret instead of holding one: a variable
+          # (`$VAR`, `${...}`, `$(...)`), a template (`{{...}}`, `{name}`, `%s`,
+          # `%(name)s`, `%VAR%`), a placeholder (`<your-token>`), or a value already
+          # redacted. Only that syntax: `$3cr3t!` holds a secret.
+          REFERENCE = re.compile(
+              r"^(?:\$[A-Za-z_][A-Za-z0-9_]*|%(?:[sdifr]|\([A-Za-z_]\w*\)[sdifr]|[A-Za-z_]\w*%)|<[^<>]+>|\{[^{}]*\}"
+              r"|\[REDACTED [a-z-]+\])$"
+              r"|\$\{[^{}]*\}|\$\([^()]*\)|\{\{.*?\}\}"
+          )
+          # A quoted value that only names the field (`"password": "password"`).
+          FIELD_NAMES = {"password", "passwd", "passphrase", "token", "secret", "apikey", "api_key", "api-key", "credential", "credentials"}
+          MASK = re.compile(r"^[xX*._#-]+$")
+          # `os.environ`, `self.settings.api_token`: code naming where a value lives.
+          DOTTED_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+          DIGIT = re.compile(r"[0-9]")
+          # An environment-style NAME (`DB_PASSWORD`); and a value that names another
+          # credential (`db_password`, `YOUR_API_KEY`) or is a language literal.
+          ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+          # Words a credential name is given in code that are not credentials: enum
+          # values (`credentials: 'include'`, `token: 'bearer'`), type names
+          # (`token: string`) and language literals.
+          EXEMPT_WORDS = {
+              "include", "omit", "same-origin", "none", "null", "nil", "true", "false", "undefined", "yes", "no",
+              "on", "off", "required", "optional", "enabled", "disabled", "auto", "default", "strict", "lax",
+              "bearer", "basic", "refresh", "access", "read", "write", "public", "private",
+              "string", "number", "boolean", "bigint", "symbol", "object", "unknown", "integer", "double", "float", "never",
+          }
+          # `AuthToken`, `JwtPayload`: a type name. Letters only, every capital
+          # opening a lowercase word: a random key is neither.
+          CAMEL_TYPE = re.compile(r"(?:[A-Z][a-z]+){2,}")
+          # A validation rule list (`required|string|min:8`), not a password with a `|`.
+          RULE_LIST = re.compile(r"[a-z_]{3,}(?::[\w,.-]*)?(?:\|[a-z_]{3,}(?::[\w,.-]*)?)+")
+          # The parts of a name (`db_password`, `YOUR_API_KEY`, `accessToken`); a value
+          # whose parts name a credential is that credential's name, not its value.
+          NAME_PARTS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+          IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+          CREDENTIAL_PARTS = re.compile(
+              r"(?:^|_)(?:password|passwd|passphrase|token|secret|credentials?|api_key|apikey|private_key|access_key)(?:_|$)"
+          )
+          # A config line: indentation, a quote or diff marker, a YAML list dash, an
+          # opening quote or backtick, and then the name.
+          CONFIG_LEAD = re.compile(r"[ \t]*(?:>[ \t]?)?[+-]?[ \t]*(?:-[ \t]+)?[\"'`]?")
+          # What may follow a value that ends its line: blanks, a comment, or the close
+          # of the quote or code span the line was quoted in.
+          LINE_TAIL = re.compile(r"[ \t]*(?:#[^\n]*)?(?:\r?\n|$)|[\"'`]")
+
+
+          def _key_tokens(line):
+              """The base64 tokens on a line of a key ([] for a header, or for a line of
+              only wrapping), or None when the line holds anything else."""
+              body = line[KEY_LEAD.match(line).end() :]
+              if KEY_HEADER.match(body):
+                  return []
+              # A token with no letter or digit is wrapping too: the `.`, `..` or `&`
+              # that joins a key's pieces in PHP, Perl, Lua or VB, a closing `;`.
+              tokens = [t for t in KEY_WRAP.split(body) if t and any(c.isalnum() for c in t)]
+              return tokens if all(BASE64_TOKEN.fullmatch(t) for t in tokens) else None
+
+
+          def _lines(text, start, stop):
+              """(start, end, next start or None) of each line of text[start:stop]."""
+              while True:
+                  brk = LINE_BREAK.search(text, start, stop)
+                  if not brk:
+                      yield start, stop, None
+                      return
+                  yield start, brk.start(), brk.end()
+                  start = brk.end()
+
+
+          def _keyish(token, length):
+              """A token long enough to be key material, and no word: random base64 of
+              this length has a digit, `+` or `/`, and an identifier has none."""
+              return len(token) >= length and any(c in "0123456789+/" for c in token)
+
+
+          def _key_body(text, start, stop):
+              """Whether text[start:stop], between a BEGIN and an END line, is a key: every
+              line a key line, and a token of 40 characters or more. Prose a review
+              writes between two headers it names is not, and must survive."""
+              long_token = False
+              for a, b, _ in _lines(text, start, stop):
+                  tokens = _key_tokens(text[a:b])
+                  if tokens is None:
+                      return False
+                  long_token = long_token or any(_keyish(t, 40) for t in tokens)
+              return long_token
+
+
+          def _private_keys(text):
+              # `end` is searched for once per block, not once per BEGIN line: when
+              # none follows one BEGIN, none follows a later one either.
+              out, pos, end = [], 0, False
+              while True:
+                  begin = PEM_BEGIN.search(text, pos)
+                  if not begin:
+                      out.append(text[pos:])
+                      return "".join(out)
+                  out.append(text[pos : begin.start()])
+                  # A key's lines lie before the next BEGIN: bounding each look there
+                  # keeps many headers on one line linear.
+                  following_begin = PEM_BEGIN.search(text, begin.end())
+                  limit = following_begin.start() if following_begin else len(text)
+                  if end is False or (end is not None and end.start() < begin.end()):
+                      end = PEM_END.search(text, begin.end())
+                  if end and end.start() <= limit and _key_body(text, begin.end(), end.start()):
+                      pos, end = end.end(), False
+                      out.append(mark("private-key"))
+                      continue
+                  # No END line (the key was quoted in part), or what lies between is
+                  # no key: take the lines after BEGIN that carry key material (a token
+                  # of 16 characters or more with a digit, `+` or `/`), up to the first
+                  # line that is anything but key material, and keep the rest. A header named with no key
+                  # after it stays as written.
+                  stop = begin.end()
+                  for a, b, following in _lines(text, begin.end(), limit):
+                      tokens = _key_tokens(text[a:b])
+                      if tokens is None:
+                          # The key's last line can close its literal and go on with
+                          # code (`...ABC=="}`, `...');`): take its base64, up to the
+                          # closing quote. (No regex with two runs of blanks: that splits
+                          # a long blank run every way there is.)
+                          rest = text[KEY_LEAD.match(text, a, b).end() : b].lstrip(" \t\"'`")
+                          run = BASE64_RUN.match(rest)
+                          if run and _keyish(run.group(0), 16) and rest[run.end() : run.end() + 1] in ('"', "'", "`"):
+                              stop = b - len(rest) + run.end()
+                          break
+                      if any(_keyish(t, 16) for t in tokens):
+                          # Up to the line's last base64: a closing `"}` or `";` stays.
+                          runs = list(BASE64_TOKEN.finditer(text, a, b))
+                          stop = runs[-1].end() if runs else b
+                      if following is None:
+                          break
+                  if stop == begin.end():
+                      out.append(begin.group(0))
+                  else:
+                      out.append(mark("private-key"))
+                  pos = stop
+
+
+          def _url_password(match):
+              if REFERENCE.search(match.group(2)) or MASK.match(match.group(2)):
+                  return match.group(0)
+              return match.group(1) + mark("url-password") + match.group(3)
+
+
+          def _auth(match):
+              if PATH_LIKE.fullmatch(match.group(2)):
+                  return match.group(0)
+              return match.group(1) + mark("credential")
+
+
+          def _auth_header(match):
+              value = match.group(2)
+              if (value.lower() in SCHEMES or (_names_a_credential(value) and not DIGIT.search(value))
+                      or MASK.match(value) or PATH_LIKE.fullmatch(value)):
+                  return match.group(0)
+              return match.group(1) + mark("credential")
+
+
+          def _config_literal(match, value):
+              """Whether a bare value ends a config line (`password: changeme`), where
+              it is a literal, and does not read as a type or another credential."""
+              text, start = match.string, match.start("label")
+              lead = text[text.rfind("\n", 0, start) + 1 : start]
+              if not CONFIG_LEAD.fullmatch(lead) or not LINE_TAIL.match(text, match.end()):
+                  return False
+              if match.group("sep").strip(" \t\"'*") not in (":", "="):
+                  return False
+              if match.group("sep").strip(" \t\"'*") == "=" and " " in match.group("sep"):
+                  return False  # `name = word` at a line's start is code assigning a variable
+              return not (value[0].isupper() and any(c.islower() for c in value))  # `Optional`: a type
+
+
+          def _names_a_credential(value):
+              # A name in code (`db_password`, `YOUR_API_KEY`, `accessToken`), not a
+              # phrase such as `super-secret-jwt-key`, which is a value.
+              if not IDENTIFIER.fullmatch(value):
+                  return False
+              return bool(CREDENTIAL_PARTS.search("_".join(p.lower() for p in NAME_PARTS.findall(value))))
+
+
+          def _labeled(match):
+              quoted, bare = match.group("quoted"), match.group("bare")
+              value = quoted if quoted is not None else bare
+              keep = match.group(0)
+              if not value or REFERENCE.search(value) or MASK.match(value):
+                  return keep
+              word = value.lower()
+              # A value that names a field, a type, an enum or another credential
+              # (`"password": "password"`, `token: 'bearer'`, `db_password`) holds none.
+              if word in FIELD_NAMES or word in EXEMPT_WORDS or word == match.group("label").lower():
+                  return keep
+              if _names_a_credential(value) and not DIGIT.search(value):
+                  return keep
+              head = match.group("label") + match.group("sep")
+              if quoted is not None:
+                  # A quoted value is a literal. It holds a credential when it has a
+                  # digit or six characters or more, unless it is the quote closing a
+                  # code span and prose following it (text that starts or ends with a
+                  # blank, or starts with punctuation and a blank), a rule list
+                  # (`required|string|min:8`) or a type name.
+                  if value[0].isspace() or value[-1].isspace() or (value[0] in ",.;:)`]}" and value[1:2].isspace()):
+                      return keep
+                  if RULE_LIST.fullmatch(value):
+                      return keep
+                  if CAMEL_TYPE.fullmatch(value) or not (DIGIT.search(value) or len(value) >= 6):
+                      return keep
+                  prefix, esc, q = match.group("prefix"), match.group("esc"), match.group("q")
+                  return head + prefix + esc + q + mark("secret-value") + esc + q
+              # A bare value is code as often as it is a literal: not a dotted name or
+              # a call, and six characters or more. It holds a credential when it has
+              # a digit, or when its context makes it a literal: a plain `=` after an
+              # environment-style NAME, a URL query or a command-line flag
+              # (`DB_PASSWORD=`, `?password=`, `--password=`), or the end of a config
+              # line (`password: changeme`). Anywhere else a word reads the same as
+              # code naming a variable or a type, and passes.
+              if len(value) < 6 or DOTTED_NAME.match(value) or match.string[match.end() : match.end() + 1] == "(":
+                  return keep
+              label = match.group("label")
+              before = match.string[max(match.start("label") - 1, 0) : match.start("label")]
+              literal = (
+                  match.group("sep") == "="
+                  and (ENV_NAME.match(label) or label.startswith("-") or before in ("?", "&"))
+                  or _config_literal(match, value)
+              )
+              if not (DIGIT.search(value) or literal):
+                  return keep
+              return head + mark("secret-value")
+
+
+          def redact(text):
+              text = _private_keys(text)
+              text = URL_PASSWORD.sub(_url_password, text)
+              for kind, pattern in TOKENS:
+                  text = pattern.sub(mark(kind), text)
+              text = AUTH_HEADER.sub(_auth_header, text)
+              text = AUTH.sub(_auth, text)
+              return LABELED.sub(_labeled, text)
+
+
+          def _read(path):
+              with open(path, "rb") as f:
+                  return f.read().decode("utf-8", "surrogateescape")
+
+
+          def _redact_strings(value):
+              if isinstance(value, str):
+                  return redact(value)
+              if isinstance(value, list):
+                  return [_redact_strings(item) for item in value]
+              if isinstance(value, dict):
+                  return {key: _redact_strings(item) for key, item in value.items()}
+              return value
+
+
+          def hook():
+              tool_input = json.loads(sys.stdin.buffer.read().decode("utf-8"))["tool_input"]
+              if not isinstance(tool_input, dict):
+                  raise TypeError("tool_input is not an object")
+              redacted = _redact_strings(tool_input)
+              # Nothing to redact: no output, and the call goes through the permission
+              # rules as it is. Otherwise it goes on with the redacted input, through
+              # the same rules: the hook approves nothing itself.
+              if redacted != tool_input:
+                  json.dump(
+                      {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": redacted}},
+                      sys.stdout,
+                  )
+
+
+          def _open_key_block(line):
+              """Whether a line opens a private-key block it does not close."""
+              begin = PEM_BEGIN.search(line)
+              return bool(begin) and not PEM_END.search(line, begin.end())
+
+
+          def _key_material(line):
+              return _key_tokens(line.rstrip("\r\n")) is not None
+
+
+          def stream(source, sink):
+              """Redact line by line. A private-key block spans lines, so the lines from
+              one that opens a block are held until the block ends (an END line, or a
+              line that is not key material) and redacted together."""
+              held = []
+              for raw in iter(source.readline, b""):
+                  line = raw.decode("utf-8", "surrogateescape")
+                  if held:
+                      held.append(line)
+                      if _key_material(line) and not PEM_END.search(line):
+                          continue
+                      line, held = "".join(held), []
+                  elif _open_key_block(line):
+                      held.append(line)
+                      continue
+                  sink.write(redact(line).encode("utf-8", "surrogateescape"))
+                  sink.flush()
+              if held:
+                  sink.write(redact("".join(held)).encode("utf-8", "surrogateescape"))
+                  sink.flush()
+
+
+          def check(paths):
+              found = 0
+              for path in paths:
+                  text = _read(path)
+                  added = collections.Counter(MARK.findall(redact(text))) - collections.Counter(MARK.findall(text))
+                  if added:
+                      found += 1
+                      print(f"{path}: {', '.join(sorted(added))}")
+              return 1 if found else 0
+
+
+          def main(argv):
+              if argv == ["--hook"]:
+                  try:
+                      hook()
+                      return 0
+                  except Exception as error:  # a hook that cannot redact blocks the call
+                      print(f"secret redaction failed ({type(error).__name__}): call blocked", file=sys.stderr)
+                      return 2
+              if argv[:1] == ["--json"]:
+                  for path in argv[1:]:
+                      with open(path, encoding="utf-8") as f:
+                          document = json.load(f)
+                      with open(path, "w", encoding="utf-8") as f:
+                          json.dump(_redact_strings(document), f)
+                  return 0
+              if argv[:1] == ["--check"]:
+                  try:
+                      return check(argv[1:])
+                  except Exception as error:  # 1 means found; a failure must not read as that
+                      print(f"secret check failed ({type(error).__name__})", file=sys.stderr)
+                      return 2
+              if not argv:
+                  stream(sys.stdin.buffer, sys.stdout.buffer)
+                  return 0
+              for path in argv:
+                  text = _read(path)
+                  redacted = redact(text)
+                  if redacted != text:
+                      with open(path, "wb") as f:
+                          f.write(redacted.encode("utf-8", "surrogateescape"))
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY
+          # The PreToolUse hook that redacts an inline comment on its way to
+          # claude-code-action's MCP tool. claude-review.yml's model step passes this
+          # file with --settings; no other lane's model has a tool that posts. A hook
+          # that fails any other way lets the call through: `|| exit 2` blocks it.
+          jq -n --arg command "python3 $(printf '%q' "$dir/redact_secrets.py") --hook || exit 2" '{
+            disableAllHooks: false,
+            hooks: {PreToolUse: [{
+              matcher: "mcp__github_inline_comment__create_inline_comment",
+              hooks: [{type: "command", command: $command}]
+            }]}
+          }' > "$dir/settings.json"
+          # Before any model runs: a key built here must come out of both the filter
+          # and the hook redacted, or the job stops here.
+          key="at_$(head -c 29 /dev/zero | tr '\0' Q)"
+          want="config.py commits [REDACTED whoisxml-api-key]"
+          filtered=$(printf 'config.py commits %s' "$key" | python3 "$dir/redact_secrets.py")
+          hooked=$(jq -nc --arg body "config.py commits $key" '{tool_input: {path: "config.py", body: $body}}' \
+            | python3 "$dir/redact_secrets.py" --hook | jq -r '.hookSpecificOutput.updatedInput.body')
+          if [ "$filtered" != "$want" ] || [ "$hooked" != "$want" ]; then
+            echo "::error::the secret redactor let a key it was given through; stopping before any model runs, since nothing the review writes could be posted safely"
+            exit 1
+          fi
+          echo "secret redactor installed in ${dir}"
+
       - name: Adversarial pass
         id: claude
         # Pinned by full SHA; claude-review.yml's action step says why this
@@ -232,6 +723,11 @@ jobs:
 
             Do NOT post inline comments. Do NOT do general bug-hunting. The
             first pass already did that — your value is the regression axes.
+
+            Never repeat a credential from the diff (an API key, token, password,
+            private key, or a URL with a password in it), in full or in part, in
+            your final message. Name its kind and place instead: "a WhoisXML API
+            key at config.py:12".
           # 40 turns: at 25 about 1 run in 20 went over while finishing a
           # complete review (29 turns at most seen), and the action fails a
           # run that reports success past the cap, so the check went red on a
@@ -268,7 +764,9 @@ jobs:
       # log only when the post fails, with the runner's workflow-command
       # prefixes broken (`::` at a line start, `##[` anywhere in a line, a
       # carriage return). Posted by github-actions[bot] with the job token:
-      # the action revokes its own token when it finishes.
+      # the action revokes its own token when it finishes. The verdict is
+      # redacted before anything reads it (see "Install the secret
+      # redactor"); one that cannot be redacted is never posted or logged.
       #
       # The comment is findings DELIVERY: it is the only place this lane's
       # findings land, and claude-author-automerge's findings gate reads its
@@ -297,6 +795,15 @@ jobs:
             jq -r 'if type == "array" then [.[] | objects | select(.type == "result")] | last else null end
                    | objects | select(.subtype == "success" and .is_error != true) | .result | strings' \
               "$EXECUTION_FILE" > "$verdict" 2>/dev/null || : > "$verdict"
+          fi
+          # Redacted in place before anything reads it: the comment, the
+          # logs below, the clean-verdict test (see "Install the secret
+          # redactor"). A redactor that fails leaves nothing to read, posts
+          # nothing, and fails the step: these are undelivered findings.
+          if ! python3 "${RUNNER_TEMP}/secret-redactor/redact_secrets.py" "$verdict"; then
+            : > "$verdict"
+            echo "::error::claude-adversarial-review: could not redact the verdict, so nothing is posted on PR #${PR}; the redactor \"Install the secret redactor\" set up did not run"
+            exit 1
           fi
           if ! grep -q '[^[:space:]]' "$verdict"; then
             # No verdict to post. This lane is findings delivery, so when the

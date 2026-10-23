@@ -493,6 +493,42 @@ arbitrary helper scripts; that's a different kind of repo.
   workflow-command prefixes broken (`::` at a line start, `##[` anywhere, a
   carriage return). Negative controls: an `eval` mutant runs the canary,
   and dropping either log break is caught.
+- `test_review_lanes_secret_redaction.py` — the review lanes redact
+  credentials from the model's text before it leaves the job. On 2026-10-22
+  `claude-review.yml` quoted all four WhoisXML API keys that three scrub PRs
+  removed (three of them live) verbatim in PR comments, and so in every
+  watcher's notification email; an edit or delete afterwards takes nothing
+  back. Each lane (review, adversarial, Codex) installs one redactor before
+  its model step, from one identical script, under the model step's own
+  condition. Pins: every shape (WhoisXML `at_` + 29, AWS, GitHub classic and
+  fine-grained, Slack tokens and webhooks, Anthropic, OpenAI, Google,
+  Stripe, JWTs, private-key blocks whole, cut short or JSON-escaped, URL
+  passwords, Authorization values, values given to apiKey/token/password/
+  secret names, quoted and bare), planted from random characters at run
+  time in prose, code, URLs, JSON and YAML, comes out with no run of the
+  value left; ordinary code, identifiers, digests, the lanes' protocol lines
+  and the three lane workflows pass byte for byte; output is idempotent; the
+  filter streams line by line (a key block is held until it ends) and agrees
+  with the in-place and check modes; no placeholder matches a marker the
+  merge gates read (`unaddressed-findings.sh`'s regexes, `codex-verdict.mjs`).
+  The inline-comment hook: `claude-review.yml` passes the settings file the
+  install step writes with `--settings`, never the action's `settings` input
+  (user settings, which a base branch's `disableAllHooks: true` overrides;
+  measured on CLI 2.1.233); run as the CLI runs it, it rewrites only the
+  body, returns no permission decision, prints nothing for a clean call, and
+  exits 2 (blocking the call) on bad input, a missing redactor or no
+  python3. Run as shipped against a stub `gh`: the review summary, the
+  lost-findings guard (fallback comment, denial log lines, the final message
+  cut after redaction), the adversarial verdict and the Codex review +
+  comment steps never post, log or summarize a planted value, with the
+  comment API healthy or down; without the redactor each posts nothing and
+  fails. "Check what the review posted for credentials" fails on a planted
+  value either bot posted since the review started, naming the comment and
+  kind, never the value; older comments, other authors and clean comments
+  pass; a failed read warns. Negative controls: a dropped pattern, each
+  posting step's redaction removed, the hook's `|| exit 2`,
+  `disableAllHooks: false`, the matcher and `--settings` mutated, and the
+  check's time filter removed are each caught.
 - `test_review_lanes_base_attributes.py` — every review lane whose model
   runs git in the PR checkout (the verifier, the adversarial pass, Codex)
   must give that model `GIT_ATTR_SOURCE=<base sha>`, so `.gitattributes`

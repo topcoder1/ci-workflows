@@ -67,6 +67,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from selftest.test_review_lanes_secret_redaction import install as install_redactor
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "codex-review.yml"
 JOB = "codex-review"
@@ -1177,6 +1179,7 @@ def review_sees(checkout, tmp_path):
     out.mkdir()
     summary = tmp_path / "summary.md"
     summary.write_text("")
+    install_redactor(checkout.runner_temp)
     result = subprocess.run(
         [
             "bash",

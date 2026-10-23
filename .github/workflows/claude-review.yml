@@ -185,6 +185,10 @@ jobs:
       #      across the fleet - `total_cost_usd` in the run log should stay
       #      <= ~$1.50 and duration <= ~10 min (baseline p90 $1.06 / 7 min);
       #      the guard step also warns on any run over the soft threshold;
+      #      the secret redaction hook rides on how the CLI applies a
+      #      PreToolUse hook's updatedInput (measured on 2.1.233), and "Check
+      #      what the review posted for credentials" fails any run where that
+      #      no longer holds;
       #   3. anything else -> revert the pin.
       # Floor: --max-budget-usd enforcement (subagent spend counted, running
       # subagents stopped) needs >= 2.1.217; the pre-install step refuses to
@@ -540,6 +544,526 @@ jobs:
             echo "::notice::caller check: cause=${cause}${path:+ (${path})} - reviewing with the job token, so inline comments come from github-actions[bot]"
           fi
 
+      # SECRET REDACTION. A PR that adds or removes a credential carries it
+      # in its diff, and a review that quotes the diff quotes the credential.
+      # On 2026-10-22 this lane put all four WhoisXML API keys that three
+      # scrub PRs removed (three of them live) verbatim into its PR comments,
+      # and so into every watcher's notification email. Nothing done after a
+      # post takes it back: the emails are out, and GitHub shows a comment's
+      # edit history. So every piece of model text this job publishes is
+      # redacted BEFORE it is posted or printed:
+      #   - inline comments: claude-code-action's MCP tool posts them, so a
+      #     PreToolUse hook rewrites the tool's input on its way in (the
+      #     settings.json this step writes, which the review step passes
+      #     with --settings);
+      #   - the summary, and the lost-findings guard's fallback comment and
+      #     log lines: those steps run the redactor over the text first.
+      # The redactor turns each credential-shaped value into
+      # `[REDACTED <kind>]`: WhoisXML keys (`at_` + 29), AWS key IDs, GitHub,
+      # Slack, Anthropic, OpenAI, Google and Stripe keys, JWTs, private-key
+      # blocks, URL passwords, Authorization values, and a value given to a
+      # name ending in apiKey, token, password, secret or credentials. The
+      # action's own redactSecrets covers a few of those vendor shapes, on
+      # inline comments only, and nothing WhoisXML-shaped. Code that names a
+      # credential without holding one (`token: str`, `os.environ[...]`, a
+      # `$VAR` or a template) passes unchanged.
+      #
+      # FAIL CLOSED: a posting step that cannot redact posts nothing and
+      # fails; a hook that cannot redact exits 2, which blocks the call; and
+      # this step tries the redactor on a key it builds before any model
+      # runs. The prompt also asks the model not to quote credentials: a
+      # request, where the redactor is the guarantee for the shapes it
+      # knows. "Check what the review posted for credentials", at the end of
+      # the job, checks what landed. claude-adversarial-review.yml and
+      # codex-review.yml run the same script; every copy, the hook and each
+      # posting step's use of it are pinned by
+      # selftest/test_review_lanes_secret_redaction.py.
+      - name: Install the secret redactor
+        id: redactor
+        if: ${{ steps.bot_check.outputs.skipped != 'true' }}
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP:?RUNNER_TEMP is not set}/secret-redactor"
+          mkdir -p "$dir"
+          cat > "$dir/redact_secrets.py" <<'PY'
+          """Redact credential-shaped values from review-lane text before it leaves the job.
+
+            redact_secrets.py FILE...          rewrite each FILE in place
+            redact_secrets.py                  filter stdin to stdout, line by line, so
+                                               a log fed through it stays live
+            redact_secrets.py --hook           PreToolUse hook: read the hook event on
+                                               stdin, return the tool input with every
+                                               string redacted; any failure exits 2,
+                                               which blocks the call
+            redact_secrets.py --json FILE...   rewrite each JSON FILE with every string
+                                               in it redacted
+            redact_secrets.py --check FILE...  name each FILE that holds a secret shape
+                                               (kinds only, never a value); exit 1 when
+                                               any does, 2 when it cannot read one
+
+          Each value becomes `[REDACTED <kind>]`. Labels, paths and the rest of the
+          text stay as they were.
+          """
+          import collections
+          import json
+          import re
+          import sys
+
+
+          def mark(kind):
+              return f"[REDACTED {kind}]"
+
+
+          MARK = re.compile(r"\[REDACTED ([a-z-]+)\]")
+          # Start of a value that a word can run into: not after a letter or digit
+          # (`task-admin-` is no OpenAI key), but after the `\n` of an escaped newline.
+          START = r"(?:(?<![A-Za-z0-9])|(?<=\\[nrt]))"
+          # Vendor-prefixed shapes. The prefix anchors them, so most take no left
+          # boundary at all: JSON text puts a word character right against a value.
+          TOKENS = [
+              ("whoisxml-api-key", r"at_[A-Za-z0-9]{29}(?![A-Za-z0-9])"),
+              ("aws-access-key-id", r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"),
+              ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
+              ("github-token", r"github_pat_[A-Za-z0-9]{20,}_[A-Za-z0-9]{40,}"),
+              ("slack-token", r"xox[a-z](?:\.xox[a-z])?-[A-Za-z0-9-]{10,}"),
+              ("slack-token", r"xapp-[0-9]+-[A-Za-z0-9-]{10,}"),
+              ("slack-webhook", r"hooks\.slack\.com/services/[A-Za-z0-9/_-]{20,}"),
+              ("anthropic-api-key", START + r"sk-ant-[A-Za-z0-9_-]{20,}"),
+              ("openai-api-key", START + r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"),
+              ("openai-api-key", r"sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}"),
+              ("openai-api-key", START + r"sk-[A-Za-z0-9]{48}(?![A-Za-z0-9])"),
+              ("google-api-key", r"AIza[0-9A-Za-z_-]{35}"),
+              ("npm-token", r"npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])"),
+              ("gitlab-token", r"glpat-[A-Za-z0-9_-]{20,}"),
+              ("stripe-key", START + r"(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{20,}"),
+              # Starts only where no base64url character runs into it: a match tried
+              # from every `eyJ` inside a long run rescans the run (quadratic).
+              ("jwt", r"(?:(?<![A-Za-z0-9_-])|(?<=\\[nrt]))eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+          ]
+          TOKENS = [(kind, re.compile(pattern)) for kind, pattern in TOKENS]
+
+          PEM_BEGIN = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
+          PEM_END = re.compile(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
+          # A line break, real or JSON-escaped.
+          LINE_BREAK = re.compile(r"\r?\n|\\r\\n|\\n")
+          # A line of a key: indentation and a quote or diff marker first (a key a PR
+          # removes reads `-MII...`), then an RFC 1421 header, or base64 with what wraps
+          # it when the key is written as a code literal: quotes, `,` and `+` joining
+          # the pieces, a `\` continuing the line.
+          KEY_LEAD = re.compile(r"[ \t]*(?:>[ \t]?)?[+-]?")
+          KEY_HEADER = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment|Version|Hash):")
+          KEY_WRAP = re.compile(r"[\s\"'`,\\]+")
+          BASE64_TOKEN = re.compile(r"[A-Za-z0-9+/=]+(?:\.\.\.|…)?")
+          # A run of base64 long enough to be key material.
+          BASE64_RUN = re.compile(r"[A-Za-z0-9+/=]{16,}")
+          # `user:password@` in a URL.
+          # The scheme is bounded: unbounded, every word start in a long run of
+          # letters and dashes rescans the run (quadratic on a base64url blob).
+          URL_PASSWORD = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}://[^/\s:@'\"`]+:)([^/\s@'\"`]+)(@)")
+          # The value of an Authorization header, whatever its scheme: the header names
+          # it a credential, so any length counts (`Basic YTpi` is `a:b`).
+          AUTH_HEADER = re.compile(
+              r"(?i)(authorization[\"'*]{0,2}[ \t]*[:=][ \t]*[\"'`]?(?:[a-z]+[ \t]+)?)"
+              r"([A-Za-z0-9._~+/-]{4,}=*)"
+          )
+          # `Bearer <token>` / `Basic <token>` elsewhere, capitalized as in a header:
+          # 16 characters or more, since shorter is prose ("send a Bearer token").
+          AUTH = re.compile(r"(\b(?:Bearer|Basic)[ \t]+)([A-Za-z0-9._~+/-]{16,}=*)")
+          SCHEMES = {"bearer", "basic", "token", "digest", "negotiate"}
+          # A path is no credential (`src/middleware/authorization.ts`).
+          PATH_LIKE = re.compile(r"[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+|.*\.(?:py|ts|tsx|js|go|rb|java|ya?ml|json|md|txt|sh|toml)")
+          # `apiKey=`, `"password": `, `DB_PASSWORD=`, `client_secret => `: a name
+          # ending in a credential word, then the value it is given. A comparison
+          # (`==`, `!=`, `:=`) names the credential and gives it nothing.
+          LABELED = re.compile(
+              r"""(?ix)
+              (?<![A-Za-z0-9])
+              (?P<label>[A-Za-z0-9_.-]{0,40}?
+                (?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret(?:[_-]?(?:access[_-]?)?key)?
+                  |client[_-]?secret|private[_-]?key|token|password|passwd|passphrase
+                  |credentials?))
+              (?P<sep>(?:\\?["'*]){0,2}[ \t]*(?:=>|[:=](?![=>]))[ \t]*)
+              (?:
+                 (?P<prefix>[bBrRuUfF]{0,2})(?P<esc>\\?)(?P<q>["'`])
+                 (?P<quoted>(?:(?!(?P=esc)(?P=q))[^\\\n]|\\.)*?)(?P=esc)(?P=q)
+               | (?P<bare>(?:[^\s"'`,;&()\[\]{}<>|\\]|\\(?!["'`]))+)
+              )
+              """
+          )
+          # A value that refers to a secret instead of holding one: a variable
+          # (`$VAR`, `${...}`, `$(...)`), a template (`{{...}}`, `{name}`, `%s`,
+          # `%(name)s`, `%VAR%`), a placeholder (`<your-token>`), or a value already
+          # redacted. Only that syntax: `$3cr3t!` holds a secret.
+          REFERENCE = re.compile(
+              r"^(?:\$[A-Za-z_][A-Za-z0-9_]*|%(?:[sdifr]|\([A-Za-z_]\w*\)[sdifr]|[A-Za-z_]\w*%)|<[^<>]+>|\{[^{}]*\}"
+              r"|\[REDACTED [a-z-]+\])$"
+              r"|\$\{[^{}]*\}|\$\([^()]*\)|\{\{.*?\}\}"
+          )
+          # A quoted value that only names the field (`"password": "password"`).
+          FIELD_NAMES = {"password", "passwd", "passphrase", "token", "secret", "apikey", "api_key", "api-key", "credential", "credentials"}
+          MASK = re.compile(r"^[xX*._#-]+$")
+          # `os.environ`, `self.settings.api_token`: code naming where a value lives.
+          DOTTED_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+          DIGIT = re.compile(r"[0-9]")
+          # An environment-style NAME (`DB_PASSWORD`); and a value that names another
+          # credential (`db_password`, `YOUR_API_KEY`) or is a language literal.
+          ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+          # Words a credential name is given in code that are not credentials: enum
+          # values (`credentials: 'include'`, `token: 'bearer'`), type names
+          # (`token: string`) and language literals.
+          EXEMPT_WORDS = {
+              "include", "omit", "same-origin", "none", "null", "nil", "true", "false", "undefined", "yes", "no",
+              "on", "off", "required", "optional", "enabled", "disabled", "auto", "default", "strict", "lax",
+              "bearer", "basic", "refresh", "access", "read", "write", "public", "private",
+              "string", "number", "boolean", "bigint", "symbol", "object", "unknown", "integer", "double", "float", "never",
+          }
+          # `AuthToken`, `JwtPayload`: a type name. Letters only, every capital
+          # opening a lowercase word: a random key is neither.
+          CAMEL_TYPE = re.compile(r"(?:[A-Z][a-z]+){2,}")
+          # A validation rule list (`required|string|min:8`), not a password with a `|`.
+          RULE_LIST = re.compile(r"[a-z_]{3,}(?::[\w,.-]*)?(?:\|[a-z_]{3,}(?::[\w,.-]*)?)+")
+          # The parts of a name (`db_password`, `YOUR_API_KEY`, `accessToken`); a value
+          # whose parts name a credential is that credential's name, not its value.
+          NAME_PARTS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+          IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+          CREDENTIAL_PARTS = re.compile(
+              r"(?:^|_)(?:password|passwd|passphrase|token|secret|credentials?|api_key|apikey|private_key|access_key)(?:_|$)"
+          )
+          # A config line: indentation, a quote or diff marker, a YAML list dash, an
+          # opening quote or backtick, and then the name.
+          CONFIG_LEAD = re.compile(r"[ \t]*(?:>[ \t]?)?[+-]?[ \t]*(?:-[ \t]+)?[\"'`]?")
+          # What may follow a value that ends its line: blanks, a comment, or the close
+          # of the quote or code span the line was quoted in.
+          LINE_TAIL = re.compile(r"[ \t]*(?:#[^\n]*)?(?:\r?\n|$)|[\"'`]")
+
+
+          def _key_tokens(line):
+              """The base64 tokens on a line of a key ([] for a header, or for a line of
+              only wrapping), or None when the line holds anything else."""
+              body = line[KEY_LEAD.match(line).end() :]
+              if KEY_HEADER.match(body):
+                  return []
+              # A token with no letter or digit is wrapping too: the `.`, `..` or `&`
+              # that joins a key's pieces in PHP, Perl, Lua or VB, a closing `;`.
+              tokens = [t for t in KEY_WRAP.split(body) if t and any(c.isalnum() for c in t)]
+              return tokens if all(BASE64_TOKEN.fullmatch(t) for t in tokens) else None
+
+
+          def _lines(text, start, stop):
+              """(start, end, next start or None) of each line of text[start:stop]."""
+              while True:
+                  brk = LINE_BREAK.search(text, start, stop)
+                  if not brk:
+                      yield start, stop, None
+                      return
+                  yield start, brk.start(), brk.end()
+                  start = brk.end()
+
+
+          def _keyish(token, length):
+              """A token long enough to be key material, and no word: random base64 of
+              this length has a digit, `+` or `/`, and an identifier has none."""
+              return len(token) >= length and any(c in "0123456789+/" for c in token)
+
+
+          def _key_body(text, start, stop):
+              """Whether text[start:stop], between a BEGIN and an END line, is a key: every
+              line a key line, and a token of 40 characters or more. Prose a review
+              writes between two headers it names is not, and must survive."""
+              long_token = False
+              for a, b, _ in _lines(text, start, stop):
+                  tokens = _key_tokens(text[a:b])
+                  if tokens is None:
+                      return False
+                  long_token = long_token or any(_keyish(t, 40) for t in tokens)
+              return long_token
+
+
+          def _private_keys(text):
+              # `end` is searched for once per block, not once per BEGIN line: when
+              # none follows one BEGIN, none follows a later one either.
+              out, pos, end = [], 0, False
+              while True:
+                  begin = PEM_BEGIN.search(text, pos)
+                  if not begin:
+                      out.append(text[pos:])
+                      return "".join(out)
+                  out.append(text[pos : begin.start()])
+                  # A key's lines lie before the next BEGIN: bounding each look there
+                  # keeps many headers on one line linear.
+                  following_begin = PEM_BEGIN.search(text, begin.end())
+                  limit = following_begin.start() if following_begin else len(text)
+                  if end is False or (end is not None and end.start() < begin.end()):
+                      end = PEM_END.search(text, begin.end())
+                  if end and end.start() <= limit and _key_body(text, begin.end(), end.start()):
+                      pos, end = end.end(), False
+                      out.append(mark("private-key"))
+                      continue
+                  # No END line (the key was quoted in part), or what lies between is
+                  # no key: take the lines after BEGIN that carry key material (a token
+                  # of 16 characters or more with a digit, `+` or `/`), up to the first
+                  # line that is anything but key material, and keep the rest. A header named with no key
+                  # after it stays as written.
+                  stop = begin.end()
+                  for a, b, following in _lines(text, begin.end(), limit):
+                      tokens = _key_tokens(text[a:b])
+                      if tokens is None:
+                          # The key's last line can close its literal and go on with
+                          # code (`...ABC=="}`, `...');`): take its base64, up to the
+                          # closing quote. (No regex with two runs of blanks: that splits
+                          # a long blank run every way there is.)
+                          rest = text[KEY_LEAD.match(text, a, b).end() : b].lstrip(" \t\"'`")
+                          run = BASE64_RUN.match(rest)
+                          if run and _keyish(run.group(0), 16) and rest[run.end() : run.end() + 1] in ('"', "'", "`"):
+                              stop = b - len(rest) + run.end()
+                          break
+                      if any(_keyish(t, 16) for t in tokens):
+                          # Up to the line's last base64: a closing `"}` or `";` stays.
+                          runs = list(BASE64_TOKEN.finditer(text, a, b))
+                          stop = runs[-1].end() if runs else b
+                      if following is None:
+                          break
+                  if stop == begin.end():
+                      out.append(begin.group(0))
+                  else:
+                      out.append(mark("private-key"))
+                  pos = stop
+
+
+          def _url_password(match):
+              if REFERENCE.search(match.group(2)) or MASK.match(match.group(2)):
+                  return match.group(0)
+              return match.group(1) + mark("url-password") + match.group(3)
+
+
+          def _auth(match):
+              if PATH_LIKE.fullmatch(match.group(2)):
+                  return match.group(0)
+              return match.group(1) + mark("credential")
+
+
+          def _auth_header(match):
+              value = match.group(2)
+              if (value.lower() in SCHEMES or (_names_a_credential(value) and not DIGIT.search(value))
+                      or MASK.match(value) or PATH_LIKE.fullmatch(value)):
+                  return match.group(0)
+              return match.group(1) + mark("credential")
+
+
+          def _config_literal(match, value):
+              """Whether a bare value ends a config line (`password: changeme`), where
+              it is a literal, and does not read as a type or another credential."""
+              text, start = match.string, match.start("label")
+              lead = text[text.rfind("\n", 0, start) + 1 : start]
+              if not CONFIG_LEAD.fullmatch(lead) or not LINE_TAIL.match(text, match.end()):
+                  return False
+              if match.group("sep").strip(" \t\"'*") not in (":", "="):
+                  return False
+              if match.group("sep").strip(" \t\"'*") == "=" and " " in match.group("sep"):
+                  return False  # `name = word` at a line's start is code assigning a variable
+              return not (value[0].isupper() and any(c.islower() for c in value))  # `Optional`: a type
+
+
+          def _names_a_credential(value):
+              # A name in code (`db_password`, `YOUR_API_KEY`, `accessToken`), not a
+              # phrase such as `super-secret-jwt-key`, which is a value.
+              if not IDENTIFIER.fullmatch(value):
+                  return False
+              return bool(CREDENTIAL_PARTS.search("_".join(p.lower() for p in NAME_PARTS.findall(value))))
+
+
+          def _labeled(match):
+              quoted, bare = match.group("quoted"), match.group("bare")
+              value = quoted if quoted is not None else bare
+              keep = match.group(0)
+              if not value or REFERENCE.search(value) or MASK.match(value):
+                  return keep
+              word = value.lower()
+              # A value that names a field, a type, an enum or another credential
+              # (`"password": "password"`, `token: 'bearer'`, `db_password`) holds none.
+              if word in FIELD_NAMES or word in EXEMPT_WORDS or word == match.group("label").lower():
+                  return keep
+              if _names_a_credential(value) and not DIGIT.search(value):
+                  return keep
+              head = match.group("label") + match.group("sep")
+              if quoted is not None:
+                  # A quoted value is a literal. It holds a credential when it has a
+                  # digit or six characters or more, unless it is the quote closing a
+                  # code span and prose following it (text that starts or ends with a
+                  # blank, or starts with punctuation and a blank), a rule list
+                  # (`required|string|min:8`) or a type name.
+                  if value[0].isspace() or value[-1].isspace() or (value[0] in ",.;:)`]}" and value[1:2].isspace()):
+                      return keep
+                  if RULE_LIST.fullmatch(value):
+                      return keep
+                  if CAMEL_TYPE.fullmatch(value) or not (DIGIT.search(value) or len(value) >= 6):
+                      return keep
+                  prefix, esc, q = match.group("prefix"), match.group("esc"), match.group("q")
+                  return head + prefix + esc + q + mark("secret-value") + esc + q
+              # A bare value is code as often as it is a literal: not a dotted name or
+              # a call, and six characters or more. It holds a credential when it has
+              # a digit, or when its context makes it a literal: a plain `=` after an
+              # environment-style NAME, a URL query or a command-line flag
+              # (`DB_PASSWORD=`, `?password=`, `--password=`), or the end of a config
+              # line (`password: changeme`). Anywhere else a word reads the same as
+              # code naming a variable or a type, and passes.
+              if len(value) < 6 or DOTTED_NAME.match(value) or match.string[match.end() : match.end() + 1] == "(":
+                  return keep
+              label = match.group("label")
+              before = match.string[max(match.start("label") - 1, 0) : match.start("label")]
+              literal = (
+                  match.group("sep") == "="
+                  and (ENV_NAME.match(label) or label.startswith("-") or before in ("?", "&"))
+                  or _config_literal(match, value)
+              )
+              if not (DIGIT.search(value) or literal):
+                  return keep
+              return head + mark("secret-value")
+
+
+          def redact(text):
+              text = _private_keys(text)
+              text = URL_PASSWORD.sub(_url_password, text)
+              for kind, pattern in TOKENS:
+                  text = pattern.sub(mark(kind), text)
+              text = AUTH_HEADER.sub(_auth_header, text)
+              text = AUTH.sub(_auth, text)
+              return LABELED.sub(_labeled, text)
+
+
+          def _read(path):
+              with open(path, "rb") as f:
+                  return f.read().decode("utf-8", "surrogateescape")
+
+
+          def _redact_strings(value):
+              if isinstance(value, str):
+                  return redact(value)
+              if isinstance(value, list):
+                  return [_redact_strings(item) for item in value]
+              if isinstance(value, dict):
+                  return {key: _redact_strings(item) for key, item in value.items()}
+              return value
+
+
+          def hook():
+              tool_input = json.loads(sys.stdin.buffer.read().decode("utf-8"))["tool_input"]
+              if not isinstance(tool_input, dict):
+                  raise TypeError("tool_input is not an object")
+              redacted = _redact_strings(tool_input)
+              # Nothing to redact: no output, and the call goes through the permission
+              # rules as it is. Otherwise it goes on with the redacted input, through
+              # the same rules: the hook approves nothing itself.
+              if redacted != tool_input:
+                  json.dump(
+                      {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": redacted}},
+                      sys.stdout,
+                  )
+
+
+          def _open_key_block(line):
+              """Whether a line opens a private-key block it does not close."""
+              begin = PEM_BEGIN.search(line)
+              return bool(begin) and not PEM_END.search(line, begin.end())
+
+
+          def _key_material(line):
+              return _key_tokens(line.rstrip("\r\n")) is not None
+
+
+          def stream(source, sink):
+              """Redact line by line. A private-key block spans lines, so the lines from
+              one that opens a block are held until the block ends (an END line, or a
+              line that is not key material) and redacted together."""
+              held = []
+              for raw in iter(source.readline, b""):
+                  line = raw.decode("utf-8", "surrogateescape")
+                  if held:
+                      held.append(line)
+                      if _key_material(line) and not PEM_END.search(line):
+                          continue
+                      line, held = "".join(held), []
+                  elif _open_key_block(line):
+                      held.append(line)
+                      continue
+                  sink.write(redact(line).encode("utf-8", "surrogateescape"))
+                  sink.flush()
+              if held:
+                  sink.write(redact("".join(held)).encode("utf-8", "surrogateescape"))
+                  sink.flush()
+
+
+          def check(paths):
+              found = 0
+              for path in paths:
+                  text = _read(path)
+                  added = collections.Counter(MARK.findall(redact(text))) - collections.Counter(MARK.findall(text))
+                  if added:
+                      found += 1
+                      print(f"{path}: {', '.join(sorted(added))}")
+              return 1 if found else 0
+
+
+          def main(argv):
+              if argv == ["--hook"]:
+                  try:
+                      hook()
+                      return 0
+                  except Exception as error:  # a hook that cannot redact blocks the call
+                      print(f"secret redaction failed ({type(error).__name__}): call blocked", file=sys.stderr)
+                      return 2
+              if argv[:1] == ["--json"]:
+                  for path in argv[1:]:
+                      with open(path, encoding="utf-8") as f:
+                          document = json.load(f)
+                      with open(path, "w", encoding="utf-8") as f:
+                          json.dump(_redact_strings(document), f)
+                  return 0
+              if argv[:1] == ["--check"]:
+                  try:
+                      return check(argv[1:])
+                  except Exception as error:  # 1 means found; a failure must not read as that
+                      print(f"secret check failed ({type(error).__name__})", file=sys.stderr)
+                      return 2
+              if not argv:
+                  stream(sys.stdin.buffer, sys.stdout.buffer)
+                  return 0
+              for path in argv:
+                  text = _read(path)
+                  redacted = redact(text)
+                  if redacted != text:
+                      with open(path, "wb") as f:
+                          f.write(redacted.encode("utf-8", "surrogateescape"))
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY
+          # The PreToolUse hook that redacts an inline comment on its way to
+          # claude-code-action's MCP tool. claude-review.yml's model step passes this
+          # file with --settings; no other lane's model has a tool that posts. A hook
+          # that fails any other way lets the call through: `|| exit 2` blocks it.
+          jq -n --arg command "python3 $(printf '%q' "$dir/redact_secrets.py") --hook || exit 2" '{
+            disableAllHooks: false,
+            hooks: {PreToolUse: [{
+              matcher: "mcp__github_inline_comment__create_inline_comment",
+              hooks: [{type: "command", command: $command}]
+            }]}
+          }' > "$dir/settings.json"
+          # Before any model runs: a key built here must come out of both the filter
+          # and the hook redacted, or the job stops here.
+          key="at_$(head -c 29 /dev/zero | tr '\0' Q)"
+          want="config.py commits [REDACTED whoisxml-api-key]"
+          filtered=$(printf 'config.py commits %s' "$key" | python3 "$dir/redact_secrets.py")
+          hooked=$(jq -nc --arg body "config.py commits $key" '{tool_input: {path: "config.py", body: $body}}' \
+            | python3 "$dir/redact_secrets.py" --hook | jq -r '.hookSpecificOutput.updatedInput.body')
+          if [ "$filtered" != "$want" ] || [ "$hooked" != "$want" ]; then
+            echo "::error::the secret redactor let a key it was given through; stopping before any model runs, since nothing the review writes could be posted safely"
+            exit 1
+          fi
+          echo "secret redactor installed in ${dir}"
+
       # Wall-clock anchor for the lost-findings guard below: only comments the
       # review bot creates AFTER this instant count as this run's output. A
       # re-run attempt gets a fresh anchor, so an earlier attempt's comments
@@ -620,6 +1144,11 @@ jobs:
             (mcp__github_inline_comment__create_inline_comment) only for issues
             you're 80%+ sure are real bugs.
 
+            Never repeat a credential from the diff (an API key, token, password,
+            private key, or a URL with a password in it), in full or in part, in an
+            inline comment or in your final message. Name its kind and place
+            instead: "a WhoisXML API key at config.py:12".
+
             ALWAYS end with a one-line summary as your final message. The
             workflow posts your final message, verbatim, as the PR's summary
             comment, so do not post it yourself and put nothing else in it.
@@ -691,6 +1220,19 @@ jobs:
           # runs whatever its classifier approves, allowlisted or not. The
           # adversarial and verifier lanes pass the same flag. Guarded by
           # selftest/test_claude_lanes_permission_mode.py.
+          #
+          # --settings: the PreToolUse hook that redacts an inline comment
+          # before the MCP tool posts it ("Install the secret redactor" writes
+          # the file). Not the action's `settings` input: that lands in user
+          # settings, which the base branch's .claude/settings.json outranks,
+          # and its `disableAllHooks: true` switched the hook off there
+          # (measured on 2.1.233: the planted key reached the tool). Settings
+          # given on the command line outrank it, and this file sets
+          # disableAllHooks to false; with it, the same run redacted. The
+          # hook only rewrites the input: the allowlist above still decides
+          # whether the call runs. The CLI refuses to start when the file is
+          # missing, so no review runs without the hook. Pinned by
+          # selftest/test_review_lanes_secret_redaction.py.
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns ${{ inputs.max_turns }}
@@ -698,6 +1240,7 @@ jobs:
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Task,Agent,Skill,Workflow"
             --permission-mode default
+            --settings "${{ runner.temp }}/secret-redactor/settings.json"
 
       # REVIEW-RAN CHECK. claude-code-action can end its step `success` having
       # reviewed nothing: on the workflow-validation skip (see "Caller check")
@@ -838,6 +1381,9 @@ jobs:
       # to end, and no shell parses it. Only a run that finished has a
       # summary (the last result entry, subtype success, not is_error); a run
       # stopped by a cap or an error has none, and the guard below says so.
+      # The file is redacted before anything reads it (see "Install the
+      # secret redactor"); a summary that cannot be redacted is never posted
+      # or logged, and the step fails.
       #
       # The comment is reporting, not the gate: the findings are the inline
       # comments, and the guard reads the claim from the file this step
@@ -870,6 +1416,15 @@ jobs:
             jq -r 'if type == "array" then [.[] | objects | select(.type == "result")] | last else null end
                    | objects | select(.subtype == "success" and .is_error != true) | .result | strings' \
               "$EXECUTION_FILE" > "$summary" 2>/dev/null || : > "$summary"
+          fi
+          # Redacted in place before anything reads it: the comment, the log
+          # below and the lost-findings guard (see "Install the secret
+          # redactor"). A redactor that fails leaves nothing to read, posts
+          # nothing, and fails the step.
+          if ! python3 "${RUNNER_TEMP}/secret-redactor/redact_secrets.py" "$summary"; then
+            : > "$summary"
+            echo "::error::could not redact the review summary, so nothing is posted on PR #${PR}; the redactor \"Install the secret redactor\" set up did not run"
+            exit 1
           fi
           if ! grep -q '[^[:space:]]' "$summary"; then
             echo "::warning::the review ended without a summary (no final message in the transcript) - nothing to post on PR #${PR}"
@@ -924,6 +1479,10 @@ jobs:
       #      findings could not be posted (a job log is not the PR).
       #      Recovered and posted = warn, green. Partial loss (0 < posted < N)
       #      posts whatever was recovered and never fails.
+      # Every piece of transcript text it prints or posts (the denied
+      # inputs, the recovered bodies, the reports, the final message) goes
+      # through the secret redactor first; text it cannot redact is neither
+      # printed nor posted.
       #
       # FAIL-SAFE on the reads that decide the verdict: an API error listing
       # the inline comments, or a summary phrased outside "Flagged N issue(s)",
@@ -997,6 +1556,10 @@ jobs:
           # on every run from its first hour, in the run log AND the run's
           # annotations, without a cron, a PAT, or an Admin API key.
           SOFT_COST_USD=2
+          # Everything this step prints or posts from the transcript is the
+          # model's text: it goes through the redactor first (see "Install
+          # the secret redactor").
+          REDACTOR="${RUNNER_TEMP:?RUNNER_TEMP is not set}/secret-redactor/redact_secrets.py"
           T=$(mktemp -d)
           trap 'rm -rf "$T"' EXIT
           note() { echo "review-guard: $*"; }
@@ -1013,9 +1576,21 @@ jobs:
             HAVE_TRANSCRIPT=1
             DENIED_N=$(jq '[.[] | objects | select(.type == "result") | .permission_denials[]? | objects] | length' "$EXECUTION_FILE" 2>/dev/null) || DENIED_N=0
             DENIED_TOOLS=$(jq -r '[.[] | objects | select(.type == "result") | .permission_denials[]? | objects | .tool_name | strings] | unique | join(",")' "$EXECUTION_FILE" 2>/dev/null) || DENIED_TOOLS=""
-            jq -r '.[] | objects | select(.type == "result") | .permission_denials[]? | objects
-                   | "::warning::review-guard: permission denied for \(.tool_name // "?"): \((.tool_input | tostring)[0:300])"' "$EXECUTION_FILE" 2>/dev/null \
-              || warn "transcript: could not list permission denials (unexpected shape)"
+            # A denied call's input is the model's text (a denied inline
+            # comment holds its whole body): redacted before it is printed,
+            # as decoded strings (`--json`; serialized, `"` inside a value is
+            # `\"`), and each line cut to 400 characters only after that,
+            # since a cut first can leave part of a key that no pattern
+            # matches.
+            if jq -c '[.[] | objects | select(.type == "result") | .permission_denials[]? | objects]' "$EXECUTION_FILE" > "$T/denials.json" 2>/dev/null \
+               && python3 "$REDACTOR" --json "$T/denials.json" \
+               && jq -r '.[] | "permission denied for \(.tool_name // "?"): \(.tool_input | tostring)"' "$T/denials.json" > "$T/denials.txt" 2>/dev/null; then
+              while IFS= read -r denial; do
+                warn "${denial:0:400}"
+              done < "$T/denials.txt"
+            else
+              warn "transcript: could not list permission denials (unexpected shape, or the redactor failed)"
+            fi
             INLINE_CALLS=$(jq --arg t "$INLINE_TOOL" '[.[] | objects | select(.type == "assistant") | .message.content[]? | objects
                    | select(.type == "tool_use" and .name == $t)] | length' "$EXECUTION_FILE" 2>/dev/null) || INLINE_CALLS=0
             INLINE_ERR=$(jq --arg t "$INLINE_TOOL" '
@@ -1122,7 +1697,7 @@ jobs:
           fi
 
           # ---- 4. losing direction: recover, report, decide ------------------
-          : > "$T/denied.md"; : > "$T/errored.md"; : > "$T/unlanded.md"; : > "$T/subagents.md"; : > "$T/final.md"
+          : > "$T/denied.md"; : > "$T/errored.md"; : > "$T/unlanded.md"; : > "$T/subagents.full.md"; : > "$T/final.full.md"
           if [ "$HAVE_TRANSCRIPT" -eq 1 ]; then
             # (a) inline-comment calls denied at the permission layer: the
             #     exact path/line/body the model wrote, straight from
@@ -1144,31 +1719,49 @@ jobs:
             #      classify_inline_comments the first call is only buffered, and
             #      the action's post-step can drop it (classifier says "probe")
             #      or fail. Their bodies are still in tool_use.input; keep the
-            #      ones no posted comment carries.
-            jq -r --arg t "$INLINE_TOOL" --slurpfile posted "$T/posted.json" '
-                   ($posted[0] | map(.body)) as $bodies
-                   | ([.[] | objects | select(.type == "user") | .message.content[]? | objects | select(.type == "tool_result" and .is_error == true) | .tool_use_id]) as $err
+            #      ones no posted comment carries. The redaction hook rewrote
+            #      what was posted while the transcript keeps what the model
+            #      wrote, so the calls are redacted before the comparison, or a
+            #      redacted comment that landed would read as lost.
+            if jq -c --arg t "$INLINE_TOOL" '
+                   ([.[] | objects | select(.type == "user") | .message.content[]? | objects | select(.type == "tool_result" and .is_error == true) | .tool_use_id]) as $err
                    | [.[] | objects | select(.type == "assistant") | .message.content[]? | objects
                       | select(.type == "tool_use" and .name == $t and ((.id as $i | $err | index($i)) == null)) | .input | objects
-                      | select((.body | type) == "string" and (.body | length) > 0)
-                      | select(.body as $b | any($bodies[]; . == $b) | not)]
-                   | unique_by([.path, .startLine, .line, .body]) | .[]
-                   | "- `\(.path // "?"):\(if .startLine then "\(.startLine)-" else "" end)\(.line // "?")` - \(.body)"' "$EXECUTION_FILE" > "$T/unlanded.md" 2>/dev/null \
-              || warn "transcript: could not read buffered-but-unposted inline-comment calls (unexpected shape)"
+                      | select((.body | type) == "string" and (.body | length) > 0)]' "$EXECUTION_FILE" > "$T/calls.json" 2>/dev/null \
+               && python3 "$REDACTOR" --json "$T/calls.json"; then
+              jq -r --slurpfile posted "$T/posted.json" '
+                     ($posted[0] | map(.body)) as $bodies
+                     | [.[] | select(.body as $b | any($bodies[]; . == $b) | not)]
+                     | unique_by([.path, .startLine, .line, .body]) | .[]
+                     | "- `\(.path // "?"):\(if .startLine then "\(.startLine)-" else "" end)\(.line // "?")` - \(.body)"' "$T/calls.json" > "$T/unlanded.md" 2>/dev/null \
+                || warn "transcript: could not read buffered-but-unposted inline-comment calls (unexpected shape)"
+            else
+              warn "transcript: could not read buffered-but-unposted inline-comment calls (unexpected shape, or the redactor failed)"
+            fi
             # (c) what subagents / skills handed back - the fan-out's own report.
             jq -r '
                    ([.[] | objects | select(.type == "assistant") | .message.content[]? | objects
                      | select(.type == "tool_use" and (.name == "Task" or .name == "Agent" or .name == "Skill" or .name == "Workflow")) | .id]) as $ids
                    | .[] | objects | select(.type == "user") | .message.content[]? | objects
                    | select(.type == "tool_result" and ((.tool_use_id as $i | $ids | index($i)) != null))
-                   | (.content | if type == "array" then map(objects | .text // "") | join("\n") else tostring end)' "$EXECUTION_FILE" 2>/dev/null \
-                   | head -c 20000 > "$T/subagents.md" \
+                   | (.content | if type == "array" then map(objects | .text // "") | join("\n") else tostring end)' "$EXECUTION_FILE" > "$T/subagents.full.md" 2>/dev/null \
               || warn "transcript: could not read subagent reports (unexpected shape)"
             # (d) the model's final message.
-            jq -r '.[] | objects | select(.type == "result") | .result // "" | strings' "$EXECUTION_FILE" 2>/dev/null \
-                   | head -c 8000 > "$T/final.md" \
+            jq -r '.[] | objects | select(.type == "result") | .result // "" | strings' "$EXECUTION_FILE" > "$T/final.full.md" 2>/dev/null \
               || warn "transcript: could not read the final message (unexpected shape)"
           fi
+          # Every piece above is the model's text, read from the transcript
+          # unredacted (the hook redacted only what reached the inline-comment
+          # tool). Each is redacted whole, before anything measures, cuts,
+          # posts or prints it: a cut first could leave part of a key that no
+          # pattern matches. A piece that cannot be redacted is neither posted
+          # nor printed, and the job fails, as for any finding not delivered.
+          if ! python3 "$REDACTOR" "$T/denied.md" "$T/errored.md" "$T/unlanded.md" "$T/subagents.full.md" "$T/final.full.md"; then
+            echo "::error::review-guard: could not redact the findings recovered from the transcript, so nothing was posted to PR #${PR} or printed - failing so the check cannot stay green over findings that are not on the PR"
+            exit 1
+          fi
+          head -c 20000 "$T/subagents.full.md" > "$T/subagents.md"
+          head -c 8000 "$T/final.full.md" > "$T/final.md"
           # What counts as RECOVERED: denied/errored inline bodies (exact),
           # a subagent/skill report of any substance, or a final message that
           # is clearly more than the one-line summary (>= 600 chars and >= 2x
@@ -1262,3 +1855,80 @@ jobs:
           fi
           warn "summary claims ${CLAIMED} inline finding(s), ${POSTED} posted - recovered findings were posted as a fallback comment"
           exit 0
+
+      # CHECK WHAT LANDED. The redaction above runs before anything is
+      # posted; this step checks that it did, on what reached the PR. It
+      # reads every comment claude[bot] or github-actions[bot] created on
+      # the PR since the review started (the inline comments, whichever
+      # token posted them, and the PR comments: the summary and the guard's
+      # fallback) and runs the redactor over each in check mode. A
+      # credential-shaped value left in any of them fails the job: the hook
+      # did not run on that comment (a CLI bump that changed how a hook
+      # rewrites a tool's input, say), or text reached the PR by a path that
+      # skips the redactor. Failing cannot take the comment back; it makes
+      # the leak loud: delete the comment (an edit keeps the old text in its
+      # history) and rotate the credential. The step prints links and
+      # kinds, never a value. Another workflow's github-actions[bot] comment
+      # in the window is read too, and counts the same. A read that fails
+      # ends in a warning, as the guard's reads do: a check that reddens a
+      # REQUIRED check on API flakiness is worse than the gap it watches. A
+      # redactor that fails while checking fails the job: that is no flake.
+      # Pinned by selftest/test_review_lanes_secret_redaction.py.
+      - name: Check what the review posted for credentials
+        id: posted_check
+        if: ${{ !cancelled() && steps.bot_check.outputs.skipped != 'true' && steps.claude.outcome != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          STARTED_AT: ${{ steps.clock.outputs.started_at }}
+        run: |
+          set -uo pipefail
+          redactor="${RUNNER_TEMP:?RUNNER_TEMP is not set}/secret-redactor/redact_secrets.py"
+          if [ -z "${STARTED_AT:-}" ]; then
+            echo "::warning::no review start time to tell this review's comments from older ones, so they were not checked for credentials"
+            exit 0
+          fi
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          # `--paginate` prints one JSON array per page, back to back; `jq -n
+          # '[inputs[] ...]'` reads one page or many, from both listings.
+          if ! gh api "repos/${REPO}/pulls/${PR}/comments?per_page=100" --paginate > "$dir/inline.json" \
+             || ! gh api "repos/${REPO}/issues/${PR}/comments?per_page=100" --paginate > "$dir/issue.json" \
+             || ! jq -c -n --arg since "$STARTED_AT" '[inputs[] | objects
+                    | select((.user.login == "claude[bot]" or .user.login == "github-actions[bot]")
+                             and ((.created_at // "") >= $since))
+                    | {url: (.html_url // "?"), body: (.body // "")}] | .[]' \
+                    "$dir/inline.json" "$dir/issue.json" > "$dir/posted.jsonl"; then
+            echo "::warning::could not list the comments on PR #${PR}, so what this review posted was not checked for credentials"
+            exit 0
+          fi
+          n=0
+          while IFS= read -r comment; do
+            n=$((n + 1))
+            jq -r '.body' <<<"$comment" > "$dir/$n.md"
+            jq -r '.url' <<<"$comment" > "$dir/$n.url"
+          done < "$dir/posted.jsonl"
+          if [ "$n" -eq 0 ]; then
+            echo "posted-text check: the review posted no comment since ${STARTED_AT}"
+            exit 0
+          fi
+          rc=0
+          hits=$(python3 "$redactor" --check "$dir"/*.md) || rc=$?
+          case "$rc" in
+            0)
+              echo "posted-text check: no credential-shaped value in the ${n} comment(s) posted since ${STARTED_AT}"
+              exit 0
+              ;;
+            1) ;;
+            *)
+              echo "::error::the secret redactor failed (exit ${rc}) while checking the ${n} comment(s) posted since ${STARTED_AT}, so what this review posted is unchecked; failing rather than passing it unread"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r hit; do
+            [ -n "$hit" ] || continue
+            file=${hit%%: *}
+            echo "::error::a comment posted on PR #${PR} during this review holds a credential-shaped value (${hit#*: }): $(cat "${file%.md}.url"). It was posted without redaction. Delete the comment (an edit keeps the old text in its history) and rotate the credential."
+          done <<<"$hits"
+          exit 1
