@@ -1105,7 +1105,7 @@ jobs:
         #     claude_args carries it (see below), and claude_args must still
         #     reach the CLI as `--permission-mode default`
         #     (base-action/src/parse-sdk-options.ts).
-        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
+        uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # The job token when this PR changes its calling workflow, or when
