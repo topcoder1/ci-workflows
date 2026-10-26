@@ -98,6 +98,7 @@ on:
         type: string
         default: "20"
       go_version:
+        description: "Go release to install when language=go, passed to setup-go as given. Default: go.mod's `toolchain` release when it pins one (toolchain go1.26.10 -> 1.26.10), else its `go` line, else 1.23."
         required: false
         type: string
         default: ""
@@ -323,7 +324,24 @@ jobs:
           fi
           GO_VER="$INPUT_GO_VERSION"
           if [[ "$LANG" == "go" && -z "$GO_VER" && -f go.mod ]]; then
-            GO_VER=$(awk '/^go [0-9]+\.[0-9]+/ {print $2; exit}' go.mod || true)
+            # A `toolchain goV` line names the Go release the module builds
+            # with; the `go` line is only the oldest it accepts. setup-go
+            # exports GOTOOLCHAIN=local, so `go` runs whatever was installed
+            # and skips the toolchain line: installing the `go` line's
+            # version measured techrecon on go1.26.1 under a go1.26.10 pin
+            # (techrecon#1213, 2026-10-23). A toolchain line this cannot read
+            # fails the job instead of falling back to the floor unseen.
+            # Pinned by selftest/test_coverage_floor_go_version.py.
+            TOOLCHAIN=$(awk '$1 == "toolchain" {sub(/\r$/, "", $2); print $2; exit}' go.mod)
+            TOOLCHAIN_RE='^go(1\.[0-9]+(\.[0-9]+|rc[0-9]+)?)(-.*)?$'
+            if [[ "$TOOLCHAIN" =~ $TOOLCHAIN_RE ]]; then
+              GO_VER="${BASH_REMATCH[1]}"
+            elif [[ -n "$TOOLCHAIN" && "$TOOLCHAIN" != "default" ]]; then
+              echo "::error::go.mod's toolchain directive '$TOOLCHAIN' names no Go release (expected goV, like go1.26.10, or default). Fix the line, or pass go_version to choose the release."
+              exit 1
+            else
+              GO_VER=$(awk '/^go [0-9]+\.[0-9]+/ {print $2; exit}' go.mod || true)
+            fi
           fi
           [[ -z "$GO_VER" ]] && GO_VER="1.23"
           {
