@@ -303,6 +303,7 @@ jobs:
           INPUT_LANGUAGE: ${{ inputs.language || 'auto' }}
           INPUT_WORKDIR: ${{ inputs.working_directory || '.' }}
           INPUT_GO_VERSION: ${{ inputs.go_version || '' }}
+          INPUT_PRE_MEASURED: ${{ inputs.pre_measured_coverage_artifact || '' }}
         run: |
           set -euo pipefail
           cd "$INPUT_WORKDIR"
@@ -323,7 +324,8 @@ jobs:
             LANG="$INPUT_LANGUAGE"
           fi
           GO_VER="$INPUT_GO_VERSION"
-          if [[ "$LANG" == "go" && -z "$GO_VER" && -f go.mod ]]; then
+          # A pre-measured run installs no Go, so it never reads go.mod.
+          if [[ "$LANG" == "go" && -z "$GO_VER" && -z "$INPUT_PRE_MEASURED" && -f go.mod ]]; then
             # A `toolchain goV` line names the Go release the module builds
             # with; the `go` line is only the oldest it accepts. setup-go
             # exports GOTOOLCHAIN=local, so `go` runs whatever was installed

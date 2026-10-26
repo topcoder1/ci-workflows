@@ -41,14 +41,18 @@ def _steps():
     return yaml.safe_load(WORKFLOW.read_text())["jobs"]["measure"]["steps"]
 
 
-def _detect(gomod, *, go_version=""):
+def _detect_step():
+    return next(s for s in _steps() if s.get("id") == "detect")
+
+
+def _detect(gomod, *, go_version="", pre_measured=""):
     """Run the shipped `detect` step as GitHub runs a bare `run:` step, for a
     caller passing `language: go` and `working_directory: work`, with
     work/go.mod holding `gomod` (None: no go.mod at all).
 
     Returns (returncode, the go_version output or None, the step's log).
     """
-    step = next(s for s in _steps() if s.get("id") == "detect")
+    step = _detect_step()
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp) / "work"
         work.mkdir()
@@ -65,6 +69,7 @@ def _detect(gomod, *, go_version=""):
             "INPUT_LANGUAGE": "go",
             "INPUT_WORKDIR": "work",
             "INPUT_GO_VERSION": go_version,
+            "INPUT_PRE_MEASURED": pre_measured,
         }
         proc = subprocess.run(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
@@ -214,8 +219,20 @@ def test_only_a_toolchain_directive_moves_the_version():
     assert (rc, resolved) == (0, "1.26.10"), log
 
 
+@pytest.mark.parametrize("toolchain", ["go1.27rc2", "banana"])
+def test_a_pre_measured_run_never_reads_go_mod(toolchain):
+    """A caller passing pre_measured_coverage_artifact installs no Go at all,
+    so a toolchain line no Go install could use must not fail its job."""
+    rc, _, log = _detect(
+        MODULE + f"go 1.26.1\n\ntoolchain {toolchain}\n",
+        pre_measured="coverage-percent",
+    )
+    assert rc == 0, log
+
+
 def test_setup_go_installs_what_detect_resolved():
-    """The resolver is half the fix: setup-go has to install its output."""
+    """The resolver is half the fix: setup-go has to install its output, and
+    detect has to see the caller's inputs the harness above feeds it."""
     setup_go = [
         s for s in _steps() if str(s.get("uses", "")).startswith("actions/setup-go@")
     ]
@@ -223,3 +240,9 @@ def test_setup_go_installs_what_detect_resolved():
     assert setup_go[0].get("with") == {
         "go-version": "${{ steps.detect.outputs.go_version }}"
     }
+    env = _detect_step()["env"]
+    assert env.get("INPUT_GO_VERSION") == "${{ inputs.go_version || '' }}"
+    assert (
+        env.get("INPUT_PRE_MEASURED")
+        == "${{ inputs.pre_measured_coverage_artifact || '' }}"
+    )
