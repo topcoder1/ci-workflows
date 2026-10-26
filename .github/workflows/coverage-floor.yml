@@ -341,14 +341,19 @@ jobs:
             }
             GO_VER=$(directive go)
             TOOLCHAIN=$(directive toolchain)
-            # goV, or goV-suffix for a custom build of V. Release candidates
-            # fail: setup-go matches 1.27.0-rc.2, never Go's go1.27rc2.
-            TOOLCHAIN_RE='^go(1\.[0-9]+(\.[0-9]+)?)(-.*)?$'
+            # goV, or goV-suffix for a custom build of V. Compared in Go's
+            # spelling, which sort -V orders as Go does (1.27rc2 < 1.27.0).
+            TOOLCHAIN_RE='^go(1\.[0-9]+(\.[0-9]+|rc[0-9]+)?)(-.*)?$'
             if [[ "$TOOLCHAIN" =~ $TOOLCHAIN_RE ]]; then
               GO_VER=$(printf '%s\n' "$GO_VER" "${BASH_REMATCH[1]}" | sort -V | tail -n 1)
             elif [[ -n "$TOOLCHAIN" && "$TOOLCHAIN" != "default" ]]; then
-              echo "::error::go.mod's toolchain directive '$TOOLCHAIN' is not one this workflow can install (go1.N.P or default). Fix the line, or pass go_version in setup-go's form, e.g. 1.27.0-rc.2 for a release candidate."
+              echo "::error::go.mod's toolchain directive '$TOOLCHAIN' names no Go release this workflow can install (go1.N.P, go1.NrcN or default). Fix the line, or pass go_version to choose the release."
               exit 1
+            fi
+            # setup-go matches a release candidate only as SemVer's 1.27.0-rc.2.
+            RC_RE='^1\.([0-9]+)rc([0-9]+)$'
+            if [[ "$GO_VER" =~ $RC_RE ]]; then
+              GO_VER="1.${BASH_REMATCH[1]}.0-rc.${BASH_REMATCH[2]}"
             fi
           fi
           [[ -z "$GO_VER" ]] && GO_VER="1.23"
