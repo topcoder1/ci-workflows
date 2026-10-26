@@ -74,7 +74,7 @@ on:
         type: string
         default: "20"
       go_version:
-        description: "Go version when language=go. Default reads from go.mod's `go` directive, fallback '1.23'."
+        description: "Go release to install when language=go, passed to setup-go as given. Default: the newer of go.mod's `toolchain` release and its `go` line (go 1.26.1 with toolchain go1.26.10 -> 1.26.10), else 1.23."
         required: false
         type: string
         default: ""
@@ -121,7 +121,6 @@ jobs:
     outputs:
       language: ${{ steps.d.outputs.language }}
       runner: ${{ steps.d.outputs.runner }}
-      go_version: ${{ steps.d.outputs.go_version }}
     steps:
       - uses: actions/checkout@v7
       - id: d
@@ -131,7 +130,6 @@ jobs:
           # self-test on this repo behaves identically to a caller invocation.
           INPUT_LANGUAGE: ${{ inputs.language || 'auto' }}
           INPUT_WORKDIR: ${{ inputs.working_directory || '.' }}
-          INPUT_GO_VERSION: ${{ inputs.go_version || '' }}
           INPUT_PINNED_GATE_FILES: ${{ inputs.pinned_gate_files || '' }}
         run: |
           set -euo pipefail
@@ -183,16 +181,7 @@ jobs:
           fi
           echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
 
-          # Go version: prefer input, else read go.mod's `go N.NN` directive,
-          # else fall back to 1.23.
-          GO_VER="$INPUT_GO_VERSION"
-          if [[ "$LANG" == "go" && -z "$GO_VER" && -f go.mod ]]; then
-            GO_VER=$(awk '/^go [0-9]+\.[0-9]+/ {print $2; exit}' go.mod || true)
-          fi
-          [[ -z "$GO_VER" ]] && GO_VER="1.23"
-          echo "go_version=$GO_VER" >> "$GITHUB_OUTPUT"
-
-          echo "detected: language=$LANG runner=$RUNNER go_version=$GO_VER workdir=$INPUT_WORKDIR"
+          echo "detected: language=$LANG runner=$RUNNER workdir=$INPUT_WORKDIR"
 
   run-python:
     name: Tests (Python)
@@ -365,9 +354,52 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Resolved here, not in `detect`: a failure there would skip this job,
+      # and a skipped required check passes. Pinned by
+      # selftest/test_tests_runner_go_version.py.
+      - name: Resolve the Go release
+        id: go
+        working-directory: ${{ inputs.working_directory || '.' }}
+        env:
+          INPUT_GO_VERSION: ${{ inputs.go_version || '' }}
+        run: |
+          set -euo pipefail
+          GO_VER="$INPUT_GO_VERSION"
+          if [[ -z "$GO_VER" && -f go.mod ]]; then
+            # A `toolchain goV` line names the Go release the module builds
+            # with; the `go` line is only the oldest it accepts. setup-go
+            # exports GOTOOLCHAIN=local, so `go` runs whatever was installed
+            # and skips the toolchain line: installing the `go` line's
+            # version ran coverage-floor.yml's copy of this on go1.26.1 under
+            # techrecon's go1.26.10 pin (techrecon#1213, 2026-10-23). Install
+            # the newer of the two, as Go ignores a pin below the `go` line.
+            # A toolchain line this cannot install from fails the job instead
+            # of testing on the floor unseen.
+            directive() {
+              awk -v d="$1" '{sub(/\r$/, ""); sub(/\/\/.*/, "")} $1 == d {print $2; exit}' go.mod
+            }
+            GO_VER=$(directive go)
+            TOOLCHAIN=$(directive toolchain)
+            # goV, or goV-suffix for a custom build of V. Compared in Go's
+            # spelling, which sort -V orders as Go does (1.27rc2 < 1.27.0).
+            TOOLCHAIN_RE='^go(1\.[0-9]+(\.[0-9]+|rc[0-9]+)?)(-.*)?$'
+            if [[ "$TOOLCHAIN" =~ $TOOLCHAIN_RE ]]; then
+              GO_VER=$(printf '%s\n' "$GO_VER" "${BASH_REMATCH[1]}" | sort -V | tail -n 1)
+            elif [[ -n "$TOOLCHAIN" && "$TOOLCHAIN" != "default" ]]; then
+              echo "::error::go.mod's toolchain directive '$TOOLCHAIN' names no Go release this workflow can install (go1.N.P, go1.NrcN or default). Fix the line, or pass go_version to choose the release."
+              exit 1
+            fi
+            # setup-go matches a release candidate only as SemVer's 1.27.0-rc.2.
+            RC_RE='^1\.([0-9]+)rc([0-9]+)$'
+            if [[ "$GO_VER" =~ $RC_RE ]]; then
+              GO_VER="1.${BASH_REMATCH[1]}.0-rc.${BASH_REMATCH[2]}"
+            fi
+          fi
+          [[ -z "$GO_VER" ]] && GO_VER="1.23"
+          echo "go_version=$GO_VER" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ needs.detect.outputs.go_version }}
+          go-version: ${{ steps.go.outputs.go_version }}
       - name: Run tests
         working-directory: ${{ inputs.working_directory || '.' }}
         env:
