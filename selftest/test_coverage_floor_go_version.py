@@ -12,9 +12,12 @@ whois-api-llc/techrecon#1213's required coverage-floor job (120625436528,
 while its go.mod said `go 1.26.1` / `toolchain go1.26.10`, the pin taken for
 the crypto/x509 advisory GO-2026-6809.
 
-The detect step now prefers a `toolchain goV` line, falls back to the `go`
-line, and fails on a toolchain line it cannot read instead of measuring the
-floor again. A caller's `go_version` input still wins over both.
+The detect step now installs the newer of the `toolchain goV` pin and the `go`
+line (Go ignores a pin below the `go` line, and under GOTOOLCHAIN=local that
+older release could not build the module), reads both without a `//` comment,
+and fails on a toolchain line it cannot install from instead of measuring the
+floor again. That includes release candidates: setup-go matches only SemVer's
+1.27.0-rc.2, never Go's go1.27rc2. A caller's `go_version` input still wins.
 
 The shipped step runs here against hand-written go.mod files. Every expected
 version is a literal, never read back from the workflow under test.
@@ -94,6 +97,13 @@ def _detect(gomod, *, go_version=""):
             "1.26.10",
             id="toolchain-pin",
         ),
+        # Versions compare as numbers: a text sort puts 1.26.10 below 1.26.9.
+        pytest.param(
+            MODULE + "go 1.26.9\n\ntoolchain go1.26.10\n",
+            "",
+            "1.26.10",
+            id="pin-patch-crosses-a-digit",
+        ),
         pytest.param(
             MODULE + "toolchain go1.26.10\n\ngo 1.26.1\n",
             "",
@@ -105,6 +115,27 @@ def _detect(gomod, *, go_version=""):
             "",
             "1.26.10",
             id="toolchain-with-comment",
+        ),
+        # Go ends the token at `//` without a space before it.
+        pytest.param(
+            MODULE + "go 1.26.1\n\ntoolchain go1.26.10//GO-2026-6809\n",
+            "",
+            "1.26.10",
+            id="toolchain-with-unspaced-comment",
+        ),
+        # A pin below the go line is stale: go1.26.0 could not build a
+        # `go 1.26.1` module under GOTOOLCHAIN=local.
+        pytest.param(
+            MODULE + "go 1.26.1\n\ntoolchain go1.26.0\n",
+            "",
+            "1.26.1",
+            id="stale-pin-below-go-line",
+        ),
+        pytest.param(
+            MODULE + "go 1.26.1\n\ntoolchain go1.25.5\n",
+            "",
+            "1.26.1",
+            id="stale-pin-older-minor",
         ),
         pytest.param(
             "module example.com/m\r\n\r\ngo 1.26.1\r\n\r\ntoolchain go1.26.10\r\n",
@@ -118,12 +149,6 @@ def _detect(gomod, *, go_version=""):
             "",
             "1.26.1",
             id="toolchain-default",
-        ),
-        pytest.param(
-            MODULE + "go 1.26.1\n\ntoolchain go1.27rc2\n",
-            "",
-            "1.27rc2",
-            id="release-candidate",
         ),
         # A custom build's `-suffix` names the release it was built from.
         pytest.param(
@@ -160,6 +185,7 @@ def test_detect_resolves_the_go_release_to_install(gomod, go_version, expected):
         "1.26.10",  # no `go` prefix
         "go1.26.10x",  # `go` accepts this spelling and, under GOTOOLCHAIN=local, ignores it
         "banana",
+        "go1.27rc2",  # valid Go, but setup-go cannot install this spelling
     ],
 )
 def test_an_unreadable_toolchain_line_fails_the_job(toolchain):
