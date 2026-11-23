@@ -2220,7 +2220,22 @@ jobs:
           # edit fires only `edited` (no caller subscribes), so a clean gate
           # followed by an edit that adds "closes #N follow-up" would arm
           # against a body nobody gated. Refuse on ANY change, like the base.
-          now_body=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.body // ""') || {
+          #
+          # Read with curl and jq, never gh. gh passes every JSON response
+          # through go-gh's ASCII sanitizer before --jq sees it: C0 and C1
+          # control characters come back in caret notation (ESC as "^["), and
+          # so does the literal text a description may quote, `\u0000` read
+          # back as `\^@` (gh 2.89, measured 2026-11-23). The gate hashed the
+          # event payload's exact text, so such a body never matched and every
+          # run stood down as changed with nobody editing it
+          # (topcoder1/ipgeo_core#387). jq decodes the JSON exactly, as the
+          # runner decodes the event payload. The token goes in on stdin, off
+          # the command line; -f keeps an HTTP error body out of now_body.
+          # Pinned by selftest/test_automerge_body_rebind.sh.
+          now_body=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" \
+            | curl -fsSL -H @- -H 'Accept: application/vnd.github+json' \
+              "${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
+            | jq -r '.body // ""') || {
             echo "::error::could not re-read the PR body before arming — refusing to arm (fail closed)."
             disarm_then_exit 1
           }

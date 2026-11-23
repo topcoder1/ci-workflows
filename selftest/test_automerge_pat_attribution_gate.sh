@@ -425,14 +425,23 @@ if [ "$1" = "api" ]; then
       fi
       if [ "$h" -gt 1 ] && [ -n "${STUB_HEAD_LATER:-}" ]; then printf '%s\n' "$STUB_HEAD_LATER"
       else printf '%s\n' "${STUB_HEAD:-$HEAD_SHA}"; fi ;;
-    *"--jq .body"*) printf '%s\n' "" ;;
   esac
   exit 0
 fi
 exit 0
 STUB
+# claude-author's arm step re-reads the PR body with curl, never gh (gh's JSON
+# sanitizer rewrites control characters; selftest/test_automerge_body_rebind.sh).
+# It gets an empty body; GATE_BODY_SHA is empty in every case here, so nothing
+# is compared.
+cat > "$T/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null # the token header, piped in on stdin
+echo "curl $*" >> "$GH_LOG"
+echo '{"body":""}'
+STUB
 printf '#!/usr/bin/env bash\necho "sleep $*" >> "${GH_LOG:-/dev/null}"\nexit 0\n' > "$T/bin/sleep"
-chmod +x "$T/bin/gh" "$T/bin/sleep"
+chmod +x "$T/bin/gh" "$T/bin/curl" "$T/bin/sleep"
 
 HEAD="c0ffee0000000000000000000000000000000001"
 
