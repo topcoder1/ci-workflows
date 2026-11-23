@@ -2230,12 +2230,14 @@ jobs:
           # run stood down as changed with nobody editing it
           # (topcoder1/ipgeo_core#387). jq decodes the JSON exactly, as the
           # runner decodes the event payload. The token goes in on stdin, off
-          # the command line; -f keeps an HTTP error body out of now_body.
+          # the command line; -f keeps an HTTP error body out of now_body, and
+          # jq -e fails a reply with no JSON in it (exit 4) instead of reading
+          # it as an empty description, as gh failed it.
           # Pinned by selftest/test_automerge_body_rebind.sh.
           now_body=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" \
             | curl -fsSL -H @- -H 'Accept: application/vnd.github+json' \
               "${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
-            | jq -r '.body // ""') || {
+            | jq -er '.body // ""') || {
             echo "::error::could not re-read the PR body before arming — refusing to arm (fail closed)."
             disarm_then_exit 1
           }

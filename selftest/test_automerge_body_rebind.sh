@@ -36,7 +36,9 @@
 #                                                    disarms, no arm
 #   7. an edit only gh's sanitizer would hide: the ⇒ stands down; the re-read
 #      gate saw `\^[`, the live body says `\u001b`   is exact, not normalised
-#   8. the re-read fails (HTTP 502)                ⇒ exit 1, disarms, no arm
+#   8. the re-read fails (HTTP 502), or answers an ⇒ exit 1, disarms, no arm
+#      HTTP 200 with nothing in it (gh failed that
+#      too; jq alone reads it as an empty body)
 #   9. the re-read sends the token, and never on a command line
 # Negative control:
 #  10. the old `gh api … --jq '.body // ""'` read planted back ⇒ case 4
@@ -134,6 +136,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "base": {"ref": "main"},
             }
         data = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+        if status == 200 and read("empty_reply") is not None:
+            data = b""
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -257,6 +261,7 @@ run_arm() {
     printf '%s' "$3" > "$API/live_body"
   fi
   echo "${API_STATUS:-200}" > "$API/status"
+  if [ "${API_EMPTY:-0}" = "1" ]; then : > "$API/empty_reply"; else rm -f "$API/empty_reply"; fi
   : > "$API/requests.log"
   : > "$S/calls.log"
   : > "$S/ghout"
@@ -343,6 +348,16 @@ if has "rc=1" && has "could not re-read the PR body before arming" && ! armed &&
   pass "8: the re-read fails (HTTP 502) ⇒ exit 1, disarmed, no arm"
 else
   fail "8: a failed body re-read must fail closed and remove the standing arm"
+  dump
+fi
+# A reply with nothing in it is not an empty description: on a PR whose
+# description IS empty, reading it as one would arm on a body nobody read.
+API_EMPTY=1 run_arm "$T/arm.sh" "" ""
+if has "rc=1" && has "could not re-read the PR body before arming" && ! armed && disarmed && arm_is OFF \
+  && ! grep -q '^stood_down=' "$S/ghout"; then
+  pass "8: an HTTP 200 with nothing in it ⇒ exit 1, disarmed, no arm (on an empty description too)"
+else
+  fail "8: an empty reply must fail closed, not pass for an empty description"
   dump
 fi
 
