@@ -47,7 +47,9 @@ arbitrary helper scripts; that's a different kind of repo.
   description); an edit stands down and disarms, including one gh's
   sanitizer would hide; a failed re-read fails closed; the token is sent,
   never on a command line. A negative control plants the old gh read back
-  and shows it standing down through the real gh.
+  and shows it standing down through the real gh, while that gh still
+  rewrites control characters (probed first, so a gh upgrade that stops
+  rewriting them moves the expectation instead of failing the suite).
 - `test_classify_nocase.sh` — `classify.mjs` case-folds pattern matching for
   `blocked`/`sensitive` **only**. minimatch defaults to case-sensitive, so a
   lowercase `**/secrets*` missed `docs/SECRETS.md` and a production secrets

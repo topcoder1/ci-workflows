@@ -43,6 +43,8 @@
 # Negative control:
 #  10. the old `gh api … --jq '.body // ""'` read planted back ⇒ case 4
 #      stands down, read through the real gh: the harness sees the incident.
+#      The installed gh is probed first; one that stopped rewriting control
+#      characters makes the old read arm instead, and the test expects that.
 #
 # Needs gh, curl, jq and python3 (all on GitHub's ubuntu runners).
 # Run from the repo root:
@@ -290,8 +292,8 @@ dump() {
   sed 's/^/    output: /' "$S/ghout"
 }
 
-expect_arms() { # description, event body, [live body — default: unchanged]
-  run_arm "$T/arm.sh" "$2" "${3-$2}"
+expect_arms() { # description, event body, [live body — default: unchanged] [, script]
+  run_arm "${4:-$T/arm.sh}" "$2" "${3-$2}"
   if has "rc=0" && armed && ! disarmed && arm_is ON && published "armed=1" \
     && ! grep -q '^stood_down=' "$S/ghout" && ! has "PR body changed"; then
     pass "$1"
@@ -375,10 +377,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. Negative control: plant the old gh read back; case 4 must stand down,
-# through the real gh. Without this the harness could lose its real-gh path
-# and every case above would still pass.
+# 10. Negative control: plant the old gh read back and run case 4 through it.
+# Without this the harness could lose its real-gh path and every case above
+# would still pass. The installed gh is probed first, through the same stub:
+# while it rewrites control characters (gh 2.89 does), the old read must
+# stand down; a gh that returns them unchanged makes the old read arm
+# instead, so a CLI upgrade moves the expectation rather than failing an
+# unchanged fix.
 # ---------------------------------------------------------------------------
+printf '%s' "$COLOUR" > "$API/live_body"
+echo 200 > "$API/status"
+rm -f "$API/empty_reply"
+probe=$(STUB_DIR="$S" REAL_GH="$REAL_GH" API_URL="$API_URL" EVENT_HEAD="$EVENT_HEAD" GH_TOKEN="$TOKEN" \
+  "$T/bin/gh" api repos/stub/repo/pulls/42 --jq '.body // ""' < /dev/null) || probe="<the probe failed>"
 if python3 -I - "$T/arm.sh" "$T/arm_old.sh" <<'PY'; then
 import re
 import sys
@@ -390,8 +401,14 @@ if len(read.findall(src)) != 1:
     sys.exit("cannot plant the old read: the body re-read is not one `now_body=$(…) || {`")
 open(sys.argv[2], "w").write(read.sub(lambda m: old, src, count=1))
 PY
-  expect_body_stand_down "10: negative control: the old gh read, planted back, stands down on case 4" \
-    "$COLOUR" "$COLOUR" "$T/arm_old.sh"
+  if [ "$probe" != "$COLOUR" ]; then
+    expect_body_stand_down "10: negative control: the old gh read, planted back, stands down on case 4" \
+      "$COLOUR" "$COLOUR" "$T/arm_old.sh"
+  else
+    echo "  note: $("$REAL_GH" --version | head -n 1) returns control characters unchanged"
+    expect_arms "10: with this gh, the old gh read, planted back, arms on case 4" \
+      "$COLOUR" "$COLOUR" "$T/arm_old.sh"
+  fi
   if grep -q 'ua=GitHub CLI' "$API/requests.log"; then
     pass "10: the planted read went through the real gh CLI"
   else
