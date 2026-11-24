@@ -724,12 +724,12 @@ def test_a_pr_file_named_like_a_pathspec_is_taken_off_disk(crafted, tmp_path):
     assert listed == crafted + "\0"
 
 
-# Two names that sort as equal under COLLATING_LOCALE with GNU sort, as
-# glibc's en_US.UTF-8 gives U+0860 and U+0861 (Syriac letters) no collation
-# weight, and with macOS's sort, which weighs every non-ASCII character alike.
-# Ubuntu 26.04's sort is uutils', whose -u breaks a collation tie by the
-# bytes, so it never sorts two names as equal; GNU sort is gnusort there.
-# COLLATING_SORT runs the control and the step's sort.
+# Two names that sort as equal under COLLATING_LOCALE with GNU sort, since
+# glibc's en_US.UTF-8 has no entry for U+0860 or U+0861 (Syriac letters) and
+# collates the two alike, and with macOS's sort. Ubuntu 26.04's sort is
+# uutils', which in sort -zu breaks a tie in collation by the bytes, so it
+# never sorts two names as equal; GNU sort is gnusort there. COLLATING_SORT
+# runs the control and, through a shim, the step's sort.
 COLLATING_LOCALE = "en_US.UTF-8"
 EQUAL_UNDER_COLLATION = [
     "x" + chr(0x860) + "/AGENTS.override.md",
@@ -739,7 +739,7 @@ COLLATING_SORT = shutil.which("gnusort") or shutil.which("sort")
 
 
 def test_names_a_utf8_collation_sorts_as_equal_are_each_restored(tmp_path):
-    # Control: under the locale, sort -u keeps one of the two names.
+    # Control: under the locale, COLLATING_SORT -u keeps one of the two names.
     names = "".join(name + "\0" for name in EQUAL_UNDER_COLLATION).encode()
     control = subprocess.run(
         [COLLATING_SORT, "-zu"],
@@ -750,17 +750,30 @@ def test_names_a_utf8_collation_sorts_as_equal_are_each_restored(tmp_path):
     assert control.returncode == 0, control.stderr
     assert control.stdout.count(b"\0") == 1, (
         f"{COLLATING_SORT} does not sort these names as equal under "
-        f"{COLLATING_LOCALE} here"
+        f"{COLLATING_LOCALE} here; without the locale (locale -a), GNU sort "
+        "compares bytes"
     )
     checkout = Checkout(
         tmp_path,
         {"app.py": "x = 1\n"},
         {name: "PR-head scoped override\n" for name in EQUAL_UNDER_COLLATION},
     )
-    environment = shim(tmp_path / "shims", "sort", f'exec "{COLLATING_SORT}" "$@"\n')
-    environment["LC_ALL"] = COLLATING_LOCALE
+    # The step's one sort call must reach the shim: on Ubuntu 26.04 a sort
+    # run by another path is uutils', which merges nothing, so the test would
+    # pass whatever the step did.
+    count = tmp_path / "sort-calls"
+    count.write_text("0\n")
+    environment = shim(
+        tmp_path / "shims",
+        "sort",
+        'n=$(($(cat "$FIXTURE_SORT_CALLS") + 1))\n'
+        'echo "$n" > "$FIXTURE_SORT_CALLS"\n'
+        f'exec "{COLLATING_SORT}" "$@"\n',
+    )
+    environment.update(LC_ALL=COLLATING_LOCALE, FIXTURE_SORT_CALLS=str(count))
     result = run_step(checkout, environment=environment)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert count.read_text() == "1\n"
     assert checkout.tree() == {"app.py": "x = 1\n"}
     assert result.stdout.endswith(": 2 path(s).\n")
 
