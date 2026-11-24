@@ -725,11 +725,11 @@ def test_a_pr_file_named_like_a_pathspec_is_taken_off_disk(crafted, tmp_path):
 
 
 # Two names that sort as equal under COLLATING_LOCALE with GNU sort, since
-# glibc's en_US.UTF-8 has no entry for U+0860 or U+0861 (Syriac letters) and
-# collates the two alike, and with macOS's sort. Ubuntu 26.04's sort is
-# uutils', which in sort -zu breaks a tie in collation by the bytes, so it
-# never sorts two names as equal; GNU sort is gnusort there. COLLATING_SORT
-# runs the control and, through a shim, the step's sort.
+# glibc's en_US.UTF-8 has no collation entry for U+0860 or U+0861 (Syriac
+# letters) and collates the two alike, and with macOS's sort. Ubuntu 26.04's
+# sort is uutils', which in sort -zu breaks a tie in collation by the bytes,
+# so it never sorts two names as equal; GNU sort is gnusort there.
+# COLLATING_SORT runs the control and, through a shim, the step's sort.
 COLLATING_LOCALE = "en_US.UTF-8"
 EQUAL_UNDER_COLLATION = [
     "x" + chr(0x860) + "/AGENTS.override.md",
@@ -759,8 +759,8 @@ def test_names_a_utf8_collation_sorts_as_equal_are_each_restored(tmp_path):
         {name: "PR-head scoped override\n" for name in EQUAL_UNDER_COLLATION},
     )
     # The step's one sort call must reach the shim: on Ubuntu 26.04 a sort
-    # run by another path is uutils', which merges nothing, so the test would
-    # pass whatever the step did.
+    # run by another path is uutils', which merges no two distinct names, so
+    # the test would pass whether or not the step sets LC_ALL=C.
     count = tmp_path / "sort-calls"
     count.write_text("0\n")
     environment = shim(
