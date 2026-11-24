@@ -45,6 +45,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_bot_skip_commit_authorship.sh",
     "selftest/test_classifier_deps_vendored.sh",
     "selftest/test_classify_bracket_guard.sh",
+    "selftest/test_classify_control_char_paths.sh",
     "selftest/test_classify_dead_entry_guard.sh",
     "selftest/test_classify_env_globs.sh",
     "selftest/test_classify_exclude.sh",

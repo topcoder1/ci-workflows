@@ -141,8 +141,19 @@ jobs:
           # --name-only` HTTP-406s on diffs >20k lines (dotclaude#121).
           # (Also sidesteps the old "--repo required without a local
           # checkout" footgun — the API form never needs a checkout.)
+          #
+          # Every check below reads these names one per line, and git allows
+          # a line break in a file name: such a name would be read as two,
+          # each judged alone, and the halves can pass a check the whole
+          # name fails (`docs/customer/terms<LF>docs/guide.md` reads as two
+          # safe docs paths, while a caller's `docs/customer/**/*.md` gates
+          # the whole). So both listings print a name holding a control
+          # character (C0 or DEL) as a marker no real path can equal, since
+          # no path starts with "/", and the step stops on it after the
+          # rename listing below. Pinned by
+          # selftest/test_classify_control_char_paths.sh.
           changed=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[].filename')
+            --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
           # NOTE the 3000-file truncation check lives AFTER the override
           # block below, not here. Both exit early with all_safe=0, but only
           # the overrides also emit a revoke-triggering reason
@@ -277,7 +288,23 @@ jobs:
           # reads changed files alone so that a diff whose only unsafe path
           # is a rename source still reaches tiers 2 and 3.
           renamed_from=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[] | select(.previous_filename) | .previous_filename')
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
+
+          # The marker either listing prints, matched as a whole line by bash
+          # itself: no pipe for an early-exiting grep to lose an EPIPE race
+          # on under pipefail, and no here-string to fail to write. Checked
+          # before any tier reads a name, and exits 0 with a verdict, like
+          # every other branch here: this revision cannot be shown clean, so
+          # the revoke step disarms an arm an earlier revision placed, for
+          # the reason it gives for `file-list-truncated`. Both
+          # claude-author-automerge lanes stop on the same names wherever
+          # they run, and Dependabot never writes one.
+          if [[ $'\n'"$changed"$'\n'"$renamed_from"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
+            echo "all_safe=0" >> "$GITHUB_OUTPUT"
+            echo "reason=control-character-path" >> "$GITHUB_OUTPUT"
+            echo "::error::a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and these checks read paths one per line, so they cannot judge that path intact — not arming, and revoking any standing arm (fail closed). Rename the file, or merge manually."
+            exit 0
+          fi
 
           override_hits=""
           while IFS= read -r f; do
@@ -711,8 +738,12 @@ jobs:
             echo "classified_head=$listed_head" >> "$GITHUB_OUTPUT"
           fi
 
+          # A name holding a control character is listed as a marker and held
+          # below, for the reason the classify step gives: classify.mjs reads
+          # one path per line. This listing is checked on its own because it
+          # is a fresh read, not the classify step's.
           changed=$(retry gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[].filename') || \
+            --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end') || \
             hold "file-list-unreadable" \
               "could not list PR changed files after 3 attempts — refusing to arm auto-merge (fail closed)."
           if [ "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 3000 ]; then
@@ -729,11 +760,16 @@ jobs:
           # highest-priority class across the set, so adding paths can only
           # move the verdict toward gating.
           renamed_from=$(retry gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || \
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end') || \
             hold "file-list-unreadable" \
               "could not list PR rename sources after 3 attempts — refusing to arm auto-merge (fail closed)."
           if [ -n "$renamed_from" ]; then
             changed=$(printf '%s\n%s' "$changed" "$renamed_from")
+          fi
+          # Whole-line match in bash itself, as in the classify step.
+          if [[ $'\n'"$changed"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
+            hold "control-character-path" \
+              "a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and paths reach the classifier one per line, so it cannot be classified intact — refusing to arm auto-merge (fail closed). Rename the file, or merge manually."
           fi
 
           # The SAME classifier pr-classify.yml and claude-author-automerge.yml
@@ -814,6 +850,10 @@ jobs:
       # claude-author-automerge.yml also fails closed on truncation — so this
       # does not fight a workflow that would legitimately arm.
       # (Codex review round 10 P2.)
+      # `control-character-path` joins for the same reason: a changed name
+      # or rename source holding a control character cannot be read intact
+      # by the one-path-per-line checks, so the revision cannot be shown
+      # clean, and claude-author-automerge fails closed on it too.
       # `risk-tier-hold` joins the revoke set for the same reason as the
       # override: GitHub PRESERVES an auto-merge request across pushes, so
       # "PR touches only kb/*.spec.ts (armed here) → push adds
@@ -871,6 +911,7 @@ jobs:
            steps.classify.outputs.reason == 'risk-tier-hold' ||
            steps.classify.outputs.reason == 'standing-arm-risk-tier' ||
            steps.classify.outputs.reason == 'file-list-truncated' ||
+           steps.classify.outputs.reason == 'control-character-path' ||
            steps.classifier_hold.outputs.hold == '1' ||
            ((steps.classify.outputs.all_safe == '1' ||
              steps.classify.outputs.standing_arm_check == '1') &&
