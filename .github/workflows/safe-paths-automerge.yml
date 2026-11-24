@@ -155,28 +155,32 @@ jobs:
           # control_char_stop exits 0 with a verdict, like every other branch
           # here: this revision cannot be shown clean, so the revoke step
           # disarms an arm an earlier revision placed, for the reason it gives
-          # for `file-list-truncated`. Each listing is checked as soon as it
-          # returns: waiting for the rename listing would let that call's
-          # failure kill the step with no verdict, and no revoke. One residual,
-          # shared with `file-list-truncated`: claude-author-automerge stops on
-          # these names in both its lanes, but runs neither on a repo with no
-          # risk-paths.yml whose PR carries the bypass label, so there its arm
-          # races this revoke. That label releases its path scan, never this
-          # verdict.
+          # for `file-list-truncated`. So each listing is checked as soon as
+          # it returns, and before its own exit status: a failed call must not
+          # end the step with no verdict, and no revoke, when its earlier
+          # pages, or the listing before it, already printed the marker. A
+          # failure with no marker still fails the step, as before. One
+          # residual, shared with `file-list-truncated`: claude-author-automerge
+          # stops on these names in both its lanes, but runs neither on a repo
+          # with no risk-paths.yml whose PR carries the bypass label, so there
+          # its arm races this revoke. That label releases its path scan, never
+          # this verdict.
           control_char_stop() {
             echo "all_safe=0" >> "$GITHUB_OUTPUT"
             echo "reason=control-character-path" >> "$GITHUB_OUTPUT"
             echo "::error::a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and these checks read paths one per line, so they cannot judge that path intact — not arming, and revoking any standing arm (fail closed). Rename the file, or merge manually."
             exit 0
           }
+          list_rc=0
           changed=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
+            --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end') || list_rc=$?
           # The marker, matched as a whole line by bash itself: no pipe for an
           # early-exiting grep to lose an EPIPE race on under pipefail, and no
           # here-string to fail to write.
           if [[ $'\n'"$changed"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
             control_char_stop
           fi
+          [ "$list_rc" -eq 0 ] || exit "$list_rc"
           # NOTE the 3000-file truncation check lives AFTER the override
           # block below, not here. Both exit early with all_safe=0, but only
           # the overrides also emit a revoke-triggering reason
@@ -311,10 +315,11 @@ jobs:
           # reads changed files alone so that a diff whose only unsafe path
           # is a rename source still reaches tiers 2 and 3.
           renamed_from=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end') || list_rc=$?
           if [[ $'\n'"$renamed_from"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
             control_char_stop
           fi
+          [ "$list_rc" -eq 0 ] || exit "$list_rc"
 
           override_hits=""
           while IFS= read -r f; do

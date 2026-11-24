@@ -40,10 +40,12 @@
 #      guarded as well as the changed-file listing.
 #   3. Both ends of the range: DEL in a changed name, and U+001F in a rename
 #      source.
-#   4. A marked changed-file listing followed by a FAILING rename listing still
-#      fails closed. In safe-paths' classify step that means its revoking
-#      verdict: waiting for the rename call would let its failure kill the
-#      step with no verdict, and the revoke step would not fire.
+#   4. A listing that fails still fails closed when a marker was already
+#      printed: a marked changed-file listing followed by a failing rename
+#      listing, and a listing that fails after printing the marker (a later
+#      page failing), in either listing. In safe-paths' classify step that
+#      means its revoking verdict: a failed call ending the step first would
+#      leave no verdict, and the revoke step would not fire.
 #   5. Controls: plain names, with spaces and non-ASCII letters, classify as
 #      before; a plain gated path still gates.
 #   6. Mutation controls: the same step with the guard's test replaced by
@@ -168,9 +170,11 @@ done
 # Stubs. `gh` serves the files API from $STUB_FILES_JSON through the caller's
 # own --jq (one page of per_page, default 30, without --paginate; up to the
 # API's 3000-entry cap with it), the base-ref rules and the real classifier
-# as base64 contents, a fixed head, no labels and no standing arm. With
-# STUB_RENAME_FAILS=1 every rename-source listing (told apart by its --jq
-# text) fails like an API error.
+# as base64 contents, a fixed head, no labels and no standing arm. STUB_FAIL
+# makes a listing (the rename one told apart by its --jq text) fail like an
+# API error: `rename` fails the rename listing with no output;
+# `changed-partial` and `rename-partial` fail that listing after printing its
+# answer, as gh does when a later page fails.
 # ---------------------------------------------------------------------------
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -180,19 +184,21 @@ jq_filter() { while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && { printf '%s' "$2"; re
 case "$args" in
   *pulls/*/files*)
     filter=$(jq_filter "$@") || { echo "gh-stub: files call without --jq: $args" >&2; exit 64; }
-    case "$filter" in
-      *previous_filename*)
-        if [ "${STUB_RENAME_FAILS:-0}" = 1 ]; then
-          echo "gh: Internal Server Error (HTTP 500)" >&2
-          exit 1
-        fi
-        ;;
-    esac
+    which=changed
+    case "$filter" in *previous_filename*) which=rename ;; esac
+    if [ "${STUB_FAIL:-}" = "$which" ]; then
+      echo "gh: Internal Server Error (HTTP 500)" >&2
+      exit 1
+    fi
     url="${2:-}"
     limit=30
     case "$url" in *per_page=*) limit="${url##*per_page=}"; limit="${limit%%&*}" ;; esac
     case " $args " in *" --paginate "*) limit=3000 ;; esac
     jq -r ".[:$limit] | $filter" "$STUB_FILES_JSON"
+    if [ "${STUB_FAIL:-}" = "$which-partial" ]; then
+      echo "gh: Bad Gateway (HTTP 502)" >&2
+      exit 1
+    fi
     ;;
   *"--jq .head.sha"*) printf '%s\n' "$STUB_HEAD" ;;
   *auto_merge*) echo none ;;
@@ -208,9 +214,9 @@ chmod +x "$T/bin/gh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/sleep"
 chmod +x "$T/bin/sleep"
 
-RENAME_FAILS=0
+FAIL=""
 # run_lane <lane> <fixture> [unguarded] — sets RC, LOG; outputs in $T/out.
-# Resets RENAME_FAILS.
+# Passes FAIL to the stub as STUB_FAIL, then resets it.
 run_lane() {
   local script="$T/$1.sh"
   [ "${3:-}" = unguarded ] && script="$T/$1-unguarded.sh"
@@ -221,11 +227,11 @@ run_lane() {
     CLASSIFY_SCRIPTS="$T/scripts" GITHUB_OUTPUT="$T/out" RISK_MAIN_GO=true BYPASS_LABEL='' \
     EXTRA_GLOBS='' PR_AUTHOR=someone STANDING_ARM='' \
     STUB_FILES_JSON="$T/fx/$2.json" STUB_RULES="$T/rules.yml" STUB_SCRIPTS="$T/scripts" \
-    STUB_HEAD=c0ffee0000000000000000000000000000000001 STUB_RENAME_FAILS="$RENAME_FAILS" \
+    STUB_HEAD=c0ffee0000000000000000000000000000000001 STUB_FAIL="$FAIL" \
     bash "$script" 2>&1 < /dev/null)
   RC=$?
   set -e
-  RENAME_FAILS=0
+  FAIL=""
 }
 
 out_get() { grep "^$1=" "$T/out" | tail -1 | cut -d= -f2- || true; }
@@ -351,10 +357,13 @@ for lane in $LANES; do
   run_lane "$lane" del;            expect_closed "$lane" "a changed name holding DEL fails closed"
   run_lane "$lane" us-rename;      expect_closed "$lane" "a rename source holding U+001F fails closed"
 
-  # 4. A marked changed-file listing, then a rename listing that fails.
-  RENAME_FAILS=1
-  run_lane "$lane" newline
+  # 4. Listings that fail after the marker was printed.
+  FAIL=rename;          run_lane "$lane" newline
   expect_closed_any "$lane" "a marked changed-name listing still fails closed when the rename listing then fails"
+  FAIL=changed-partial; run_lane "$lane" newline
+  expect_closed_any "$lane" "a changed-name listing that fails after printing the marker still fails closed"
+  FAIL=rename-partial;  run_lane "$lane" tab-rename
+  expect_closed_any "$lane" "a rename listing that fails after printing the marker still fails closed"
 
   # 5. Controls.
   run_lane "$lane" plain
