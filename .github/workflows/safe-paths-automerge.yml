@@ -149,11 +149,34 @@ jobs:
           # safe docs paths, while a caller's `docs/customer/**/*.md` gates
           # the whole). So both listings print a name holding a control
           # character (C0 or DEL) as a marker no real path can equal, since
-          # no path starts with "/", and the step stops on it after the
-          # rename listing below. Pinned by
-          # selftest/test_classify_control_char_paths.sh.
+          # no path starts with "/", and the step stops on it before any tier
+          # reads a name. Pinned by selftest/test_classify_control_char_paths.sh.
+          #
+          # control_char_stop exits 0 with a verdict, like every other branch
+          # here: this revision cannot be shown clean, so the revoke step
+          # disarms an arm an earlier revision placed, for the reason it gives
+          # for `file-list-truncated`. Each listing is checked as soon as it
+          # returns: waiting for the rename listing would let that call's
+          # failure kill the step with no verdict, and no revoke. One residual,
+          # shared with `file-list-truncated`: claude-author-automerge stops on
+          # these names in both its lanes, but runs neither on a repo with no
+          # risk-paths.yml whose PR carries the bypass label, so there its arm
+          # races this revoke. That label releases its path scan, never this
+          # verdict.
+          control_char_stop() {
+            echo "all_safe=0" >> "$GITHUB_OUTPUT"
+            echo "reason=control-character-path" >> "$GITHUB_OUTPUT"
+            echo "::error::a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and these checks read paths one per line, so they cannot judge that path intact — not arming, and revoking any standing arm (fail closed). Rename the file, or merge manually."
+            exit 0
+          }
           changed=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
+          # The marker, matched as a whole line by bash itself: no pipe for an
+          # early-exiting grep to lose an EPIPE race on under pipefail, and no
+          # here-string to fail to write.
+          if [[ $'\n'"$changed"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
+            control_char_stop
+          fi
           # NOTE the 3000-file truncation check lives AFTER the override
           # block below, not here. Both exit early with all_safe=0, but only
           # the overrides also emit a revoke-triggering reason
@@ -289,21 +312,8 @@ jobs:
           # is a rename source still reaches tiers 2 and 3.
           renamed_from=$(gh api "repos/${REPO}/pulls/${PR}/files?per_page=100" \
             --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
-
-          # The marker either listing prints, matched as a whole line by bash
-          # itself: no pipe for an early-exiting grep to lose an EPIPE race
-          # on under pipefail, and no here-string to fail to write. Checked
-          # before any tier reads a name, and exits 0 with a verdict, like
-          # every other branch here: this revision cannot be shown clean, so
-          # the revoke step disarms an arm an earlier revision placed, for
-          # the reason it gives for `file-list-truncated`. Both
-          # claude-author-automerge lanes stop on the same names wherever
-          # they run, and Dependabot never writes one.
-          if [[ $'\n'"$changed"$'\n'"$renamed_from"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
-            echo "all_safe=0" >> "$GITHUB_OUTPUT"
-            echo "reason=control-character-path" >> "$GITHUB_OUTPUT"
-            echo "::error::a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and these checks read paths one per line, so they cannot judge that path intact — not arming, and revoking any standing arm (fail closed). Rename the file, or merge manually."
-            exit 0
+          if [[ $'\n'"$renamed_from"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
+            control_char_stop
           fi
 
           override_hits=""
@@ -853,7 +863,10 @@ jobs:
       # `control-character-path` joins for the same reason: a changed name
       # or rename source holding a control character cannot be read intact
       # by the one-path-per-line checks, so the revision cannot be shown
-      # clean, and claude-author-automerge fails closed on it too.
+      # clean. claude-author-automerge fails closed on it too, except where
+      # the bypass label skips its path scan on a repo with no
+      # risk-paths.yml: there its arm races this revoke, as it does for
+      # `file-list-truncated` (see the classify step).
       # `risk-tier-hold` joins the revoke set for the same reason as the
       # override: GitHub PRESERVES an auto-merge request across pushes, so
       # "PR touches only kb/*.spec.ts (armed here) → push adds

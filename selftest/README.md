@@ -135,18 +135,21 @@ arbitrary helper scripts; that's a different kind of repo.
   line break in a file name, and such a name was read as two, each judged
   alone: `docs/customer/terms<LF>docs/guide.md` matches
   `docs/customer/**/*.md` whole, but its halves match only `docs/**`, so a
-  `sensitive:` doc classified `trivial` and safe-paths would arm it. Each
-  listing prints such a name as a marker no real path can equal, and the step
-  stops on the marker in its own fail-closed shape: a nonzero exit in
-  pr-classify and the automerge lanes, a revoking verdict
-  (`control-character-path`) in the two safe-paths steps. The test runs each
-  shipped step against a stub `gh` that applies the step's own `--jq` with
-  real jq, then the real `classify.mjs`, on a line break, a tab and U+001F in
-  rename sources, and DEL. Controls: plain names with spaces and non-ASCII
-  letters, a plain gated path, each step with its guard's test replaced by
-  `false` (which reproduces the escape), a minimatch check that the whole name
-  is gated and neither half is, hardcoded counts of guarded listings with a
-  broken-guard negative control, and the revoke step's trigger.
+  `sensitive:` doc classified `trivial` and safe-paths would arm it; likewise
+  `docs/deploy<LF>docs/x.sh` escaped the fleet regex
+  `(^|/)deploy.*\.(sh|ya?ml)$`. Each listing prints such a name as a marker no
+  real path can equal, and the step stops on the marker in its own
+  fail-closed shape: a nonzero exit in pr-classify and the automerge lanes, a
+  revoking verdict (`control-character-path`) in the two safe-paths steps.
+  The test runs each shipped step against a stub `gh` that applies the step's
+  own `--jq` with real jq, then the real `classify.mjs`, on both line-break
+  names, a tab and U+001F in rename sources, and DEL; and on a marked listing
+  followed by a failing rename listing, which must still leave safe-paths'
+  revoking verdict. Controls: plain names with spaces and non-ASCII letters,
+  a plain gated path, each step with its guard's test replaced by `false`
+  (which reproduces the escape), checks that each whole name is gated and
+  neither half is, hardcoded counts of guarded files-API calls however their
+  `--jq` is quoted, with two negative controls, and the revoke step's trigger.
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
