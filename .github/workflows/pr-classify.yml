@@ -112,8 +112,18 @@ jobs:
           retry() { local i out; for i in 1 2 3; do if out=$("$@"); then printf '%s' "$out"; return 0; fi; [ "$i" -lt 3 ] && sleep $((i * 5)); done; return 1; }
           # Changed-file names via the paginated files API — `gh pr diff
           # --name-only` HTTP-406s on diffs >20k lines (dotclaude#121).
+          #
+          # The names reach classify.mjs one per line, and git allows a line
+          # break in a file name: such a name would be read as two, each
+          # judged alone, and the halves can slip past a glob the whole name
+          # matches (`docs/customer/terms<LF>docs/guide.md` matches
+          # `docs/customer/**/*.md`; its halves match only `docs/**`). So both
+          # listings print a name holding a control character (C0 or DEL) as
+          # a marker no real path can equal, since no path starts with "/",
+          # and the step fails closed on it before anything is classified.
+          # Pinned by selftest/test_classify_control_char_paths.sh.
           changed=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[].filename')
+            --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
           # The listing endpoint caps at 3000 files. A truncated list can
           # compute a falsely benign class, and the risk:* label is still a
           # gating input for claude-author-automerge.yml (belt-and-suspenders
@@ -130,12 +140,19 @@ jobs:
           # not the path list. Fails closed: a rename source that cannot be
           # read is a path that cannot be classified.
           renamed_from=$(retry gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || {
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end') || {
             echo "::error::could not list PR rename sources after 3 attempts — cannot classify (fail closed). Re-run when the API recovers."
             exit 1
           }
           if [ -n "$renamed_from" ]; then
             changed=$(printf '%s\n%s' "$changed" "$renamed_from")
+          fi
+          # The marker the two listings print, matched as a whole line by bash
+          # itself: no pipe for an early-exiting grep to lose an EPIPE race on
+          # under pipefail, and no here-string to fail to write.
+          if [[ $'\n'"$changed"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
+            echo "::error::a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and paths reach the classifier one per line, so it cannot be classified intact (fail closed). Rename the file, or merge manually."
+            exit 1
           fi
           class=$(echo "$changed" | node "${CLASSIFY_SCRIPTS:?}/classify.mjs")
           echo "class=$class" >> "$GITHUB_OUTPUT"
