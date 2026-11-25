@@ -34,6 +34,7 @@ _SHELL_SELFTESTS = [
     "selftest/test_automerge_body_rebind.sh",
     "selftest/test_automerge_decision_label.sh",
     "selftest/test_automerge_detect_authorship.sh",
+    "selftest/test_automerge_error_revoke_retry.sh",
     "selftest/test_automerge_findings_gate.sh",
     "selftest/test_automerge_hold_gate.sh",
     "selftest/test_automerge_output_injection.sh",

@@ -49,8 +49,9 @@ and on the bypass paths it only delays the arm.
    only, for a bot that cannot disarm.
 4. Fail closed: only OFF counts. An arm still ON after the disarm, or an arm
    state that cannot be read, fails the step, the always() error revoke
-   retries the disarm, and the decision label is not published, so the
-   announcement never outruns the enforcement. A failed Option B probe (an
+   retries the disarm (three attempts as github-actions[bot], then the PAT),
+   and the decision label is not published, so the announcement never
+   outruns the enforcement. A failed Option B probe (an
    HTML 5xx body jq cannot parse) skips the step under implicit success(),
    and the error revoke disarms instead: an unreadable check released
    nothing.
@@ -1229,23 +1230,42 @@ def test_a_transient_disarm_failure_retries_as_the_bot(tmp_path):
 # 4. Fail closed: only OFF counts.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "fault, state, arm",
+    "fault, state, error_revoke, error_attempts",
     [
-        pytest.param({"bot_cannot_disarm": True}, "ON", "ON", id="still-on"),
-        pytest.param({"pr_view_fails": True}, "UNKNOWN", "OFF", id="unreadable"),
+        # The bot is refused every time, so the error revoke's own fallback,
+        # the PAT, is what finally takes the arm.
+        pytest.param(
+            {"bot_cannot_disarm": True},
+            "ON",
+            "success",
+            [GITHUB_TOKEN] * 3 + [PAT],
+            id="still-on",
+        ),
+        # The risk-tier revoke's disarm took, but no token can read the
+        # state, so nothing verifies OFF and the error revoke fails too.
+        pytest.param(
+            {"pr_view_fails": True},
+            "UNKNOWN",
+            "failure",
+            [GITHUB_TOKEN] * 3 + [PAT] * 3,
+            id="unreadable",
+        ),
     ],
 )
-def test_an_unverified_disarm_fails_closed(tmp_path, fault, state, arm):
+def test_an_unverified_disarm_fails_closed(
+    tmp_path, fault, state, error_revoke, error_attempts
+):
     stub = Stub(tmp_path)
     job = run_job(stub, Revision(RISKY, armed=True, **fault))
     assert job.outcome(REVOKE) == "failure", (
         f"an arm state of {state} passed as revoked:\n{job}"
     )
     assert f"after risk-tier revoke: {state}" in job.logs[REVOKE], str(job)
-    assert job.arm == arm, str(job)
-    assert job.disable_steps == [REVOKE, ERROR_REVOKE], (
-        f"the error revoke did not retry the disarm:\n{job}"
-    )
+    assert job.arm == "OFF", str(job)
+    assert job.disarm_attempts == [(REVOKE, GITHUB_TOKEN)] + [
+        (ERROR_REVOKE, token) for token in error_attempts
+    ], f"the error revoke did not retry the disarm:\n{job}"
+    assert job.outcome(ERROR_REVOKE) == error_revoke, str(job)
     assert RISK_LABEL not in job.labels, (
         f"the decision label announced a block the revoke could not verify:\n{job}"
     )
@@ -1595,10 +1615,13 @@ def _scenario_stand_down_the_bot_cannot_disarm(tmp_path, steps):
             lambda job: job.disarmed_by == [(ARM, PAT)],
             id="arm-disarm-without-bot-retries",
         ),
+        # Not `job.arm == "ON"`: the arm step then fails, and the error
+        # revoke's own PAT fallback removes the arm.
         pytest.param(
             _edit(ARM, "run", 'disarm_as "$GH_TOKEN"', "return 1"),
             _scenario_stand_down_the_bot_cannot_disarm,
-            lambda job: job.arm == "ON",
+            lambda job: (ARM, PAT) not in job.disarm_attempts
+            and job.outcome(ARM) == "failure",
             id="arm-disarm-without-the-pat-fallback",
         ),
     ],

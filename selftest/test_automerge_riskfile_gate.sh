@@ -130,13 +130,18 @@ else
   echo "✗ $WF does not bind the arm to the classified head SHA — a mid-run push could inherit the arm"
   failed=1
 fi
+# The guard is looked for in the whole step, up to the next one, not in a
+# fixed number of lines after its name: the step grew (its disarm retries)
+# and left the guard's notice on the last line of a 40-line window.
+error_step=$(awk '/^      - name: Revoke auto-merge if gates errored$/ { f = 1; print; next }
+  f && /^      - name: / { exit } f' "$WF")
 if grep -q 'name: Revoke auto-merge if gates errored' "$WF" \
   && grep -A5 'name: Revoke auto-merge if gates errored' "$WF" | grep -q 'always()' \
   && grep -q "steps.classifier_verdict.outcome == 'failure'" "$WF" \
   && grep -q "steps.risk.outcome == 'failure'" "$WF" \
   && grep -q "steps.setup_node.outcome == 'failure'" "$WF" \
   && grep -q "steps.checkout.outcome == 'failure'" "$WF" \
-  && grep -A40 'name: Revoke auto-merge if gates errored' "$WF" | grep -q 'skipping stale revoke'; then
+  && grep -q 'skipping stale revoke' <<< "$error_step"; then
   echo "✓ $WF revokes an existing arm under always() when a gating or prerequisite step errors (head-ownership-guarded)"
 else
   echo "✗ $WF error-revoke step missing, not covering gate + prerequisite failures, or lacking the head-ownership guard"
