@@ -10,9 +10,10 @@ whose text was there:
 match sits at byte 489, so printf was still writing when grep left: it died of
 SIGPIPE (status 141), and `set -o pipefail`, which every selftest here turns
 on, made 141 the pipeline's status. The check failed on a match. In an
-ubuntu:26.04 container (bash 5.3.9, CI's runner image) that one line failed 16
-times in 9,000; on macOS (bash 3.2) 0 times in 2,000, so a local run will not
-show it. `grep -m N` and `grep -l` stop at a match too. A negative check
+ubuntu:26.04 container (bash 5.3.9, CI's runner image) that line failed 11
+times in 12,000, and its here-string form 0 times in the same run; it was not
+seen in 2,000 runs on macOS (bash 3.2), so a local run will not show it.
+`grep -m N`, `grep -l` and `grep -L` stop at a match too. A negative check
 (`! ... | grep -q`) fails the other way: when the text it exists to catch is
 there, it can read as absent and pass.
 
@@ -31,21 +32,31 @@ the same rule: give such a grep a here-string or a file, never a pipe.
 
 Three layers:
 
-1. `stopping_grep_pipes` finds a pipe into grep run with -q/--quiet/--silent,
-   -m/--max-count or -l/--files-with-matches. It reads shell, not lines:
-   quoted text and comments are blanked first, so the CONTROL fixtures (the
-   old form held as data) and comments that name the shape do not count,
-   while a "$(...)" inside double quotes and here-document bodies are read
-   as code (the selftests write their stubs as here-documents). A quote or a
-   "$(" the scanner cannot close fails the scan rather than hiding the rest
-   of a file.
+1. `stopping_grep_pipes` finds a pipe into grep (also behind variable
+   assignments or `command`) run with -q/--quiet/--silent, -m/--max-count,
+   -l/--files-with-matches or -L/--files-without-match. It reads shell, not
+   lines: quoted text and comments are blanked first, so the CONTROL fixtures
+   (the old form held as data) and comments that name the shape do not count,
+   while a "$(...)" inside double quotes and here-document bodies are read as
+   code (the selftests write their stubs as here-documents). A quote or a "$("
+   the scanner cannot close fails the scan rather than hiding the rest of a
+   file.
 2. Synthetic snippets pin what the scanner flags and what it leaves alone, so
    a scanner that finds nothing fails here instead of passing the repo scan
    vacuously.
 3. The repo scan reads every selftest/*.sh and fails on each hit with its
-   file, line and the rewrite. A floor on the file count, a named file and the
-   quote-blind sighting of the CONTROL fixtures keep a moved glob, or a
-   scanner that stopped reading the files, from passing.
+   file, line and the rewrite. A floor on the file count and a named file keep
+   a moved glob from passing. A pipe appended to each script, which the scan
+   must report at that script's last line, keeps a scanner that stopped
+   reading part of a file from passing (on a clean tree the repo scan alone
+   would find nothing either way).
+
+Not covered, and none of it occurs today: grep behind a wrapper or a group
+(`timeout 5 grep`, `{ grep ...; }`), an option after a redirection
+(`grep y 2>/dev/null -q`) or in quotes (`grep '-q'`), abbreviated long
+options (`--qui`), an apostrophe in the body of an unquoted here-document
+(bash reads it as a plain character; the scanner as a quote, which hides the
+rest of that body), and a `case` inside a double-quoted "$(...)".
 """
 
 import pathlib
@@ -65,17 +76,25 @@ _HEREDOC = re.compile(
     r"(?:'(?P<sq>[^'\n]*)'|\"(?P<dq>[^\"\n]*)\"|\\?(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
 )
 # A single pipe (not `||`, not the `>|` redirect), `|&` too, into grep by any
-# name or path. Runs on masked text, where only real operators survive.
-_PIPE_INTO_GREP = re.compile(r"(?<![|>])\|&?(?!\|)\s*(?:\S*/)?[ef]?grep(?=[\s;&|)]|$)")
+# name or path, after any variable assignments (`LC_ALL=C grep`) or
+# `command`. Runs on masked text, where only real operators survive.
+_PIPE_INTO_GREP = re.compile(
+    r"(?<![|>])\|&?(?!\|)\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:command\s+)?"
+    r"(?:\S*/)?[ef]?grep(?=[\s;&|)]|$)"
+)
 
 # grep options that stop reading at a match, and the ones that take an
 # argument (so the next characters or word are that argument, not options).
-_STOP_SHORT = frozenset("qlm")
-_STOP_LONG = frozenset({"quiet", "silent", "files-with-matches", "max-count"})
+_STOP_SHORT = frozenset("qlLm")
+_STOP_LONG = frozenset(
+    {"quiet", "silent", "files-with-matches", "files-without-match", "max-count"}
+)
 _ARG_SHORT = frozenset("ABCDdef")
 _ARG_LONG = frozenset(
     {
         "regexp",
+        "group-separator",
         "file",
         "after-context",
         "before-context",
@@ -292,6 +311,10 @@ FLAGGED = {
     "-m": "a | grep -m1 y\n",
     "--max-count": "a | grep --max-count=1 y\n",
     "-l": "a | grep -l y\n",
+    "-L": "a | grep -L y\n",
+    "--files-without-match": "a | grep --files-without-match y\n",
+    "a variable assignment before grep": "a | LC_ALL=C grep -q y\n",
+    "command grep": "a | command grep -q y\n",
     "option after the pattern": "a | grep 'y' -q\n",
     "inside $(...)": "x=$(a | grep -q y && echo 1)\n",
     "inside a double-quoted $(...)": 'x="$(a | grep -q y && echo 1)"\n',
@@ -320,6 +343,7 @@ CLEAN = {
     "-e takes the next word": "a | grep -e -q f\n",
     "-- ends the options": "a | grep -- -q f\n",
     "-e with its pattern attached": "a | grep -eq f\n",
+    "--group-separator takes the next word": "a | grep --group-separator -q y\n",
     "escaped bar": "echo \\| grep -q y\n",
     ">| redirect": "a >| grep -q\n",
     "apostrophe in a data here-document": "cat <<'EOF'\nit's\nEOF\nb='x | grep -q y'\n",
@@ -384,6 +408,16 @@ def test_scan_reads_the_selftests():
     } <= sighted
 
 
+@pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)
+def test_scanner_reads_each_selftest_to_its_end(path):
+    # On a clean tree the repo scan finds nothing, and so would a scanner that
+    # stopped reading part of each file. A pipe appended to each real script
+    # must be reported at that script's last line.
+    text = path.read_text(encoding="utf-8").rstrip("\n") + "\n"
+    probe = "printf x | grep -q y"
+    assert (text.count("\n") + 1, probe) in stopping_grep_pipes(text + probe + "\n")
+
+
 def test_no_selftest_pipes_into_a_stopping_grep():
     hits = []
     for p in SCRIPTS:
@@ -397,5 +431,8 @@ def test_no_selftest_pipes_into_a_stopping_grep():
         "pipe into a grep that stops at a match: under `set -o pipefail` the"
         " writer can die of SIGPIPE first and fail the check (see this"
         " file's docstring). Feed grep a here-string instead:"
-        ' `grep -q PAT <<<"$x"` or `grep -q PAT <<<"$(cmd)"`.\n' + "\n".join(hits)
+        ' `grep -q PAT <<<"$x"` or `grep -q PAT <<<"$(cmd)"`. If the hit is'
+        " data in a here-document (a fixture, not code the test runs), hold"
+        " it in a quoted variable instead, as the CONTROL fixtures do.\n"
+        + "\n".join(hits)
     )
