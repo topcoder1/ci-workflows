@@ -189,6 +189,25 @@ arbitrary helper scripts; that's a different kind of repo.
   (which reproduces the escape), checks that each whole name is gated and
   neither half is, hardcoded counts of guarded files-API calls however their
   `--jq` is quoted, with two negative controls, and the revoke step's trigger.
+- `test_codex_review_control_char_paths.sh` — the same guard in
+  `codex-review.yml`'s diff step, which hands the PR's paths to
+  `codex-gate.mjs` one per line. There a line-break name could skip a Codex
+  review the caller requires: `docs/customer/terms<LF>docs/guide.md` matches
+  an `always_review:` entry `docs/customer/**/*.md` whole, but its halves are
+  docs paths, so a 100-line diff skipped as docs-only, and a skipped review
+  still concludes the job `success`. The step now stops with an `::error::`
+  and a nonzero exit, writing no line count and no path list, on a changed
+  name or rename source holding a C0 control character or DEL. The test runs
+  the shipped step against a stub `gh` that applies the step's own `--jq`
+  with real jq, then the real `codex-gate.mjs`, on a line-break name, a tab
+  and U+001F in rename sources, DEL, and listings that fail partway, with or
+  without the marker. Controls: plain names with spaces, accents, an emoji
+  and the marker's own text reach the gate byte for byte and still run Codex
+  on an `always_review` match; a plain docs-only diff still skips; the step
+  with its guard's test replaced
+  by `false` reproduces the escape; the whole name is shown to match the glob
+  and neither half; a hardcoded count of guarded files-API calls, with two
+  negative controls.
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
