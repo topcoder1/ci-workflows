@@ -142,8 +142,20 @@ jobs:
           # Changed-file names via the paginated files API — `gh pr diff`
           # HTTP-406s on diffs >20k lines (dotclaude#121), which are
           # exactly the oversized PRs the size gate must still classify.
+          #
+          # The names reach codex-gate.mjs one per line, and git allows a
+          # line break in a file name: such a name would be read as two,
+          # each judged alone, and the halves can miss an always_review glob
+          # the whole name matches (`docs/customer/terms<LF>docs/guide.md`
+          # matches `docs/customer/**/*.md`; its halves are docs paths the
+          # docs/tests-only rule skips). So both listings print a name
+          # holding a control character (C0 or DEL) as a marker no real path
+          # can equal, since no path starts with "/", and the step fails
+          # closed on it below, before the gate reads a name: the guard
+          # pr-classify.yml carries. Pinned by
+          # selftest/test_codex_review_control_char_paths.sh.
           files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[].filename')
+            --paginate --jq '.[].filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end')
           # The listing endpoint caps at 3000 files. A truncated list could
           # hide an always_review path from codex-gate.mjs and silently
           # skip a required review — stay red like the other gates do.
@@ -159,12 +171,19 @@ jobs:
           # cover. Appended after the count above, which caps the listing
           # endpoint, not the path list. Fails closed, like the listing.
           renamed_from=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
-            --paginate --jq '.[] | select(.previous_filename) | .previous_filename') || {
+            --paginate --jq '.[] | select(.previous_filename) | .previous_filename | if (explode | any(. < 32 or . == 127)) then "/CONTROL-CHARACTER-IN-PATH" else . end') || {
             echo "::error::could not list PR rename sources — cost gate cannot classify (fail closed). Re-run the job."
             exit 1
           }
           if [ -n "$renamed_from" ]; then
             files=$(printf '%s\n%s' "$files" "$renamed_from")
+          fi
+          # The marker the two listings print, matched as a whole line by bash
+          # itself: no pipe for an early-exiting grep to lose an EPIPE race on
+          # under pipefail, and no here-string to fail to write.
+          if [[ $'\n'"$files"$'\n' == *$'\n/CONTROL-CHARACTER-IN-PATH\n'* ]]; then
+            echo "::error::a changed file name or rename source holds a control character (a line break, tab, other C0 character or DEL), and paths reach the cost gate one per line, so it cannot judge them intact (fail closed). Rename the file, or review manually."
+            exit 1
           fi
           # additions+deletions equals the +/- line count (sans +++/---
           # file markers) the old `gh pr diff | awk` pass computed, without
