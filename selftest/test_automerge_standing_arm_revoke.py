@@ -16,7 +16,8 @@ Every case runs the job the way Actions does: the SHIPPED steps in order, each
 step's SHIPPED `if:`, `env:` and `run:` expressions evaluated against the event
 and the outputs of the steps before it, and each run block executed under
 `bash -e` against a gh stub that holds one pull request's state (files,
-labels, comments, timeline, the auto-merge arm) across the runs of a case.
+labels, comments, timeline, the auto-merge arm) across the runs of a case,
+and a curl stub that serves the arm step's body re-read from that state.
 Nothing here mirrors the workflow's wiring, so a condition, an env mapping or
 a token that drifts changes the verdict. The quiet gate is switched off
 (`findings_quiet_minutes: 0`): it never runs on a risky, unbypassed verdict,
@@ -48,8 +49,9 @@ and on the bypass paths it only delays the arm.
    only, for a bot that cannot disarm.
 4. Fail closed: only OFF counts. An arm still ON after the disarm, or an arm
    state that cannot be read, fails the step, the always() error revoke
-   retries the disarm, and the decision label is not published, so the
-   announcement never outruns the enforcement. A failed Option B probe (an
+   retries the disarm (three attempts as github-actions[bot], then the PAT),
+   and the decision label is not published, so the announcement never
+   outruns the enforcement. A failed Option B probe (an
    HTML 5xx body jq cannot parse) skips the step under implicit success(),
    and the error revoke disarms instead: an unreadable check released
    nothing.
@@ -576,6 +578,54 @@ finally:
         json.dump(state, f)
 """
 
+# ---------------------------------------------------------------------------
+# The curl stub: the arm step re-reads the PR body with curl and jq, never gh
+# (gh's JSON sanitizer rewrites control characters, so its copy of a body can
+# differ from the event payload's; selftest/test_automerge_body_rebind.sh). It
+# serves GET pulls/7 from the gh stub's state, fails on the same knobs the way
+# `curl -f` does (exit 22, nothing on stdout), and logs the call under the
+# token the step pipes in on stdin.
+# ---------------------------------------------------------------------------
+CURL_STUB = r"""#!__PYTHON__ -S
+import json
+import os
+import sys
+
+BOT, PAT = "__BOT__", "__PAT__"
+URL = "https://api.github.com/repos/__REPO__/pulls/__PR__"
+
+path = os.environ["STUB_STATE"]
+with open(path) as f:
+    state = json.load(f)
+argv = sys.argv[1:]
+step = os.environ.get("STUB_STEP", "")
+token = ""
+for line in sys.stdin.read().splitlines():
+    name, _, value = line.partition(":")
+    if name.lower() == "authorization" and value.strip().startswith("Bearer "):
+        token = value.strip()[len("Bearer "):]
+state["calls"].append({"step": step, "token": token, "argv": ["curl"] + argv})
+with open(path, "w") as f:
+    json.dump(state, f)
+if argv[-1:] != [URL]:
+    sys.stderr.write("curl-stub: unexpected call: " + " ".join(argv) + "\n")
+    sys.exit(64)
+if token not in (BOT, PAT):
+    sys.stderr.write("curl: (22) The requested URL returned error: 401\n")
+    sys.exit(22)
+if state["knobs"].get("pr_read_fails") or (
+    step and step == state["knobs"].get("pr_read_fails_for")
+):
+    sys.stderr.write("curl: (22) The requested URL returned error: 502\n")
+    sys.exit(22)
+print(json.dumps({
+    "number": int("__PR__"),
+    "head": {"sha": state["head_sha"]},
+    "base": {"ref": state["base_ref"]},
+    "body": state["body"],
+}))
+"""
+
 
 def _stamp(n):
     return f"2026-09-30T10:{n // 60:02d}:{n % 60:02d}Z"
@@ -631,6 +681,15 @@ class Stub:
             .replace("__NEW_HEAD__", NEW_HEAD)
         )
         gh.chmod(0o755)
+        curl = self.bin / "curl"
+        curl.write_text(
+            CURL_STUB.replace("__PYTHON__", sys.executable)
+            .replace("__REPO__", REPO)
+            .replace("__PR__", str(PR_NUMBER))
+            .replace("__BOT__", GITHUB_TOKEN)
+            .replace("__PAT__", PAT)
+        )
+        curl.chmod(0o755)
         # The steps back off with sleep between retries; the stub never
         # recovers, so waiting only slows the test.
         sleep = self.bin / "sleep"
@@ -1171,23 +1230,42 @@ def test_a_transient_disarm_failure_retries_as_the_bot(tmp_path):
 # 4. Fail closed: only OFF counts.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "fault, state, arm",
+    "fault, state, error_revoke, error_attempts",
     [
-        pytest.param({"bot_cannot_disarm": True}, "ON", "ON", id="still-on"),
-        pytest.param({"pr_view_fails": True}, "UNKNOWN", "OFF", id="unreadable"),
+        # The bot is refused every time, so the error revoke's own fallback,
+        # the PAT, is what finally takes the arm.
+        pytest.param(
+            {"bot_cannot_disarm": True},
+            "ON",
+            "success",
+            [GITHUB_TOKEN] * 3 + [PAT],
+            id="still-on",
+        ),
+        # The risk-tier revoke's disarm took, but no token can read the
+        # state, so nothing verifies OFF and the error revoke fails too.
+        pytest.param(
+            {"pr_view_fails": True},
+            "UNKNOWN",
+            "failure",
+            [GITHUB_TOKEN] * 3 + [PAT] * 3,
+            id="unreadable",
+        ),
     ],
 )
-def test_an_unverified_disarm_fails_closed(tmp_path, fault, state, arm):
+def test_an_unverified_disarm_fails_closed(
+    tmp_path, fault, state, error_revoke, error_attempts
+):
     stub = Stub(tmp_path)
     job = run_job(stub, Revision(RISKY, armed=True, **fault))
     assert job.outcome(REVOKE) == "failure", (
         f"an arm state of {state} passed as revoked:\n{job}"
     )
     assert f"after risk-tier revoke: {state}" in job.logs[REVOKE], str(job)
-    assert job.arm == arm, str(job)
-    assert job.disable_steps == [REVOKE, ERROR_REVOKE], (
-        f"the error revoke did not retry the disarm:\n{job}"
-    )
+    assert job.arm == "OFF", str(job)
+    assert job.disarm_attempts == [(REVOKE, GITHUB_TOKEN)] + [
+        (ERROR_REVOKE, token) for token in error_attempts
+    ], f"the error revoke did not retry the disarm:\n{job}"
+    assert job.outcome(ERROR_REVOKE) == error_revoke, str(job)
     assert RISK_LABEL not in job.labels, (
         f"the decision label announced a block the revoke could not verify:\n{job}"
     )
@@ -1537,10 +1615,13 @@ def _scenario_stand_down_the_bot_cannot_disarm(tmp_path, steps):
             lambda job: job.disarmed_by == [(ARM, PAT)],
             id="arm-disarm-without-bot-retries",
         ),
+        # Not `job.arm == "ON"`: the arm step then fails, and the error
+        # revoke's own PAT fallback removes the arm.
         pytest.param(
             _edit(ARM, "run", 'disarm_as "$GH_TOKEN"', "return 1"),
             _scenario_stand_down_the_bot_cannot_disarm,
-            lambda job: job.arm == "ON",
+            lambda job: (ARM, PAT) not in job.disarm_attempts
+            and job.outcome(ARM) == "failure",
             id="arm-disarm-without-the-pat-fallback",
         ),
     ],

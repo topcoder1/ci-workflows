@@ -33,6 +33,23 @@ arbitrary helper scripts; that's a different kind of repo.
   ("closes #1 and #2", "fixes #1, #2, #3.") clear. Runs the extracted step
   against 14 bodies and pins the wiring into the arm, quiet-period and
   error-revoke conditions.
+- `test_automerge_body_rebind.sh` — the arm step's re-read of the PR body
+  must return the exact text the gate hashed. A body edit fires no event a
+  caller subscribes to, so "Enable auto-merge" re-reads the live body and
+  stands down on any change. It read through `gh api --jq`, and gh's JSON
+  sanitizer rewrites control characters into caret notation, and with them
+  the literal `\u0000` a description quotes (read back as `\^@`, gh 2.89).
+  The gate hashed the event payload's exact text, so topcoder1/ipgeo_core#387
+  stood down as "changed" on 2026-11-22 with nobody editing it. Runs the
+  shipped gate and arm steps against a local API server, handing any `.body`
+  read through gh to the real gh CLI. Pins: an unchanged body arms whatever
+  it quotes (`\u0000`, an ESC colour sequence, a C1 character, an empty
+  description); an edit stands down and disarms, including one gh's
+  sanitizer would hide; a failed re-read fails closed; the token is sent,
+  never on a command line. A negative control plants the old gh read back
+  and shows it standing down through the real gh, while that gh still
+  rewrites control characters (probed first, so a gh upgrade that stops
+  rewriting them moves the expectation instead of failing the suite).
 - `test_classify_nocase.sh` — `classify.mjs` case-folds pattern matching for
   `blocked`/`sensitive` **only**. minimatch defaults to case-sensitive, so a
   lowercase `**/secrets*` missed `docs/SECRETS.md` and a production secrets
@@ -54,6 +71,28 @@ arbitrary helper scripts; that's a different kind of repo.
   (a minimatch comment) or not a string, in every class, `exclude:` list and
   `always_review`. Positive controls: a quoted `'!x'` still gets the negation
   guard's own message, and ordinary entries still load.
+- `test_classify_padded_paths.sh` / `test_codex_gate_padded_paths.sh` —
+  `classify.mjs` and `codex-gate.mjs` judge each changed path exactly as
+  named, and stop (a nonzero exit naming the path) on one that starts or ends
+  with whitespace. Both used to trim every path, so a real name was judged as
+  another: with `exclude: {sensitive: ['docs/customer/public.md']}`,
+  `docs/customer/public.md ` (a trailing space) classified `trivial` as the
+  excluded file; a file named ` ` in `docs/customer/` read as
+  `docs/customer/`, missing `sensitive:` and `always_review:` entries
+  `docs/customer/*`, so a 100-line diff skipped Codex as docs-only; and a
+  whitespace-only name was dropped unjudged. JavaScript's `trim()` also strips
+  a no-break space, U+2028, U+3000, a BOM, a tab and a CR, so all of them stop
+  too, and the message shows the padding escaped. Only empty lines are still
+  dropped, and whitespace at the end of a directory inside the path
+  (`docs/customer /x.md`) is a different path, judged by its own name. Every
+  caller fails closed on the stop in its existing shape, and
+  the classify test runs three of them end to end against a stub `gh`:
+  pr-classify's compute step and the automerge classifier lane exit nonzero
+  with no verdict, and safe-paths' tier 3 holds with `classifier-error`.
+  Controls: plain names with interior spaces, accents and an emoji; the
+  excluded file itself; blank lines; each script with its stop's test
+  replaced by `false`, which judges the padded names by their real names; and
+  each padded name's trimmed reading, which shows the escape.
 - `test_classify_rules_shape_guard.sh` — `classify.mjs` fails closed on the
   `risk-paths.yml` shapes that silently drop a gate while it exits 0. A top
   level that is not a plain mapping (`- blocked: […]` makes the whole file one
@@ -150,6 +189,25 @@ arbitrary helper scripts; that's a different kind of repo.
   (which reproduces the escape), checks that each whole name is gated and
   neither half is, hardcoded counts of guarded files-API calls however their
   `--jq` is quoted, with two negative controls, and the revoke step's trigger.
+- `test_codex_review_control_char_paths.sh` — the same guard in
+  `codex-review.yml`'s diff step, which hands the PR's paths to
+  `codex-gate.mjs` one per line. There a line-break name could skip a Codex
+  review the caller requires: `docs/customer/terms<LF>docs/guide.md` matches
+  an `always_review:` entry `docs/customer/**/*.md` whole, but its halves are
+  docs paths, so a 100-line diff skipped as docs-only, and a skipped review
+  still concludes the job `success`. The step now stops with an `::error::`
+  and a nonzero exit, writing no line count and no path list, on a changed
+  name or rename source holding a C0 control character or DEL. The test runs
+  the shipped step against a stub `gh` that applies the step's own `--jq`
+  with real jq, then the real `codex-gate.mjs`, on a line-break name, a tab
+  and U+001F in rename sources, DEL, and listings that fail partway, with or
+  without the marker. Controls: plain names with spaces, accents, an emoji
+  and the marker's own text reach the gate byte for byte and still run Codex
+  on an `always_review` match; a plain docs-only diff still skips; the step
+  with its guard's test replaced
+  by `false` reproduces the escape; the whole name is shown to match the glob
+  and neither half; a hardcoded count of guarded files-API calls, with two
+  negative controls.
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
@@ -266,6 +324,24 @@ arbitrary helper scripts; that's a different kind of repo.
   which stands down when the base changed, is held to the same cases. A
   negative control plants the old read back and shows the error-body case
   catching it.
+- `test_automerge_error_revoke_retry.sh` — claude-author-automerge's
+  gates-errored revoke, the always() step every gate failure in that
+  workflow relies on to remove a standing arm, retries its disarm. It tried
+  once (`|| true`, then a verify): one transient API error left the arm
+  standing, and the PR merged once its required checks passed, a revision no
+  gate had cleared (Codex pre-review round 3 of ci-workflows#312). Runs the
+  SHIPPED step against a stub PR that records each auto-merge event under
+  its token's actor, then the SHIPPED manual-hold step on the same PR. Pins:
+  a transient failure is retried as github-actions[bot] and leaves no hold;
+  a bot refused three times falls back to the caller's automerge_pat, whose
+  disarm the next run reads as a human's hold (accepted: a stranded PR costs
+  a click, a surviving arm an unchecked merge), with a warning saying so;
+  every disarm refused, or no PAT, fails the step; an unreadable state is
+  retried and never counts as OFF; a head pushed before or during the
+  retries stands the revoke down, the PAT included. Negative controls: the
+  pre-fix block keeps the arm, and mutants without the bot's retries,
+  without the fallback, rejecting only ON, or checking the head once are
+  each caught by their case.
 - `test_audit_required_checks.sh` — the required-checks audit's exit codes:
   `validate-required-checks.sh` exits 1 for a finding and for nothing else
   (3 = GitHub API error, 4 = internal error, 2 = usage), and
