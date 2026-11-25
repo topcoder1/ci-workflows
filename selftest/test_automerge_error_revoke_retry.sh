@@ -182,8 +182,13 @@ case "${1:-} ${2:-}" in
           exit 1
         fi
         if [ "$(cat "$d/arm")" != ON ]; then
-          echo "GraphQL: Pull request is not in the correct state to disable auto-merge (disablePullRequestAutoMerge)" >&2
-          exit 1
+          # Nothing armed: gh prints nothing and GitHub records no event.
+          # Measured 2026-11-25 on whois-api-llc/wxa-graph#845: its
+          # classifier revoke ran --disable-auto twice on the never-armed PR
+          # (runs 44286865985, 44287859932; no output in either log) and its
+          # timeline holds no auto-merge event, while the same timeline
+          # query lists them on PRs that were armed (#870, #878).
+          exit 0
         fi
         echo OFF > "$d/arm"
         record auto_merge_disabled
