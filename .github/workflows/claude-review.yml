@@ -1117,8 +1117,11 @@ jobs:
           path_to_claude_code_executable: ${{ steps.claude_install.outputs.executable }}
           # Allow bot-initiated PRs (dependabot, renovate). Without this the
           # action rejects all bot actors, turning this required check into a
-          # permanent block on every dep-bump PR.
-          allowed_bots: "dependabot,renovate"
+          # permanent block on every dep-bump PR. webcat-agents is the GitHub
+          # App whois-api-llc/wxa_webcat's agents act as (that repo's
+          # docs/operations/agent-github-identity.md); the action's match
+          # ignores case and the [bot] suffix.
+          allowed_bots: "dependabot,renovate,webcat-agents"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
