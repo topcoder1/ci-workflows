@@ -71,12 +71,12 @@ for required in 'ruff_select_declared()' 'RULESET_DECLARED=0' '::warning::'; do
 done
 
 # The warning must never be able to fail the job.
-if printf '%s' "$block" | grep -q '::error::'; then
+if grep -q '::error::' <<<"$block"; then
   fail "the rule-set check emits ::error:: — it must only ever ::warning::"
 else
   pass "rule-set check is advisory (no ::error::)"
 fi
-if printf '%s' "$block" | grep -Eq '^[[:space:]]*exit [1-9]'; then
+if grep -Eq '^[[:space:]]*exit [1-9]' <<<"$block"; then
   fail "the rule-set check exits non-zero — it must not fail the job"
 else
   pass "rule-set check cannot fail the job"

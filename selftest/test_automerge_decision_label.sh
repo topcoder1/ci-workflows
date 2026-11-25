@@ -224,7 +224,7 @@ else
   echo "✓ decision-label run block is interpolation-free (env vars only)"
 fi
 
-if grep -q 'labels?per_page=100' "$T/decision.sh" && grep -A1 'labels?per_page=100' "$T/decision.sh" | grep -q -- '--paginate'; then
+if grep -q 'labels?per_page=100' "$T/decision.sh" && grep -q -- '--paginate' <<<"$(grep -A1 'labels?per_page=100' "$T/decision.sh")"; then
   echo "✓ label read paginates (an arbiter label past the 30-label default page cannot read as absent)"
 else
   echo "✗ label read does not paginate"

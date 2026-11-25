@@ -67,10 +67,10 @@ matches() {
     [ -z "$pat" ] && continue
     # Mirror of the runtime .audit evidence-SQL skip (wxa_webcat#978):
     # root .audit/ paths are exempt from the SQL pattern ONLY.
-    if [ "$pat" = '.*\.sql$' ] && echo "$f" | grep -Eq '^\.audit/'; then
+    if [ "$pat" = '.*\.sql$' ] && grep -Eq '^\.audit/' <<<"$f"; then
       continue
     fi
-    if echo "$f" | grep -Eq "$pat"; then
+    if grep -Eq "$pat" <<<"$f"; then
       return 0
     fi
   done <<< "$patterns"
@@ -146,7 +146,7 @@ matches_in() {
   while IFS= read -r pat; do
     pat="${pat#"${pat%%[![:space:]]*}"}"
     [ -z "$pat" ] && continue
-    echo "$f" | grep -Eq "$pat" && return 0
+    grep -Eq "$pat" <<<"$f" && return 0
   done <<< "$list"
   return 1
 }
@@ -225,10 +225,10 @@ matches_no_maingo() {
     [ -z "$pat" ] && continue
     # Same .audit evidence-SQL skip as matches() — the exemption is
     # independent of the main.go opt-out filter.
-    if [ "$pat" = '.*\.sql$' ] && echo "$f" | grep -Eq '^\.audit/'; then
+    if [ "$pat" = '.*\.sql$' ] && grep -Eq '^\.audit/' <<<"$f"; then
       continue
     fi
-    echo "$f" | grep -Eq "$pat" && return 0
+    grep -Eq "$pat" <<<"$f" && return 0
   done <<< "$patterns_no_maingo"
   return 1
 }
@@ -280,7 +280,7 @@ matches_typo() {
   while IFS= read -r pat; do
     pat="${pat#"${pat%%[![:space:]]*}"}"
     [ -z "$pat" ] && continue
-    echo "$f" | grep -Eq "$pat" && return 0
+    grep -Eq "$pat" <<<"$f" && return 0
   done <<< "$patterns_typo"
   return 1
 }

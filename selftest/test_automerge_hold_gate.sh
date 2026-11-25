@@ -119,14 +119,14 @@ else
   echo "✓ manual-hold run block is interpolation-free (env vars only)"
 fi
 
-if grep -q 'labels?per_page=100' "$T/hold.sh" && grep -A1 'labels?per_page=100' "$T/hold.sh" | grep -q -- '--paginate'; then
+if grep -q 'labels?per_page=100' "$T/hold.sh" && grep -q -- '--paginate' <<<"$(grep -A1 'labels?per_page=100' "$T/hold.sh")"; then
   echo "✓ label read paginates (a hold label past the 30-label default page cannot read as absent)"
 else
   echo "✗ label read does not paginate — a hold label past the 30-label default page reads as absent"
   failed=1
 fi
 
-if grep -q 'timeline?per_page=100' "$T/hold.sh" && grep -A1 'timeline?per_page=100' "$T/hold.sh" | grep -q -- '--paginate'; then
+if grep -q 'timeline?per_page=100' "$T/hold.sh" && grep -q -- '--paginate' <<<"$(grep -A1 'timeline?per_page=100' "$T/hold.sh")"; then
   echo "✓ timeline read paginates"
 else
   echo "✗ timeline read does not paginate with an explicit page size"
@@ -238,7 +238,7 @@ expect_hold() {
 # expect_fail_closed <desc> <needle>
 expect_fail_closed() {
   local desc="$1" needle="$2"
-  if [ "$HOLD_RC" -ne 0 ] && echo "$HOLD_LOG" | grep -q "$needle"; then
+  if [ "$HOLD_RC" -ne 0 ] && grep -q "$needle" <<<"$HOLD_LOG"; then
     echo "✓ $desc"
   else
     echo "✗ $desc — want nonzero rc + '$needle'; got rc=$HOLD_RC. Output:"

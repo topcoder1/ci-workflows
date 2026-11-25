@@ -72,7 +72,7 @@ for step in "Resolve base prettier config" "Install prettier (isolated from PR h
 done
 # The check lane must consume the shared step outputs.
 lint_check=$(extract_run_block "prettier --check" "$LINT")
-if printf '%s' "$lint_check" | grep -q 'PRETTIER_BIN' \
+if grep -q 'PRETTIER_BIN' <<<"$lint_check" \
      && grep -q 'CONFIG_FILE: ${{ steps.baseconfig.outputs.config_file }}' "$LINT" \
      && grep -q 'PRETTIER_BIN: ${{ steps.ptool.outputs.prettier_bin }}' "$LINT"; then
   ok "the check step consumes the base config + isolated binary"
@@ -215,12 +215,12 @@ checkout_with=$(printf '%s\n' "$prettier_job" | awk '
 if [ -z "$checkout_with" ]; then
   bad "could not locate the prettier job's checkout step"
 else
-  if printf '%s' "$checkout_with" | grep -q 'persist-credentials: false'; then
+  if grep -q 'persist-credentials: false' <<<"$checkout_with"; then
     ok "prettier job checkout sets persist-credentials: false"
   else
     bad "the prettier job's checkout must set persist-credentials: false"
   fi
-  if printf '%s' "$checkout_with" | grep -qE '^[[:space:]]*token:'; then
+  if grep -qE '^[[:space:]]*token:' <<<"$checkout_with"; then
     bad "the prettier job's checkout must not pass a token: (no persisted credential)"
   else
     ok "prettier job checkout passes no token: (negative control)"
@@ -229,26 +229,26 @@ fi
 
 BODY=$(grep -vE '^[[:space:]]*#' "$LINT")
 # Isolated prettier install off-checkout; no in-checkout npm ci.
-if printf '%s' "$BODY" | grep -Eq 'RUNNER_TEMP' \
-     && printf '%s' "$BODY" | grep -q -- '--registry' \
-     && printf '%s' "$BODY" | grep -q -- '--ignore-scripts' \
-     && printf '%s' "$BODY" | grep -q 'NPM_CONFIG_USERCONFIG'; then
+if grep -Eq 'RUNNER_TEMP' <<<"$BODY" \
+     && grep -q -- '--registry' <<<"$BODY" \
+     && grep -q -- '--ignore-scripts' <<<"$BODY" \
+     && grep -q 'NPM_CONFIG_USERCONFIG' <<<"$BODY"; then
   ok "prettier CLI installed off-checkout (registry, --ignore-scripts, neutralized user-config)"
 else
   bad "the prettier install must be off-checkout with --registry, --ignore-scripts and NPM_CONFIG_USERCONFIG"
 fi
-if printf '%s' "$BODY" | grep -qF 'npm ci'; then
+if grep -qF 'npm ci' <<<"$BODY"; then
   bad "an npm ci runs in non-comment code — the old in-checkout install must be gone"
 else
   ok "no npm ci in non-comment code (the in-checkout install is gone)"
 fi
-if printf '%s' "$BODY" | grep -Eq '\[ -x node_modules/\.bin/prettier|PRETTIER=\(node_modules/\.bin/prettier'; then
+if grep -Eq '\[ -x node_modules/\.bin/prettier|PRETTIER=\(node_modules/\.bin/prettier' <<<"$BODY"; then
   bad "the head-controlled relative node_modules/.bin/prettier preference must be removed"
 else
   ok "no relative node_modules/.bin/prettier preference (head cannot supply the binary)"
 fi
 # The check invocation terminates options with -- before the target list.
-if printf '%s' "$lint_check" | grep -q -- '--check -- '; then
+if grep -q -- '--check -- ' <<<"$lint_check"; then
   ok "prettier --check terminates options with -- before the file/glob list"
 else
   bad "the prettier --check invocation must place -- before the target list"

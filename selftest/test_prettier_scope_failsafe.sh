@@ -60,10 +60,10 @@ fi
 
 for wf in "$LINT" "$AUTOFIX"; do
   blk=$(extract_listing_block "$wf")
-  if echo "$blk" | grep -q 'mode=glob'; then
+  if grep -q 'mode=glob' <<<"$blk"; then
     echo "✗ ${wf}: listing-failure branch falls open to mode=glob (must skip with mode=none)"
     failed=1
-  elif echo "$blk" | grep -q 'mode=none'; then
+  elif grep -q 'mode=none' <<<"$blk"; then
     echo "✓ ${wf}: listing failure skips with mode=none"
   else
     echo "✗ ${wf}: listing-failure branch sets neither mode=none nor mode=glob"

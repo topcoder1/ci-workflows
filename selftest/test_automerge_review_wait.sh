@@ -95,7 +95,7 @@ echo "✓ extracted quiet/findings step ($(wc -l < "$T/qf.sh" | tr -d ' ') lines
 # every attempt so the newest one can decide (R5), whatever GitHub's default
 # `latest` filter treats as latest.
 # shellcheck disable=SC2016  # ${HEAD_SHA} is the literal text searched for.
-if grep -F 'commits/${HEAD_SHA}/check-runs?filter=all&per_page=100' "$T/qf.sh" | grep -q -- '--paginate'; then
+if grep -q -- '--paginate' <<<"$(grep -F 'commits/${HEAD_SHA}/check-runs?filter=all&per_page=100' "$T/qf.sh")"; then
   echo "✓ S1 the check-runs read paginates and asks for every attempt"
 else
   echo "✗ S1 the check-runs read must use filter=all&per_page=100 with --paginate"

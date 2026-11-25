@@ -649,6 +649,20 @@ arbitrary helper scripts; that's a different kind of repo.
   `needs`) and seven script mutants (a failed read or a missing PR number
   read as draft, the exit status ignored, no shape check, no retry, no PR
   number check, no confirmation read) must each fail.
+- `test_selftests_no_pipe_into_grep_q.py` — no selftest pipes text into a
+  grep that stops reading at a match (`-q`, `-m`, `-l`). Under
+  `set -o pipefail`, which every selftest turns on, the writer can still be
+  writing when grep exits; it dies of SIGPIPE and the check fails though the
+  text is there. That turned the required `Tests (Python)` red on #315
+  (`test_bot_skip_commit_authorship.sh`: a 9,330-byte job text, matched at
+  byte 489), about once in 500 runs on CI's Ubuntu and never on macOS. Such
+  a grep reads a here-string instead: `grep -q PAT <<<"$x"`, or
+  `<<<"$(cmd)"` for a command's output. The scan reads shell, not lines:
+  quoted text and comments are blanked, so the CONTROL fixtures that hold the
+  old piped form as data pass, while a `"$(...)"` inside double quotes and
+  here-document bodies (the stubs) are read as code. Controls: snippets it
+  must flag and must leave alone, a file it cannot parse failing rather than
+  passing, and a floor on the number of scripts read.
 - `test_workflow_guards.py` — pytest wrapper that runs the `.sh`
   selftests above, so `tests-runner.yml`'s self-test path enforces them
   in CI.

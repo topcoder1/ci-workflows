@@ -62,7 +62,7 @@ fi
 
 # The gate must be opt-in: a default-on cap would fail PRs fleet-wide the day
 # it lands, in every repo that already has a long lessons bullet.
-if grep -A4 'max_test_backed_bullet_chars:' "$WF" | grep -q 'default: 0'; then
+if grep -q 'default: 0' <<<"$(grep -A4 'max_test_backed_bullet_chars:' "$WF")"; then
   echo "✓ input defaults to 0 (disabled unless a caller opts in)"
 else
   echo "✗ max_test_backed_bullet_chars must default to 0"

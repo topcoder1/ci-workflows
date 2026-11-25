@@ -171,7 +171,7 @@ $write_block" >"$T/w.log" 2>&1
     big='{"key1":"aaaaaaaaaaaaaaaaaaaa","key2":"bbbbbbbbbbbbbbbbbbbb","key3":"cccccccccccccccccccc"}'
     run_write "editorconfig honored under empty config" "$empty_cfg" \
       "$(printf 'root = true\n[*.json]\nindent_style = tab\n')" "$big"
-    if sed -n '2p' "$LAST_CK/t.json" | grep -q "$(printf '\t')"; then
+    if grep -q "$(printf '\t')" <<<"$(sed -n '2p' "$LAST_CK/t.json")"; then
       ok "empty config still honors head .editorconfig (tab indent) — parity with lint.yml"
     else
       bad "empty config did not honor .editorconfig — output diverges from lint.yml (--no-config regression)"
@@ -371,12 +371,12 @@ checkout_body=$(extract_step_block "Checkout PR head" "$AUTOFIX" | grep -vE '^[[
 if [ -z "$checkout_body" ]; then
   bad "could not locate the 'Checkout PR head' step (renamed?) — 3a cannot verify credential persistence"
 else
-  if printf '%s' "$checkout_body" | grep -q 'persist-credentials: false'; then
+  if grep -q 'persist-credentials: false' <<<"$checkout_body"; then
     ok "checkout step sets persist-credentials: false (comment-stripped — bites a flip to true)"
   else
     bad "the checkout step must set persist-credentials: false — the PAT/GITHUB_TOKEN must not sit in .git/config while head-reachable code runs"
   fi
-  if printf '%s' "$checkout_body" | grep -qE '^[[:space:]]*token:'; then
+  if grep -qE '^[[:space:]]*token:' <<<"$checkout_body"; then
     bad "the checkout step must not pass a token: — a persisted PAT in .git/config is the vulnerability; auth belongs only on the push extraheader"
   else
     ok "checkout step passes no token: (no persisted PAT — negative control)"
@@ -384,7 +384,7 @@ else
 fi
 
 # 3b. The push supplies the PAT itself via an inline extraheader (not persisted).
-if printf '%s' "$BODY" | grep -q 'http.extraheader'; then
+if grep -q 'http.extraheader' <<<"$BODY"; then
   ok "push supplies auth via http.extraheader (scoped to the push)"
 else
   bad "the push step must supply the PAT via an inline http.extraheader, since checkout no longer persists it"
@@ -394,10 +394,10 @@ fi
 #     registry and neutralized npm user-config, so head package.json/.npmrc
 #     are never consulted. And the head-controlled node_modules/.bin/prettier
 #     preference must be gone.
-if printf '%s' "$BODY" | grep -Eq 'RUNNER_TEMP' \
-     && printf '%s' "$BODY" | grep -q -- '--registry' \
-     && printf '%s' "$BODY" | grep -q -- '--ignore-scripts' \
-     && printf '%s' "$BODY" | grep -q 'NPM_CONFIG_USERCONFIG'; then
+if grep -Eq 'RUNNER_TEMP' <<<"$BODY" \
+     && grep -q -- '--registry' <<<"$BODY" \
+     && grep -q -- '--ignore-scripts' <<<"$BODY" \
+     && grep -q 'NPM_CONFIG_USERCONFIG' <<<"$BODY"; then
   ok "prettier CLI installed off-checkout with pinned registry, --ignore-scripts, neutralized npm user-config"
 else
   bad "the prettier install must run from \$RUNNER_TEMP with an explicit --registry, --ignore-scripts and NPM_CONFIG_USERCONFIG, so the head .npmrc/package.json are never read and no lifecycle scripts run"
@@ -406,16 +406,16 @@ fi
 # `PRETTIER=(node_modules/.bin/prettier)`) let a head postinstall plant the
 # binary. The isolated `$DIR/node_modules/.bin/prettier` (absolute, under
 # $RUNNER_TEMP) is fine — only the RELATIVE in-checkout form is the vector.
-if printf '%s' "$BODY" | grep -Eq '\[ -x node_modules/\.bin/prettier|PRETTIER=\(node_modules/\.bin/prettier'; then
+if grep -Eq '\[ -x node_modules/\.bin/prettier|PRETTIER=\(node_modules/\.bin/prettier' <<<"$BODY"; then
   bad "the head-controlled relative node_modules/.bin/prettier preference must be removed"
-elif printf '%s' "$BODY" | grep -q 'PRETTIER_BIN'; then
+elif grep -q 'PRETTIER_BIN' <<<"$BODY"; then
   ok "prettier binary comes from PRETTIER_BIN (isolated install), not a head node_modules"
 else
   bad "the write step must resolve the prettier binary from the isolated PRETTIER_BIN"
 fi
 # No `npm ci` at all (that was the in-checkout install), and every `npm install`
 # must be the isolated one (`--prefix "$DIR"`, where $DIR is under RUNNER_TEMP).
-if printf '%s' "$BODY" | grep -qF 'npm ci'; then
+if grep -qF 'npm ci' <<<"$BODY"; then
   bad "an npm ci runs somewhere in non-comment code — the old in-checkout install must be gone"
 else
   ok "no npm ci in non-comment code (the in-checkout install is gone)"
@@ -438,7 +438,7 @@ EOF
 fi
 
 # 3d. The changed-file list is passed after `--`.
-if printf '%s' "$BODY" | grep -q -- '--write -- ' || printf '%s' "$BODY" | grep -Eq -- '--write[[:space:]].*[[:space:]]--[[:space:]]'; then
+if grep -q -- '--write -- ' <<<"$BODY" || grep -Eq -- '--write[[:space:]].*[[:space:]]--[[:space:]]' <<<"$BODY"; then
   ok "prettier invocation terminates options with -- before the file/glob list"
 else
   bad "the prettier invocation must place '--' before the target list (a head file named --plugin=x must not reparse as a flag)"
@@ -469,7 +469,7 @@ else
   not_read=$(printf '%s\n' "$perm_block" | grep -vE "$entry_ok" || true)
   if [ -n "$not_read" ]; then
     bad "every autofix job scope must be read or none (the push uses the PAT, so GITHUB_TOKEN stays read-only); found: $(printf '%s' "$not_read" | head -n 1 | sed 's/^[[:space:]]*//')"
-  elif printf '%s\n' "$perm_block" | grep -qE "$contents_ok"; then
+  elif grep -qE "$contents_ok" <<<"$perm_block"; then
     ok "the job's GITHUB_TOKEN is read-only (every scope read or none; contents: read)"
   else
     bad "the autofix job must request contents: read (checkout needs it)"

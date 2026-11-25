@@ -131,12 +131,12 @@ else
   failed=1
 fi
 if grep -q 'name: Revoke auto-merge if gates errored' "$WF" \
-  && grep -A5 'name: Revoke auto-merge if gates errored' "$WF" | grep -q 'always()' \
+  && grep -q 'always()' <<<"$(grep -A5 'name: Revoke auto-merge if gates errored' "$WF")" \
   && grep -q "steps.classifier_verdict.outcome == 'failure'" "$WF" \
   && grep -q "steps.risk.outcome == 'failure'" "$WF" \
   && grep -q "steps.setup_node.outcome == 'failure'" "$WF" \
   && grep -q "steps.checkout.outcome == 'failure'" "$WF" \
-  && grep -A40 'name: Revoke auto-merge if gates errored' "$WF" | grep -q 'skipping stale revoke'; then
+  && grep -q 'skipping stale revoke' <<<"$(grep -A40 'name: Revoke auto-merge if gates errored' "$WF")"; then
   echo "✓ $WF revokes an existing arm under always() when a gating or prerequisite step errors (head-ownership-guarded)"
 else
   echo "✗ $WF error-revoke step missing, not covering gate + prerequisite failures, or lacking the head-ownership guard"
@@ -187,14 +187,14 @@ fi
 # Neither rename read may swallow its own failure. `2>/dev/null || echo ""`
 # turns an API blip into "this PR renames nothing", which is the escape the
 # scan exists to close — fail-open, silent, and invisible in the run log.
-if grep -A2 'previous_filename' <<<"$wf_code_all" | grep -qE '2>/dev/null|\|\| echo'; then
+if grep -qE '2>/dev/null|\|\| echo' <<<"$(grep -A2 'previous_filename' <<<"$wf_code_all")"; then
   echo "✗ a rename listing in $WF swallows its own failure — an API blip reads as 'no renames' (fail open)"
   failed=1
 else
   echo "✓ neither rename listing swallows a read failure"
 fi
 
-if grep -q 'labels?per_page=100' "$T/gate.sh" && grep -B1 -A1 'labels?per_page=100' "$T/gate.sh" | grep -q -- '--paginate'; then
+if grep -q 'labels?per_page=100' "$T/gate.sh" && grep -q -- '--paginate' <<<"$(grep -B1 -A1 'labels?per_page=100' "$T/gate.sh")"; then
   echo "✓ label read paginates (a hand-applied label past page 1 cannot read as absent)"
 else
   echo "✗ label read does not paginate — a risk label past the 30-label default page reads as absent"
@@ -382,7 +382,7 @@ expect_verdict() {
 # expect_fail_closed <desc> <needle>
 expect_fail_closed() {
   local desc="$1" needle="$2"
-  if [ "$GATE_RC" -ne 0 ] && echo "$GATE_LOG" | grep -q "$needle"; then
+  if [ "$GATE_RC" -ne 0 ] && grep -q "$needle" <<<"$GATE_LOG"; then
     echo "✓ $desc"
   else
     echo "✗ $desc — want nonzero rc + '$needle'; got rc=$GATE_RC. Output:"

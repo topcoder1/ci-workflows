@@ -107,7 +107,7 @@ echo "✓ extracted quiet/findings step ($(wc -l < "$T/qf.sh" | tr -d ' ') lines
 # ---------------------------------------------------------------------------
 # shellcheck disable=SC2016  # `${PR}` is the literal text being searched for in
 # the EXTRACTED workflow shell, not an expansion this test wants performed.
-if grep -F 'issues/${PR}/timeline?per_page=100' "$T/qf.sh" | grep -q -- '--paginate'; then
+if grep -q -- '--paginate' <<<"$(grep -F 'issues/${PR}/timeline?per_page=100' "$T/qf.sh")"; then
   echo "✓ S1 timeline anchor read paginates"
 else
   echo "✗ S1 timeline anchor read does not paginate — a ready event past page 1 anchors nothing"
