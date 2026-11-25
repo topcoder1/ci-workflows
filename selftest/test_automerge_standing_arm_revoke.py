@@ -16,7 +16,8 @@ Every case runs the job the way Actions does: the SHIPPED steps in order, each
 step's SHIPPED `if:`, `env:` and `run:` expressions evaluated against the event
 and the outputs of the steps before it, and each run block executed under
 `bash -e` against a gh stub that holds one pull request's state (files,
-labels, comments, timeline, the auto-merge arm) across the runs of a case.
+labels, comments, timeline, the auto-merge arm) across the runs of a case,
+and a curl stub that serves the arm step's body re-read from that state.
 Nothing here mirrors the workflow's wiring, so a condition, an env mapping or
 a token that drifts changes the verdict. The quiet gate is switched off
 (`findings_quiet_minutes: 0`): it never runs on a risky, unbypassed verdict,
@@ -576,6 +577,54 @@ finally:
         json.dump(state, f)
 """
 
+# ---------------------------------------------------------------------------
+# The curl stub: the arm step re-reads the PR body with curl and jq, never gh
+# (gh's JSON sanitizer rewrites control characters, so its copy of a body can
+# differ from the event payload's; selftest/test_automerge_body_rebind.sh). It
+# serves GET pulls/7 from the gh stub's state, fails on the same knobs the way
+# `curl -f` does (exit 22, nothing on stdout), and logs the call under the
+# token the step pipes in on stdin.
+# ---------------------------------------------------------------------------
+CURL_STUB = r"""#!__PYTHON__ -S
+import json
+import os
+import sys
+
+BOT, PAT = "__BOT__", "__PAT__"
+URL = "https://api.github.com/repos/__REPO__/pulls/__PR__"
+
+path = os.environ["STUB_STATE"]
+with open(path) as f:
+    state = json.load(f)
+argv = sys.argv[1:]
+step = os.environ.get("STUB_STEP", "")
+token = ""
+for line in sys.stdin.read().splitlines():
+    name, _, value = line.partition(":")
+    if name.lower() == "authorization" and value.strip().startswith("Bearer "):
+        token = value.strip()[len("Bearer "):]
+state["calls"].append({"step": step, "token": token, "argv": ["curl"] + argv})
+with open(path, "w") as f:
+    json.dump(state, f)
+if argv[-1:] != [URL]:
+    sys.stderr.write("curl-stub: unexpected call: " + " ".join(argv) + "\n")
+    sys.exit(64)
+if token not in (BOT, PAT):
+    sys.stderr.write("curl: (22) The requested URL returned error: 401\n")
+    sys.exit(22)
+if state["knobs"].get("pr_read_fails") or (
+    step and step == state["knobs"].get("pr_read_fails_for")
+):
+    sys.stderr.write("curl: (22) The requested URL returned error: 502\n")
+    sys.exit(22)
+print(json.dumps({
+    "number": int("__PR__"),
+    "head": {"sha": state["head_sha"]},
+    "base": {"ref": state["base_ref"]},
+    "body": state["body"],
+}))
+"""
+
 
 def _stamp(n):
     return f"2026-09-30T10:{n // 60:02d}:{n % 60:02d}Z"
@@ -631,6 +680,15 @@ class Stub:
             .replace("__NEW_HEAD__", NEW_HEAD)
         )
         gh.chmod(0o755)
+        curl = self.bin / "curl"
+        curl.write_text(
+            CURL_STUB.replace("__PYTHON__", sys.executable)
+            .replace("__REPO__", REPO)
+            .replace("__PR__", str(PR_NUMBER))
+            .replace("__BOT__", GITHUB_TOKEN)
+            .replace("__PAT__", PAT)
+        )
+        curl.chmod(0o755)
         # The steps back off with sleep between retries; the stub never
         # recovers, so waiting only slows the test.
         sleep = self.bin / "sleep"

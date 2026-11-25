@@ -33,6 +33,23 @@ arbitrary helper scripts; that's a different kind of repo.
   ("closes #1 and #2", "fixes #1, #2, #3.") clear. Runs the extracted step
   against 14 bodies and pins the wiring into the arm, quiet-period and
   error-revoke conditions.
+- `test_automerge_body_rebind.sh` — the arm step's re-read of the PR body
+  must return the exact text the gate hashed. A body edit fires no event a
+  caller subscribes to, so "Enable auto-merge" re-reads the live body and
+  stands down on any change. It read through `gh api --jq`, and gh's JSON
+  sanitizer rewrites control characters into caret notation, and with them
+  the literal `\u0000` a description quotes (read back as `\^@`, gh 2.89).
+  The gate hashed the event payload's exact text, so topcoder1/ipgeo_core#387
+  stood down as "changed" on 2026-11-22 with nobody editing it. Runs the
+  shipped gate and arm steps against a local API server, handing any `.body`
+  read through gh to the real gh CLI. Pins: an unchanged body arms whatever
+  it quotes (`\u0000`, an ESC colour sequence, a C1 character, an empty
+  description); an edit stands down and disarms, including one gh's
+  sanitizer would hide; a failed re-read fails closed; the token is sent,
+  never on a command line. A negative control plants the old gh read back
+  and shows it standing down through the real gh, while that gh still
+  rewrites control characters (probed first, so a gh upgrade that stops
+  rewriting them moves the expectation instead of failing the suite).
 - `test_classify_nocase.sh` — `classify.mjs` case-folds pattern matching for
   `blocked`/`sensitive` **only**. minimatch defaults to case-sensitive, so a
   lowercase `**/secrets*` missed `docs/SECRETS.md` and a production secrets

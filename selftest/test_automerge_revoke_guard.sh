@@ -222,8 +222,18 @@ fi
 echo "STUB: unexpected 'gh $*'" >&2
 exit 99
 STUB
+# The arm step re-reads the PR body with curl, never gh (gh's JSON sanitizer
+# rewrites control characters; selftest/test_automerge_body_rebind.sh). It
+# gets the empty body the gh stub serves; GATE_BODY_SHA is empty here, so
+# nothing is compared.
+cat > "$T/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null # the token header, piped in on stdin
+printf 'curl %s\n' "$*" >> "$STUB_DIR/gh.log"
+echo '{"body":""}'
+STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/sleep"
-chmod +x "$T/bin/gh" "$T/bin/sleep"
+chmod +x "$T/bin/gh" "$T/bin/curl" "$T/bin/sleep"
 
 EVENT_HEAD=$(printf 'c0ffee%034d' 1)
 NEW_HEAD=$(printf 'c0ffee%034d' 2)
