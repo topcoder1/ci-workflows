@@ -3,7 +3,9 @@
 //
 // Reads .github/risk-paths.yml from cwd (the caller repo's checkout), reads
 // the list of changed files from stdin (one path per line), and prints the
-// highest-priority risk class to stdout.
+// highest-priority risk class to stdout. Each path is matched exactly as
+// given: empty lines are skipped, and a path that starts or ends with
+// whitespace is a fatal error.
 //
 // Priority (high → low): blocked > sensitive > standard > safe_test > safe_deps > safe_config > trivial
 // `standard` is the implicit fallback for any file that doesn't match a
@@ -15,7 +17,8 @@
 //
 // Exit codes:
 //   0 — printed a class name on stdout
-//   1 — fatal error (missing rules file, parse error, etc.)
+//   1 — fatal error (missing rules file, parse error, a changed path padded
+//       with whitespace, etc.)
 //
 // Used by topcoder1/ci-workflows/.github/workflows/pr-classify.yml.
 
@@ -93,6 +96,14 @@ const EXCLUDE_KEY = 'exclude';
 function fail(msg) {
 	process.stderr.write(`classify.mjs: ${msg}\n`);
 	process.exit(1);
+}
+
+// A changed path for a message: JSON-quoted, with every whitespace character
+// but the plain space written as a \u escape. JSON.stringify escapes a tab or
+// CR, but prints a no-break space, U+2028 or a BOM as itself, which reads as a
+// space or as nothing in a log.
+function shownPath(s) {
+	return JSON.stringify(s).replace(/(?! )\s/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 // The source text and the parsed document stay in reach after parsing: the
@@ -462,10 +473,11 @@ for (const [where, list] of entryLists) {
 // itself. Rejecting it here, on every PR, makes it loud in the right place.
 //
 // Three kinds of string can never match either (found by the independent
-// review and Codex round 5 of this guard). Changed paths are read one per line
-// and trimmed before matching (see changedFiles below and codex-gate.mjs), so a
-// pattern with leading or trailing whitespace matches nothing — a '|' or '>'
-// block scalar keeps a trailing newline — and neither does one with a line
+// review and Codex round 5 of this guard). Changed paths are read one per line,
+// and one that starts or ends with whitespace stops the run before anything is
+// matched (see changedFiles below and codex-gate.mjs), so a pattern with
+// leading or trailing whitespace matches nothing — a '|' or '>' block scalar
+// keeps a trailing newline — and neither does one with a line
 // break inside, which is what a '|' block of several lines or a "\n" escape
 // becomes: ONE pattern, not a list. (A '>' block, or a plain or quoted scalar
 // wrapped over lines, folds its lines into spaces instead, and no value check
@@ -514,7 +526,8 @@ function checkEntry(p, where) {
 	if (p.trim() === '') {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') is empty or whitespace-only — ` +
-				`changed paths are trimmed before they are matched and empty ones dropped, so it ` +
+				`empty lines are dropped from the changed paths, and a changed path that starts or ends ` +
+				`with whitespace stops this script (and codex-gate.mjs) before any entry is matched, so it ` +
 				`matches no changed path while reading like a rule. A bare '- !' or '- !!str' parses ` +
 				`this way too: YAML reads the '!' as a tag, not text. Write the path you meant, quoted ` +
 				`("- '…'"), or delete the line.`
@@ -523,8 +536,9 @@ function checkEntry(p, where) {
 	if (p !== p.trim()) {
 		fail(
 			`${RULES_PATH}: entry ${JSON.stringify(p)} (under '${where}:') has leading or trailing whitespace — ` +
-				`changed paths are trimmed before they are matched, so none starts or ends with ` +
-				`whitespace and the entry matches no changed path. A '|' or '>' block scalar keeps a ` +
+				`a changed path that starts or ends with whitespace stops this script (and ` +
+				`codex-gate.mjs) before any entry is matched, so the entry matches no changed path. ` +
+				`A '|' or '>' block scalar keeps a ` +
 				`trailing newline this way. Write the pattern on one quoted line with nothing around ` +
 				`it ("- '…'").`
 		);
@@ -864,10 +878,30 @@ for (const cls of Object.keys(excludeRules)) {
 	}
 }
 
+// Each changed path is judged exactly as named. The paths arrive one per line,
+// and an EMPTY line is no path (the trailing newline of `echo`, or an empty
+// rename list), so those are dropped. A path that starts or ends with
+// whitespace stops the run instead of being trimmed. Trimming judged a real
+// name as another path: `docs/customer/public.md ` matched an exclude: entry
+// for `docs/customer/public.md`, `docs/customer/ ` (a file named ` `) missed
+// `docs/customer/*`, and a whitespace-only name vanished, each one reading
+// `trivial` where its own name gates. Such a name reads as another path to
+// anything that trims it and looks like that path to a reviewer, so it is not
+// classified at all (fail closed): every caller treats a nonzero exit as a gate
+// that did not pass. trim() takes in the tab, CR, no-break space, U+2028,
+// U+3000 and BOM too. Pinned by selftest/test_classify_padded_paths.sh.
 const changedFiles = readFileSync(0, 'utf8')
 	.split('\n')
-	.map((s) => s.trim())
-	.filter(Boolean);
+	.filter((s) => s !== '');
+for (const f of changedFiles) {
+	if (f !== f.trim()) {
+		fail(
+			`changed path ${shownPath(f)} starts or ends with whitespace — such a name reads as another ` +
+				`path to anything that trims it, and looks like that path to a reviewer, so it is not ` +
+				`classified (fail closed). Rename the file, or merge manually.`
+		);
+	}
+}
 
 if (changedFiles.length === 0) {
 	// No changed files = nothing to classify. Default to standard so the

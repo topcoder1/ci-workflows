@@ -150,6 +150,26 @@ arbitrary helper scripts; that's a different kind of repo.
   (which reproduces the escape), checks that each whole name is gated and
   neither half is, hardcoded counts of guarded files-API calls however their
   `--jq` is quoted, with two negative controls, and the revoke step's trigger.
+- `test_classify_padded_paths.sh` / `test_codex_gate_padded_paths.sh` —
+  `classify.mjs` and `codex-gate.mjs` judge each changed path exactly as
+  named, and stop (a nonzero exit naming the path) on one that starts or ends
+  with whitespace. Both used to trim every path, so a real name was judged as
+  another: with `exclude: {sensitive: ['docs/customer/public.md']}`,
+  `docs/customer/public.md ` (a trailing space) classified `trivial` as the
+  excluded file; a file named ` ` in `docs/customer/` read as
+  `docs/customer/`, missing `sensitive:` and `always_review:` entries
+  `docs/customer/*`, so a 100-line diff skipped Codex as docs-only; and a
+  whitespace-only name was dropped unjudged. JavaScript's `trim()` also strips
+  a no-break space, U+2028, U+3000, a BOM, a tab and a CR, so all of them stop
+  too, and the message shows the padding escaped. Only empty lines are still
+  dropped. Every caller fails closed on the stop in its existing shape, and
+  the classify test runs three of them end to end against a stub `gh`:
+  pr-classify's compute step and the automerge classifier lane exit nonzero
+  with no verdict, and safe-paths' tier 3 holds with `classifier-error`.
+  Controls: plain names with interior spaces, accents and an emoji; the
+  excluded file itself; blank lines; each script with its stop's test
+  replaced by `false`, which judges the padded names by their real names; and
+  each padded name's trimmed reading, which shows the escape.
 - `test_automerge_base_gate.sh` — auto-merge may only target the ref a
   branch ruleset actually protects. Rulesets are conventionally scoped to
   the default branch (`ref_name: ~DEFAULT_BRANCH`), so a feature-branch base
