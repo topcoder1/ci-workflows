@@ -43,13 +43,16 @@ Three layers:
    file.
 2. Synthetic snippets pin what the scanner flags and what it leaves alone, so
    a scanner that finds nothing fails here instead of passing the repo scan
-   vacuously.
+   vacuously. A fixture strings together awkward but real shapes (spliced
+   quotes, quotes inside "${...}", here-documents, awk, `case`), each
+   followed by a pipe that must be found on its line, so a lexer that
+   misreads one and recovers later fails too.
 3. The repo scan reads every selftest/*.sh and fails on each hit with its
    file, line and the rewrite. A floor on the file count and a named file keep
    a moved glob from passing. A pipe appended to each script, which the scan
-   must report at that script's last line, keeps a scanner that stopped
-   reading part of a file from passing (on a clean tree the repo scan alone
-   would find nothing either way).
+   must report at that script's last line, keeps a scanner that stops before
+   the end of a file from passing (on a clean tree the repo scan alone would
+   find nothing either way).
 
 Not covered, and none of it occurs today: grep behind a wrapper or a group
 (`timeout 5 grep`, `{ grep ...; }`), an option after a redirection
@@ -80,7 +83,7 @@ _HEREDOC = re.compile(
 # `command`. Runs on masked text, where only real operators survive.
 _PIPE_INTO_GREP = re.compile(
     r"(?<![|>])\|&?(?!\|)\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:command\s+)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|()<>`]|\$\([^()]*\))*[ \t]+)*(?:command[ \t]+)?"
     r"(?:\S*/)?[ef]?grep(?=[\s;&|)]|$)"
 )
 
@@ -315,6 +318,10 @@ FLAGGED = {
     "--files-without-match": "a | grep --files-without-match y\n",
     "a variable assignment before grep": "a | LC_ALL=C grep -q y\n",
     "command grep": "a | command grep -q y\n",
+    "quoted value with spaces": 'a | FOO="x y" grep -q z\n',
+    "assignment with a $(...) value": "a | X=$(b c) grep -q z\n",
+    "assignment with a quoted $(...) value": 'a | X="$(b c)" grep -q z\n',
+    "continued line after an assignment": "a | X='1' \\\n  grep -q z\n",
     "option after the pattern": "a | grep 'y' -q\n",
     "inside $(...)": "x=$(a | grep -q y && echo 1)\n",
     "inside a double-quoted $(...)": 'x="$(a | grep -q y && echo 1)"\n',
@@ -344,6 +351,12 @@ CLEAN = {
     "-- ends the options": "a | grep -- -q f\n",
     "-e with its pattern attached": "a | grep -eq f\n",
     "--group-separator takes the next word": "a | grep --group-separator -q y\n",
+    "case alternation that looks like an assignment": (
+        "case $kv in A=1|B=2) grep -q x f ;; esac\n"
+    ),
+    "assignment-only element, then ; grep": "a | FOO=1; grep -q y f\n",
+    "assignment-only element, newline, grep": "a | FOO=1\ngrep -q y f\n",
+    "bare command, newline, grep": "a | command\ngrep -q y f\n",
     "escaped bar": "echo \\| grep -q y\n",
     ">| redirect": "a >| grep -q\n",
     "apostrophe in a data here-document": "cat <<'EOF'\nit's\nEOF\nb='x | grep -q y'\n",
@@ -358,6 +371,35 @@ def test_scanner_flags(name):
 @pytest.mark.parametrize("name", sorted(CLEAN))
 def test_scanner_leaves_alone(name):
     assert stopping_grep_pipes(CLEAN[name]) == [], f"false hit: {CLEAN[name]!r}"
+
+
+# Awkward but real shapes, each followed by a pipe the scan must find: a lexer
+# that misreads one and recovers later would lose the pipe after it.
+AWKWARD = """\
+P='if printf '"'%s'"' "$b" | grep -q '"'plugins'"'; then'
+a | grep -q one
+x="${y#"pre"}"
+a | grep -q two
+check "t" "$(run 'a " b')"
+a | grep -q three
+python3 - <<'PY'
+print("it's | grep -q")
+PY
+a | grep -q four
+cat > "$T/bin/gh" <<STUB
+it's an unquoted body
+STUB
+a | grep -q five
+awk 'BEGIN { print "x | grep -q y" }' f
+a | grep -q six
+case "$v" in a|b) : ;; esac
+a | grep -q seven
+"""
+
+
+def test_scanner_recovers_after_awkward_shapes():
+    found = [line_no for line_no, _ in stopping_grep_pipes(AWKWARD)]
+    assert found == [2, 4, 6, 10, 14, 16, 18]
 
 
 def test_scanner_reports_the_line_of_the_pipe():
