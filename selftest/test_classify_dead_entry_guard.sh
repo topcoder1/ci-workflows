@@ -298,12 +298,14 @@ for where in sensitive safe_test exclude.sensitive always_review; do
     "(under '$where:') is a mapping, not a string" "$consequence"
 done
 
-# 6. Strings no changed path can match fail closed in every location. Changed
-#    paths are trimmed before matching, so a pattern with leading or trailing
-#    whitespace never matches; the double-quoted "…\n" entry is the value a
-#    '|' or '>' block scalar produces, on one line. A pattern that starts with
-#    '#' is a minimatch COMMENT and matches nothing — and it is where case 5's
-#    '- #scripts/deploy.sh' leads if its author quotes the line as written.
+# 6. Strings no changed path can match fail closed in every location. A changed
+#    path that starts or ends with whitespace stops the classifier before
+#    matching (selftest/test_classify_padded_paths.sh), so a pattern with
+#    leading or trailing whitespace never matches; the double-quoted "…\n"
+#    entry is the value a '|' or '>' block scalar produces, on one line. A
+#    pattern that starts with '#' is a minimatch COMMENT and matches nothing —
+#    and it is where case 5's '- #scripts/deploy.sh' leads if its author quotes
+#    the line as written.
 for where in sensitive safe_test exclude.sensitive always_review; do
   for raw in "' scripts/deploy.sh'" "'scripts/deploy.sh '" '"scripts/deploy.sh\n"'; do
     place "$where" "$raw"

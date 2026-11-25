@@ -359,7 +359,8 @@ printf 'blocked:\r  - %s\r' "'**/.env*'" > "$rules"
 expect_fail_closed "a file with classic-Mac (lone CR) line endings fails closed" \
   "a carriage return outside a CRLF line ending"
 # A CR INSIDE a pattern value is not dead, as ci-workflows#231 measured:
-# changed paths are split on '\n' and trimmed only at the ends, and git allows
+# changed paths are split on '\n' and never trimmed (one that starts or ends
+# with whitespace, a CR included, stops the classifier instead), and git allows
 # a CR in a file name. Written explicitly as a '"\r"' escape, it stays legal
 # and matches a changed path that holds the CR.
 printf '%s\n' "blocked:" "  - '**/.env*'" "sensitive:" '  - "cmd/**\rsrc/**"' > "$rules"

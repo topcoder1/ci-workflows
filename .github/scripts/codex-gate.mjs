@@ -6,6 +6,9 @@
 //                      codex-review.yml passes the list this way: Linux will
 //                      not start a process with a single environment string
 //                      over 128 KiB, and a large PR's list exceeds that.
+//                      Each path is taken exactly as given: empty lines are
+//                      skipped, and a path that starts or ends with
+//                      whitespace stops the gate (exit 1, fail closed).
 //   CHANGED_FILES      newline-separated list of files in the PR diff; read
 //                      only when CHANGED_FILES_FILE is unset or empty
 //                      (workflow YAML from before the file handoff still
@@ -18,6 +21,7 @@
 // Reads: .github/risk-paths.yml (caller's checkout) for `always_review:`
 //
 // Decision priority (highest wins):
+//   0. ANY changed path starts or ends with whitespace → exit 1, no decision
 //   1. ANY changed file matches always_review → RUN (bypass all escapes)
 //   2. lines < SIZE_THRESHOLD                 → SKIP "small diff"
 //   3. ALL changed files are docs/tests       → SKIP "docs/tests only"
@@ -42,14 +46,37 @@ try {
   ({ minimatch } = await import('minimatch'));
 }
 
+// Each path is judged exactly as named; only EMPTY lines are dropped. A path
+// that starts or ends with whitespace stops the gate instead of being trimmed:
+// trimmed, a file named ` ` in docs/customer/ read as `docs/customer/`, missed
+// an always_review entry `docs/customer/*`, and the diff skipped as docs-only.
+// Anything else that trims names would misread such a name the same way, so
+// the gate does not decide at all (fail closed): the job fails at this step,
+// as it does at the diff step past the listing cap. The same rule as
+// classify.mjs, which says more. Pinned by
+// selftest/test_codex_gate_padded_paths.sh.
 const files = (
   process.env.CHANGED_FILES_FILE
     ? readFileSync(process.env.CHANGED_FILES_FILE, 'utf8')
     : process.env.CHANGED_FILES || ''
 )
   .split('\n')
-  .map((s) => s.trim())
-  .filter(Boolean);
+  .filter((s) => s !== '');
+for (const f of files) {
+  if (f !== f.trim()) {
+    // JSON-quoted, with every whitespace character but the plain space as a
+    // \u escape: JSON.stringify prints a no-break space, U+2028 or a BOM as
+    // itself, which reads as a space or as nothing in a log.
+    const shown = JSON.stringify(f).replace(/(?! )\s/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    console.log(
+      `::error::codex-gate.mjs: changed path ${shown} starts or ends with whitespace, which anything ` +
+        `that trims names would read as another path, so the gate does not decide whether Codex runs ` +
+        `(fail closed). Give the file a name without that whitespace, or review manually; a PR that ` +
+        `renames or deletes such a file stops too.`
+    );
+    process.exit(1);
+  }
+}
 const lines = parseInt(process.env.DIFF_LINES || '0', 10);
 const threshold = parseInt(process.env.SIZE_THRESHOLD || '30', 10);
 

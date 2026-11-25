@@ -71,6 +71,28 @@ arbitrary helper scripts; that's a different kind of repo.
   (a minimatch comment) or not a string, in every class, `exclude:` list and
   `always_review`. Positive controls: a quoted `'!x'` still gets the negation
   guard's own message, and ordinary entries still load.
+- `test_classify_padded_paths.sh` / `test_codex_gate_padded_paths.sh` —
+  `classify.mjs` and `codex-gate.mjs` judge each changed path exactly as
+  named, and stop (a nonzero exit naming the path) on one that starts or ends
+  with whitespace. Both used to trim every path, so a real name was judged as
+  another: with `exclude: {sensitive: ['docs/customer/public.md']}`,
+  `docs/customer/public.md ` (a trailing space) classified `trivial` as the
+  excluded file; a file named ` ` in `docs/customer/` read as
+  `docs/customer/`, missing `sensitive:` and `always_review:` entries
+  `docs/customer/*`, so a 100-line diff skipped Codex as docs-only; and a
+  whitespace-only name was dropped unjudged. JavaScript's `trim()` also strips
+  a no-break space, U+2028, U+3000, a BOM, a tab and a CR, so all of them stop
+  too, and the message shows the padding escaped. Only empty lines are still
+  dropped, and whitespace at the end of a directory inside the path
+  (`docs/customer /x.md`) is a different path, judged by its own name. Every
+  caller fails closed on the stop in its existing shape, and
+  the classify test runs three of them end to end against a stub `gh`:
+  pr-classify's compute step and the automerge classifier lane exit nonzero
+  with no verdict, and safe-paths' tier 3 holds with `classifier-error`.
+  Controls: plain names with interior spaces, accents and an emoji; the
+  excluded file itself; blank lines; each script with its stop's test
+  replaced by `false`, which judges the padded names by their real names; and
+  each padded name's trimmed reading, which shows the escape.
 - `test_classify_rules_shape_guard.sh` — `classify.mjs` fails closed on the
   `risk-paths.yml` shapes that silently drop a gate while it exits 0. A top
   level that is not a plain mapping (`- blocked: […]` makes the whole file one
