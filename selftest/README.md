@@ -161,10 +161,11 @@ arbitrary helper scripts; that's a different kind of repo.
   name or rename source holding a C0 control character or DEL. The test runs
   the shipped step against a stub `gh` that applies the step's own `--jq`
   with real jq, then the real `codex-gate.mjs`, on a line-break name, a tab
-  and U+001F in rename sources, DEL, and listings that fail after printing
-  the marker. Controls: plain names with spaces, accents and an emoji reach
-  the gate byte for byte and still run Codex on an `always_review` match; a
-  plain docs-only diff still skips; the step with its guard's test replaced
+  and U+001F in rename sources, DEL, and listings that fail partway, with or
+  without the marker. Controls: plain names with spaces, accents, an emoji
+  and the marker's own text reach the gate byte for byte and still run Codex
+  on an `always_review` match; a plain docs-only diff still skips; the step
+  with its guard's test replaced
   by `false` reproduces the escape; the whole name is shown to match the glob
   and neither half; a hardcoded count of guarded files-API calls, with two
   negative controls.

@@ -31,8 +31,10 @@
 #   4. A listing that fails still fails closed when a marker was already
 #      printed: a marked changed-file listing followed by a failing rename
 #      listing, and either listing failing after printing the marker (a later
-#      page failing).
-#   5. Controls: plain names with spaces, accents and an emoji reach the gate
+#      page failing). With plain names too, either listing failing after a page
+#      printed fails closed, so a list cut short never reaches the gate.
+#   5. Controls: plain names with spaces, accents and an emoji, and one ending
+#      in the marker's own text (the match is on whole lines), reach the gate
 #      byte for byte, rename source included, and an always_review match among
 #      them still runs Codex; a plain docs-only diff still skips.
 #   6. Mutation controls: the step with the guard's test replaced by `false`
@@ -109,7 +111,7 @@ printf '%s' '[{"filename":"docs/customer/terms\ndocs/guide.md","status":"added"}
 printf '%s' '[{"filename":"docs/guide.md","previous_filename":"docs/old\tguide.md","status":"renamed"}]' > "$T/fx/tab-rename.json"
 printf '%s' '[{"filename":"docs/notes\u007f.md","status":"added"}]' > "$T/fx/del.json"
 printf '%s' '[{"filename":"docs/guide.md","previous_filename":"docs/old\u001fguide.md","status":"renamed"}]' > "$T/fx/us-rename.json"
-printf '%s' '[{"filename":"docs/customer/My Terms/résumé 🚀.md","status":"modified"},{"filename":"docs/guide.md","previous_filename":"docs/old guide.md","status":"renamed"}]' > "$T/fx/plain-gated.json"
+printf '%s' '[{"filename":"docs/customer/My Terms/résumé 🚀.md","status":"modified"},{"filename":"docs/x/CONTROL-CHARACTER-IN-PATH","status":"added"},{"filename":"docs/guide.md","previous_filename":"docs/old guide.md","status":"renamed"}]' > "$T/fx/plain-gated.json"
 printf '%s' '[{"filename":"docs/My Notes/résumé.md","status":"modified"},{"filename":"docs/guide.md","previous_filename":"docs/old guide.md","status":"renamed"}]' > "$T/fx/plain.json"
 
 # Under a plain `.filename` filter the line-break fixture prints two lines for
@@ -250,12 +252,18 @@ FAIL=changed-partial; run_step "$T/step.sh" newline
 expect_closed_any "a changed-name listing that fails after printing the marker still fails closed"
 FAIL=rename-partial;  run_step "$T/step.sh" tab-rename
 expect_closed_any "a rename listing that fails after printing the marker still fails closed"
+# The same with plain names: a failed page must not leave the gate a list cut
+# short. Both pass with the guard cut out; they pin the step's exits.
+FAIL=changed-partial; run_step "$T/step.sh" plain
+expect_closed_any "control: a changed-name listing that fails after printing plain names still fails closed"
+FAIL=rename-partial;  run_step "$T/step.sh" plain
+expect_closed_any "control: a rename listing that fails after printing plain names still fails closed"
 
 # 5. Controls.
 run_step "$T/step.sh" plain-gated
-printf '%s\n' 'docs/customer/My Terms/résumé 🚀.md' 'docs/guide.md' 'docs/old guide.md' > "$T/want-list"
+printf '%s\n' 'docs/customer/My Terms/résumé 🚀.md' 'docs/x/CONTROL-CHARACTER-IN-PATH' 'docs/guide.md' 'docs/old guide.md' > "$T/want-list"
 if [ "$RC" -eq 0 ] && [ -e "$T/rt/$handoff" ] && cmp -s "$T/want-list" "$T/rt/$handoff"; then
-  echo "✓ control: plain names with spaces, accents and an emoji reach the gate byte for byte, rename source included"
+  echo "✓ control: plain names with spaces, accents, an emoji and the marker's text reach the gate byte for byte, rename source included"
 else
   report_bad "control: plain names reach the gate byte for byte" \
     "want rc=0 and $T/rt/$handoff equal to $(tr '\n' '|' < "$T/want-list"); got rc=$RC, list '$( [ -e "$T/rt/$handoff" ] && tr '\n' '|' < "$T/rt/$handoff")'"
