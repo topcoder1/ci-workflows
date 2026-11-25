@@ -266,6 +266,24 @@ arbitrary helper scripts; that's a different kind of repo.
   which stands down when the base changed, is held to the same cases. A
   negative control plants the old read back and shows the error-body case
   catching it.
+- `test_automerge_error_revoke_retry.sh` — claude-author-automerge's
+  gates-errored revoke, the always() step every gate failure in that
+  workflow relies on to remove a standing arm, retries its disarm. It tried
+  once (`|| true`, then a verify): one transient API error left the arm
+  standing, and the PR merged once its required checks passed, a revision no
+  gate had cleared (Codex pre-review round 3 of ci-workflows#312). Runs the
+  SHIPPED step against a stub PR that records each auto-merge event under
+  its token's actor, then the SHIPPED manual-hold step on the same PR. Pins:
+  a transient failure is retried as github-actions[bot] and leaves no hold;
+  a bot refused three times falls back to the caller's automerge_pat, whose
+  disarm the next run reads as a human's hold (accepted: a stranded PR costs
+  a click, a surviving arm an unchecked merge), with a warning saying so;
+  every disarm refused, or no PAT, fails the step; an unreadable state is
+  retried and never counts as OFF; a head pushed before or during the
+  retries stands the revoke down, the PAT included. Negative controls: the
+  pre-fix block keeps the arm, and mutants without the bot's retries,
+  without the fallback, rejecting only ON, or checking the head once are
+  each caught by their case.
 - `test_audit_required_checks.sh` — the required-checks audit's exit codes:
   `validate-required-checks.sh` exits 1 for a finding and for nothing else
   (3 = GitHub API error, 4 = internal error, 2 = usage), and

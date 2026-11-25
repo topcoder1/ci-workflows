@@ -2916,6 +2916,29 @@ jobs:
       # trailer-only Claude PR with a failed checkout stays uncovered —
       # accepted residual). This step needs no workspace, so it runs
       # fine even when checkout itself failed.
+      #
+      # The disarm RETRIES, in safe-paths-automerge.yml's revoke shape: up
+      # to three attempts as github-actions[bot], each after a fresh head
+      # check and each verified, where only a read of OFF counts (UNKNOWN
+      # is not OFF); then the same as the automerge_pat user; else the step
+      # fails with an ::error::. It used to try once: one transient API
+      # error left the arm standing, the job went red, and the PR merged
+      # once its required checks passed, a revision no gate had cleared.
+      # Every gate failure above relies on this step (the 3000-file cap,
+      # unreadable rules, classifier errors, control-character names from
+      # ci-workflows#312), and nothing after it retries.
+      #
+      # Identity: the bot goes first, as in every revoke here, because the
+      # manual-hold step's Signal 2 ignores only github-actions[bot]
+      # disables. A disarm recorded as the PAT user reads as a HUMAN's
+      # durable hold, so a Claude PR it touched never re-arms on its own,
+      # even after its gates pass; a human must re-enable auto-merge or
+      # click-merge. The PAT stays as the fallback anyway, as in the arm
+      # step's disarm() and safe-paths' revoke: it only runs once three bot
+      # attempts failed to verify OFF (GITHUB_TOKEN has a rate limit of its
+      # own, per repository), and a stranded PR costs one click while a
+      # surviving arm merges an unchecked revision. Pinned by
+      # selftest/test_automerge_error_revoke_retry.sh.
       - name: Revoke auto-merge if gates errored
         if: |
           always() &&
@@ -2937,6 +2960,7 @@ jobs:
            steps.detect.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
+          FALLBACK_TOKEN: ${{ secrets.automerge_pat }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -2951,17 +2975,44 @@ jobs:
           # rare stale disarm self-heals on the next event). A read counts
           # only when it is a SHA: `gh api` prints an HTTP error's JSON body
           # to stdout even with --jq (gh 2.89), which read as a moved head.
-          now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
-          if [[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$now" != "$HEAD_SHA" ]; then
-            echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns gating; skipping stale revoke."
-            exit 0
-          fi
+          head_moved() {
+            local now
+            now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha 2>/dev/null) || now=""
+            if [[ "$now" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [ "$now" != "$HEAD_SHA" ]; then
+              echo "::notice::head moved (${HEAD_SHA} → ${now}) since this event — the newer head's run owns gating; skipping stale revoke."
+              return 0
+            fi
+            return 1
+          }
+          # Up to three attempts as the identity in $1, the head checked
+          # before each one (a push can land while they retry, and that
+          # head's own run may already have armed it). Only a read of OFF
+          # ends them: a swallowed --disable-auto failure and an unreadable
+          # state (UNKNOWN) both leave the PR possibly still armed.
+          disarm() {
+            local attempt
+            for attempt in 1 2 3; do
+              if head_moved; then
+                exit 0
+              fi
+              gh pr merge --disable-auto "$PR_URL" 2>&1 || true
+              state=$(gh pr view "$PR_URL" --json autoMergeRequest \
+                --jq 'if .autoMergeRequest == null then "OFF" else "ON" end' 2>/dev/null) || state="UNKNOWN"
+              echo "Auto-merge state after error revoke attempt ${attempt} as $1: $state"
+              [ "$state" = "OFF" ] && return 0
+              sleep 3
+            done
+            return 1
+          }
           echo "A gating step errored — revoking any existing auto-merge arm (fail closed for already-armed PRs)."
-          gh pr merge --disable-auto "$PR_URL" 2>&1 || true
-          state=$(gh pr view "$PR_URL" --json autoMergeRequest \
-            --jq 'if .autoMergeRequest == null then "OFF" else "ON" end')
-          echo "Auto-merge state after error revoke: $state"
-          if [ "$state" = "ON" ]; then
-            echo "::error::auto-merge still ON after --disable-auto — investigate"
+          state="UNKNOWN"
+          if ! disarm "github-actions[bot]" && [ -n "${FALLBACK_TOKEN:-}" ]; then
+            echo "::warning::auto-merge is still '$state' after 3 attempts as github-actions[bot] — retrying as the automerge_pat user (fail closed). A disarm that takes is recorded as that user, which the manual-hold step reads as a human's hold: this PR will not re-arm on its own; once the gate error is fixed, re-enable auto-merge or click-merge."
+            export GH_TOKEN="$FALLBACK_TOKEN"
+            disarm "the automerge_pat user" || true
+          fi
+          if [ "$state" != "OFF" ]; then
+            echo "::error::could not VERIFY auto-merge is off (state=$state) after every revoke attempt — a revision no gate cleared may merge once required checks pass. Disable auto-merge on this PR by hand."
             exit 1
           fi
+          echo "Auto-merge verified OFF."
