@@ -50,9 +50,10 @@ try {
 // that starts or ends with whitespace stops the gate instead of being trimmed:
 // trimmed, a file named ` ` in docs/customer/ read as `docs/customer/`, missed
 // an always_review entry `docs/customer/*`, and the diff skipped as docs-only.
-// Such a name reads as another path to anything that trims it, so the gate
-// does not decide at all (fail closed): this step fails, as the diff step does
-// past the listing cap. The same rule as classify.mjs. Pinned by
+// Anything else that trims names would misread such a name the same way, so
+// the gate does not decide at all (fail closed): the job fails at this step,
+// as it does at the diff step past the listing cap. The same rule as
+// classify.mjs, which says more. Pinned by
 // selftest/test_codex_gate_padded_paths.sh.
 const files = (
   process.env.CHANGED_FILES_FILE
@@ -68,9 +69,10 @@ for (const f of files) {
     // itself, which reads as a space or as nothing in a log.
     const shown = JSON.stringify(f).replace(/(?! )\s/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
     console.log(
-      `::error::codex-gate.mjs: changed path ${shown} starts or ends with whitespace — such a name ` +
-        `reads as another path to anything that trims it, and looks like that path to a reviewer, ` +
-        `so the gate does not decide whether Codex runs (fail closed). Rename the file, or review manually.`
+      `::error::codex-gate.mjs: changed path ${shown} starts or ends with whitespace, which anything ` +
+        `that trims names would read as another path, so the gate does not decide whether Codex runs ` +
+        `(fail closed). Give the file a name without that whitespace, or review manually; a PR that ` +
+        `renames or deletes such a file stops too.`
     );
     process.exit(1);
   }

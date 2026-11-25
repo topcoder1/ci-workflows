@@ -43,7 +43,8 @@
 #   5. Every workflow caller fails closed in its existing shape. The shipped
 #      steps run against a stub `gh` and the real classify.mjs on a PR adding
 #      `docs/customer/public.md `: pr-classify.yml's compute step exits nonzero
-#      and writes no class, so no risk:* label follows;
+#      and writes no class, so no new risk:* label is written (one from an
+#      earlier revision stays, as on any failure of that step);
 #      claude-author-automerge.yml's classifier lane exits nonzero and writes no
 #      verdict, so its error revoke disarms; safe-paths-automerge.yml's tier 3
 #      holds with `classifier-error`, which its revoke acts on. The same PR
@@ -284,7 +285,7 @@ lane_bad() {
 
 run_lane pr_classify padded
 if [ "$RC" -ne 0 ] && ! grep -q '^class=' "$T/out" && grep -q "$NEEDLE" <<<"$LOG"; then
-  echo "✓ pr-classify: a padded name stops the compute step with no class, so no risk:* label is set"
+  echo "✓ pr-classify: a padded name stops the compute step with no class, so no new risk:* label is written"
 else
   lane_bad "pr-classify: a padded name stops the compute step" "want a nonzero exit, no class= and '$NEEDLE' in the log; got rc=$RC, class='$(out_get class)'"
 fi

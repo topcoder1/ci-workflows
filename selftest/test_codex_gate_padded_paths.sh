@@ -19,8 +19,11 @@
 #
 # codex-gate.mjs now keeps each path as given, drops only EMPTY lines, and
 # stops (an ::error:: naming the path, exit 1, no should_run output) on any path
-# trim() would change, so codex-review.yml's "Codex cost gate" step goes red, as
-# its 3000-file cap does. Pins:
+# trim() would change, so codex-review.yml's Codex job fails at its "Codex cost
+# gate" step, as it fails at its diff step past the 3000-file cap. (Pinned
+# elsewhere: test_codex_review_rename_sources.sh holds that step's run line to
+# exactly `node "${CODEX_SCRIPTS:?}/codex-gate.mjs"`, so the exit reaches the
+# job.) Pins:
 #   1. It stops on each padded shape, before any rule: a whitespace-only name in
 #      an always_review directory, on a 100-line diff and on a 5-line one; a
 #      trailing space; a whitespace-only name at the root; a trailing CR; a

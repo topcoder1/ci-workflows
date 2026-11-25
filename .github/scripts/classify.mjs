@@ -885,20 +885,25 @@ for (const cls of Object.keys(excludeRules)) {
 // name as another path: `docs/customer/public.md ` matched an exclude: entry
 // for `docs/customer/public.md`, `docs/customer/ ` (a file named ` `) missed
 // `docs/customer/*`, and a whitespace-only name vanished, each one reading
-// `trivial` where its own name gates. Such a name reads as another path to
-// anything that trims it and looks like that path to a reviewer, so it is not
-// classified at all (fail closed): every caller treats a nonzero exit as a gate
-// that did not pass. trim() takes in the tab, CR, no-break space, U+2028,
-// U+3000 and BOM too. Pinned by selftest/test_classify_padded_paths.sh.
+// `trivial` where its own name gates. Anything else that trims names would
+// misread such a name the same way, so it is not classified at all (fail
+// closed): every caller treats a nonzero exit as a gate that did not pass. A
+// PR that renames or deletes such a file stops too, since its old name is
+// listed. trim() takes in the tab, CR, no-break space, U+2028, U+3000 and BOM
+// too. Whitespace at the end of a directory INSIDE the path
+// (`docs/customer /x.md`) is not stopped: that is a different path, nothing
+// trims inside a path, and it is judged by its own name. Pinned by
+// selftest/test_classify_padded_paths.sh.
 const changedFiles = readFileSync(0, 'utf8')
 	.split('\n')
 	.filter((s) => s !== '');
 for (const f of changedFiles) {
 	if (f !== f.trim()) {
 		fail(
-			`changed path ${shownPath(f)} starts or ends with whitespace — such a name reads as another ` +
-				`path to anything that trims it, and looks like that path to a reviewer, so it is not ` +
-				`classified (fail closed). Rename the file, or merge manually.`
+			`changed path ${shownPath(f)} starts or ends with whitespace, which anything that trims ` +
+				`names would read as another path, so it is not classified (fail closed). Give the ` +
+				`file a name without that whitespace, or merge manually; a PR that renames or deletes ` +
+				`such a file stops too.`
 		);
 	}
 }
