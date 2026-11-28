@@ -100,7 +100,7 @@ expect_gate() {
     failed=1
     return
   fi
-  if [ -n "$needle" ] && ! out_get reason | grep -qF -- "$needle"; then
+  if [ -n "$needle" ] && ! grep -qF -- "$needle" <<<"$(out_get reason)"; then
     echo "✗ $desc — reason '$(out_get reason)' lacks '$needle'"
     failed=1
     return

@@ -246,15 +246,15 @@ else
   fail "$MERGE_WF has no revoke job — an arm outlives the diff it was granted for"
 fi
 
-if printf '%s' "$merge_job" | grep -q 'needs: \[authorship\]' \
-  && printf '%s' "$merge_job" | grep -q "needs.authorship.outputs.non_bot == '0'"; then
+if grep -q 'needs: \[authorship\]' <<<"$merge_job" \
+  && grep -q "needs.authorship.outputs.non_bot == '0'" <<<"$merge_job"; then
   pass "$MERGE_WF refuses to ARM a PR carrying non-bot commits (fix at the source)"
 else
   fail "$MERGE_WF still arms without consulting commit authorship"
 fi
 
-if printf '%s' "$revoke_job" | grep -q 'needs: \[authorship, auto-merge\]' \
-  && printf '%s' "$revoke_job" | grep -q 'always()'; then
+if grep -q 'needs: \[authorship, auto-merge\]' <<<"$revoke_job" \
+  && grep -q 'always()' <<<"$revoke_job"; then
   pass "$MERGE_WF revoke is ordered after the arm (needs + always) — no arm/revoke race"
 else
   fail "$MERGE_WF revoke does not depend on the arming job — they can race"
@@ -263,7 +263,7 @@ fi
 # `needs:` only orders jobs WITHIN a run. Across runs, an older dependabot run
 # that classified the pre-push head can still reach the arm step after a human
 # push. Binding the arm to the classified SHA is what closes that.
-if printf '%s' "$merge_job" | grep -q -- '--match-head-commit'; then
+if grep -q -- '--match-head-commit' <<<"$merge_job"; then
   pass "$MERGE_WF binds the arm to the classified head SHA — a stale run cannot re-arm"
 else
   fail "$MERGE_WF arm is not bound to a head SHA — an overlapping run can arm a since-pushed PR"
@@ -271,7 +271,7 @@ fi
 
 # The arming job's `github.actor` gate is precisely what blinds it to the
 # human push. A revoke job reusing that gate would reproduce the bug.
-if printf '%s' "$revoke_job" | grep -q 'github.actor'; then
+if grep -q 'github.actor' <<<"$revoke_job"; then
   fail "$MERGE_WF revoke is gated on github.actor — blind to the human push, same as the arming job"
 else
   pass "$MERGE_WF revoke is not gated on github.actor"
@@ -279,7 +279,7 @@ fi
 
 # `gh pr merge --disable-auto` needs contents write. Without it the revoke
 # fails and the stale arm survives — the job would exist but not work.
-if printf '%s' "$revoke_job" | grep -q 'contents: write'; then
+if grep -q 'contents: write' <<<"$revoke_job"; then
   pass "$MERGE_WF revoke job has contents: write — --disable-auto can actually run"
 else
   fail "$MERGE_WF revoke job lacks contents: write — --disable-auto may fail, leaving the arm"
@@ -287,7 +287,7 @@ fi
 
 # Scope: this workflow only ever ARMS dependabot PRs, so it must not DISARM a
 # renovate PR — that arm belongs to safe-paths-automerge or a human.
-if printf '%s' "$revoke_job" | grep -q "user.login == 'dependabot\[bot\]'"; then
+if grep -q "user.login == 'dependabot\[bot\]'" <<<"$revoke_job"; then
   pass "$MERGE_WF revoke is scoped to dependabot — cannot revoke another workflow's arm"
 else
   fail "$MERGE_WF revoke fires on any [bot] PR — may revoke an arm it never granted"

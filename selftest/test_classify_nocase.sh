@@ -152,7 +152,7 @@ expect_fail_closed() {
   out=$(cd "$tmp/repo" && echo "README.md" | node "$tmp/classify.mjs" 2>&1)
   rc=$?
   set -e
-  if [ "$rc" -ne 0 ] && echo "$out" | grep -q "$needle"; then
+  if [ "$rc" -ne 0 ] && grep -q "$needle" <<<"$out"; then
     echo "✓ $desc"
   else
     echo "✗ $desc — expected nonzero exit + '$needle'; got rc=$rc:"

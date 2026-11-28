@@ -83,8 +83,7 @@ else
   echo "✗ S1 error-revoke does not include steps.quiet_findings.outcome == 'failure' — a crashed gate leaves a stale arm alive"
   failed=1
 fi
-if awk '/^      - name: Enable auto-merge$/,/^        env:/' "$WF" \
-    | grep -q "steps.quiet_findings.outputs.clear == '1'"; then
+if grep -q "steps.quiet_findings.outputs.clear == '1'" <<<"$(awk '/^      - name: Enable auto-merge$/,/^        env:/' "$WF")"; then
   echo "✓ S2 Enable auto-merge requires quiet_findings clear=1"
 else
   echo "✗ S2 Enable auto-merge does not require steps.quiet_findings.outputs.clear == '1' — the gate is decorative"
@@ -123,7 +122,7 @@ fi
 # paginates" — a list that enumerates three of four silently stops being that.
 for ep in 'pulls/${PR}/commits?per_page=100' 'pulls/${PR}/comments?per_page=100' \
           'issues/${PR}/comments?per_page=100' 'issues/${PR}/timeline?per_page=100'; do
-  if grep -F "$ep" "$T/qf.sh" | grep -q -- '--paginate'; then
+  if grep -q -- '--paginate' <<<"$(grep -F "$ep" "$T/qf.sh")"; then
     echo "✓ S4 anchor read paginates: $ep"
   else
     echo "✗ S4 anchor read does not paginate: $ep — activity past page 1 resets no clock"

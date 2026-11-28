@@ -206,7 +206,7 @@ else
 fi
 
 if grep -q 'pulls?state=open&per_page=100' "$T/base.sh" \
-  && grep -A1 'pulls?state=open&per_page=100' "$T/base.sh" | grep -q -- '--paginate'; then
+  && grep -q -- '--paginate' <<<"$(grep -A1 'pulls?state=open&per_page=100' "$T/base.sh")"; then
   echo "✓ open-PR listing paginates (a base branch past page 1 cannot read as unlisted)"
 else
   echo "✗ open-PR listing does not paginate with an explicit page size"
@@ -324,7 +324,7 @@ expect_gate() {
     failed=1
     return
   fi
-  if [ -n "$needle" ] && ! out_get reason | grep -q "$needle"; then
+  if [ -n "$needle" ] && ! grep -q "$needle" <<<"$(out_get reason)"; then
     echo "✗ $desc — reason '$(out_get reason)' does not mention '$needle'"
     failed=1
     return
@@ -335,7 +335,7 @@ expect_gate() {
 # expect_fail_closed <desc> <needle>
 expect_fail_closed() {
   local desc="$1" needle="$2"
-  if [ "$GATE_RC" -ne 0 ] && echo "$GATE_LOG" | grep -q "$needle"; then
+  if [ "$GATE_RC" -ne 0 ] && grep -q "$needle" <<<"$GATE_LOG"; then
     echo "✓ $desc"
   else
     echo "✗ $desc — want nonzero rc + '$needle'; got rc=$GATE_RC. Output:"

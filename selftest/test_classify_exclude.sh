@@ -125,7 +125,7 @@ expect_fail() { # expect_fail <yaml> <needle> <description>
   out=$(cd "$tmp/repo" && echo "README.md" | node "$tmp/classify.mjs" 2>&1)
   rc=$?
   set -e
-  if [ "$rc" -ne 0 ] && echo "$out" | grep -q "$2"; then
+  if [ "$rc" -ne 0 ] && grep -q "$2" <<<"$out"; then
     echo "✓ $3"
   else
     echo "✗ $3: expected nonzero exit + '$2', got rc=$rc:"

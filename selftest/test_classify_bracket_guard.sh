@@ -38,7 +38,7 @@ set +e
 out=$(cd "$tmp/repo" && echo "README.md" | node "$tmp/classify.mjs" 2>&1)
 rc=$?
 set -e
-if [ "$rc" -ne 0 ] && echo "$out" | grep -q "character class"; then
+if [ "$rc" -ne 0 ] && grep -q "character class" <<<"$out"; then
   echo "✓ bracket pattern fails closed with an actionable message"
 else
   echo "✗ expected nonzero exit + 'character class' in message; got rc=$rc:"
@@ -84,7 +84,7 @@ set +e
 out=$(cd "$tmp/repo" && echo "README.md" | node "$tmp/classify.mjs" 2>&1)
 rc=$?
 set -e
-if [ "$rc" -ne 0 ] && echo "$out" | grep -q "enumerate"; then
+if [ "$rc" -ne 0 ] && grep -q "enumerate" <<<"$out"; then
   echo "✓ intentional char class rejected with the enumeration hint"
 else
   echo "✗ expected nonzero exit + 'enumerate' in message for char-class pattern; got rc=$rc:"
@@ -105,7 +105,7 @@ set +e
 out=$(cd "$tmp/repo" && echo "README.md" | node "$tmp/classify.mjs" 2>&1)
 rc=$?
 set -e
-if [ "$rc" -ne 0 ] && echo "$out" | grep -q "always_review"; then
+if [ "$rc" -ne 0 ] && grep -q "always_review" <<<"$out"; then
   echo "✓ bracket pattern under always_review fails closed"
 else
   echo "✗ expected nonzero exit + 'always_review' in message; got rc=$rc:"

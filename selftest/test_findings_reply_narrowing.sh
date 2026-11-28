@@ -123,9 +123,9 @@ fi
 # (S1_SELECT being non-empty already proves the reply test is present, so
 # there is no separate substring check — one that only restated (b) invited a
 # reader to drop (b) as redundant, and (b) is the connector check.)
-if printf '%s' "$S1_SELECT" | grep -qF '(.user.login | type != "string" or endswith("[bot]"))' \
-   && printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+or[[:space:]]+\(\.user\.login \|' \
-   && ! printf '%s' "$S1_SELECT" | grep -qE 'in_reply_to_id == null[[:space:]]+and\b'; then
+if grep -qF '(.user.login | type != "string" or endswith("[bot]"))' <<<"$S1_SELECT" \
+   && grep -qE 'in_reply_to_id == null[[:space:]]+or[[:space:]]+\(\.user\.login \|' <<<"$S1_SELECT" \
+   && ! grep -qE 'in_reply_to_id == null[[:space:]]+and\b' <<<"$S1_SELECT"; then
   echo "✓ S1 narrowing is 'not a reply OR (non-string author OR bot)' — one login pipeline, joined by or"
 else
   echo "✗ S1 narrowing shape missing or rewritten — expected 'in_reply_to_id == null' joined by 'or' to ONE login pipeline '(.user.login | type != \"string\" or endswith(\"[bot]\"))'"
@@ -208,8 +208,8 @@ run_case 1 "R4 mixed thread flags (rc=1)" '[
   {"created_at":"'"$AFTER"'","user":{"login":"claude[bot]"},"path":"docker-compose.yml",
    "body":"The compose rationale is now inverted by the trust change."}]'
 R4_OUT=$OUT
-if printf '%s' "$R4_OUT" | grep -q "compose rationale" \
-   && ! printf '%s' "$R4_OUT" | grep -q "Fixed in 38774043"; then
+if grep -q "compose rationale" <<<"$R4_OUT" \
+   && ! grep -q "Fixed in 38774043" <<<"$R4_OUT"; then
   echo "✓ R4b report names the bot finding and omits the human replies"
 else
   echo "✗ R4b report must name the bot line and omit the replies:"
